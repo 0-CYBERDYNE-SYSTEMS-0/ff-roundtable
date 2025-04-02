@@ -1,14 +1,19 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 
 // Create a WebSocket connection
 export function useWebSocket() {
   const [socket, setSocket] = useState<WebSocket | null>(null);
+  const [reconnectAttempts, setReconnectAttempts] = useState(0);
+  const MAX_RECONNECT_ATTEMPTS = 5;
   
-  useEffect(() => {
+  // Create a function to establish WebSocket connection
+  const connectWebSocket = useCallback(() => {
     // Determine if we're using secure connection
     const isSecure = window.location.protocol === "https:";
     const wsProtocol = isSecure ? "wss:" : "ws:";
-    const wsUrl = `${wsProtocol}//${window.location.host}`;
+    const wsUrl = `${wsProtocol}//${window.location.host}/ws`;
+    
+    console.log("Attempting to connect to WebSocket at:", wsUrl);
     
     // Create WebSocket connection
     const ws = new WebSocket(wsUrl);
@@ -16,6 +21,8 @@ export function useWebSocket() {
     // Connection opened
     ws.addEventListener("open", (event) => {
       console.log("WebSocket connection established");
+      // Reset reconnect attempts on successful connection
+      setReconnectAttempts(0);
     });
     
     // Listen for errors
@@ -27,16 +34,26 @@ export function useWebSocket() {
     ws.addEventListener("close", (event) => {
       console.log("WebSocket connection closed", event.code, event.reason);
       
-      // Attempt to reconnect after 5 seconds if the connection was closed abnormally
-      if (event.code !== 1000) {
+      // Attempt to reconnect if the connection was closed abnormally
+      // and we haven't exceeded maximum reconnect attempts
+      if (event.code !== 1000 && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+        const timeout = Math.min(1000 * (2 ** reconnectAttempts), 30000); // Exponential backoff with 30s max
+        console.log(`Attempting to reconnect WebSocket in ${timeout/1000}s (attempt ${reconnectAttempts + 1}/${MAX_RECONNECT_ATTEMPTS})...`);
+        
         setTimeout(() => {
-          console.log("Attempting to reconnect WebSocket...");
-          setSocket(null);
-        }, 5000);
+          setReconnectAttempts(prev => prev + 1);
+          setSocket(null); // This will trigger a reconnection due to the dependency in useEffect
+        }, timeout);
       }
     });
     
     setSocket(ws);
+    
+    return ws;
+  }, [reconnectAttempts]);
+  
+  useEffect(() => {
+    const ws = connectWebSocket();
     
     // Clean up function
     return () => {
@@ -44,7 +61,7 @@ export function useWebSocket() {
         ws.close(1000, "Component unmounted");
       }
     };
-  }, []);
+  }, [connectWebSocket]);
   
   return socket;
 }
