@@ -4,6 +4,9 @@ import { Redirect, Route } from "wouter";
 import { useEffect, useState } from "react";
 import { useToast } from "@/hooks/use-toast";
 
+// Set to true to bypass subscription checks during development
+const DEVELOPMENT_MODE = true;
+
 export function ProtectedRoute({
   path,
   component: Component,
@@ -18,29 +21,36 @@ export function ProtectedRoute({
 
   useEffect(() => {
     if (user) {
-      // Check subscription status
-      setIsCheckingSubscription(true);
-      fetch("/api/subscription-status", {
-        credentials: "include"
-      })
-        .then(res => res.json())
-        .then(data => {
-          setIsSubscribed(data.subscribed);
-          setIsCheckingSubscription(false);
-          
-          if (!data.subscribed) {
-            toast({
-              title: "Subscription Required",
-              description: "You need an active subscription to access this feature.",
-              variant: "destructive",
-            });
-          }
+      if (DEVELOPMENT_MODE) {
+        // Skip subscription check in development mode
+        setIsSubscribed(true);
+        setIsCheckingSubscription(false);
+      } else {
+        // Check subscription status
+        setIsCheckingSubscription(true);
+        fetch("/api/subscription-status", {
+          credentials: "include"
         })
-        .catch(err => {
-          console.error("Error checking subscription:", err);
-          setIsCheckingSubscription(false);
-          setIsSubscribed(false);
-        });
+          .then(res => res.json())
+          .then(data => {
+            setIsSubscribed(data.subscribed);
+            setIsCheckingSubscription(false);
+            
+            if (!data.subscribed) {
+              toast({
+                title: "Subscription Required",
+                description: "You need an active subscription to access this feature.",
+                variant: "destructive",
+              });
+            }
+          })
+          .catch(err => {
+            console.error("Error checking subscription:", err);
+            setIsCheckingSubscription(false);
+            // In development mode, set as subscribed even if check fails
+            setIsSubscribed(DEVELOPMENT_MODE);
+          });
+      }
     } else if (!isLoading) {
       setIsCheckingSubscription(false);
     }
@@ -64,7 +74,8 @@ export function ProtectedRoute({
     );
   }
 
-  if (!isSubscribed) {
+  // In development mode, skip subscription check
+  if (!isSubscribed && !DEVELOPMENT_MODE) {
     return (
       <Route path={path}>
         <Redirect to="/subscribe" />

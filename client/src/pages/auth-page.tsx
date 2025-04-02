@@ -28,6 +28,9 @@ const registerSchema = insertUserSchema.extend({
 type LoginFormValues = z.infer<typeof loginSchema>;
 type RegisterFormValues = z.infer<typeof registerSchema>;
 
+// Development mode flag - set to true to enable quick login for dev
+const DEVELOPMENT_MODE = true;
+
 export default function AuthPage() {
   const { user, isLoading, loginMutation, registerMutation } = useAuth();
   
@@ -56,6 +59,16 @@ export default function AuthPage() {
   const onRegisterSubmit = async (values: RegisterFormValues) => {
     const { confirmPassword, ...userInfo } = values;
     registerMutation.mutate(userInfo);
+  };
+  
+  // Handle dev login - automatically fills login form and submits
+  const handleDevLogin = () => {
+    // Preset the login form with dev credentials
+    loginForm.setValue("username", "developer");
+    loginForm.setValue("password", "password");
+    
+    // Submit the form
+    loginForm.handleSubmit(onLoginSubmit)();
   };
   
   // Redirect if user is already logged in
@@ -140,6 +153,21 @@ export default function AuthPage() {
                     )}
                   </Button>
                 </CardFooter>
+                {DEVELOPMENT_MODE && (
+                  <div className="mt-4 pt-4 border-t border-gray-200">
+                    <Button 
+                      type="button" 
+                      variant="outline"
+                      className="w-full bg-green-50 hover:bg-green-100 border-green-200"
+                      onClick={handleDevLogin}
+                    >
+                      Quick Development Login
+                    </Button>
+                    <p className="text-xs text-center mt-2 text-gray-500">
+                      For development purposes only
+                    </p>
+                  </div>
+                )}
               </Card>
             </TabsContent>
             

@@ -9,10 +9,14 @@ import { useStripe, Elements, PaymentElement, useElements } from '@stripe/react-
 import { loadStripe } from '@stripe/stripe-js';
 import { Redirect } from 'wouter';
 import Header from "@/components/layout/Header";
+import { queryClient } from '@/lib/queryClient';
+
+// Development mode flag - set to true to bypass payment checks
+const DEVELOPMENT_MODE = true;
 
 // Check for Stripe public key
 const stripeKey = import.meta.env.VITE_STRIPE_PUBLIC_KEY;
-if (!stripeKey) {
+if (!stripeKey && !DEVELOPMENT_MODE) {
   console.error('Missing required Stripe key: VITE_STRIPE_PUBLIC_KEY');
 }
 
@@ -184,6 +188,32 @@ export default function SubscribePage() {
     );
   }
 
+  // Handle development mode subscription
+  const handleDevSubscription = async () => {
+    try {
+      // Mock a successful subscription by updating the user cache
+      const updatedUser = { ...user, subscriptionStatus: "active" };
+      queryClient.setQueryData(["/api/user"], updatedUser);
+      
+      toast({
+        title: "Development Mode",
+        description: "Subscription activated for development purposes",
+      });
+      
+      // Redirect to home page
+      setTimeout(() => {
+        window.location.href = '/';
+      }, 1000);
+    } catch (error) {
+      console.error("Dev subscription error:", error);
+      toast({
+        title: "Error",
+        description: "Failed to activate development subscription",
+        variant: "destructive",
+      });
+    }
+  };
+  
   // If no Stripe is available
   if (!stripePromise) {
     return (
@@ -193,15 +223,37 @@ export default function SubscribePage() {
           <Card className="w-full max-w-lg">
             <CardHeader>
               <CardTitle className="flex items-center">
-                <AlertTriangle className="text-red-500 mr-2 h-6 w-6" />
-                Configuration Error
+                {DEVELOPMENT_MODE ? (
+                  <>Development Mode</>
+                ) : (
+                  <>
+                    <AlertTriangle className="text-red-500 mr-2 h-6 w-6" />
+                    Configuration Error
+                  </>
+                )}
               </CardTitle>
               <CardDescription>
-                The payment system is not properly configured.
+                {DEVELOPMENT_MODE ? 
+                  "Use the development mode subscription option below." :
+                  "The payment system is not properly configured."}
               </CardDescription>
             </CardHeader>
             <CardContent>
-              <p>Stripe integration is not available. Please contact support.</p>
+              {DEVELOPMENT_MODE ? (
+                <div className="text-center">
+                  <Button 
+                    onClick={handleDevSubscription}
+                    className="bg-green-600 hover:bg-green-700 text-white"
+                  >
+                    Activate Development Subscription
+                  </Button>
+                  <p className="mt-4 text-sm text-gray-600">
+                    This will bypass the payment process for development purposes.
+                  </p>
+                </div>
+              ) : (
+                <p>Stripe integration is not available. Please contact support.</p>
+              )}
             </CardContent>
           </Card>
         </div>

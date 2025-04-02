@@ -73,6 +73,27 @@ export class MemStorage implements IStorage {
     this.sessionStore = new MemoryStore({
       checkPeriod: 86400000 // prune expired entries every 24h
     });
+    
+    // Create a development user for easy login
+    this.addDevelopmentUser();
+  }
+  
+  // Initialize a development user account
+  private addDevelopmentUser() {
+    // This is only for development purposes
+    const devUser: User = {
+      id: this.userId++,
+      username: 'developer',
+      email: 'dev@example.com',
+      password: '$scrypt.64.JYGxN44oZ4+EluDK73j2Fw==.GI3rTZlrCg1d0/8/YsUvUlnmg6M9u3Z69oRPdNTMWZcIyZw4a5FtWvX57Ik76KRdJ6hGsb3NzuM+3fptVXQDZQ==', // "password"
+      stripeCustomerId: null,
+      stripeSubscriptionId: null,
+      subscriptionStatus: 'active', // Auto-subscribed for development
+      createdAt: new Date()
+    };
+    
+    this.users.set(devUser.id, devUser);
+    console.log('Development user created: username=developer, password=password');
   }
 
   // User operations
