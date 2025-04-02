@@ -85,7 +85,7 @@ export class MemStorage implements IStorage {
       id: this.userId++,
       username: 'developer',
       email: 'dev@example.com',
-      password: '$scrypt.64.JYGxN44oZ4+EluDK73j2Fw==.GI3rTZlrCg1d0/8/YsUvUlnmg6M9u3Z69oRPdNTMWZcIyZw4a5FtWvX57Ik76KRdJ6hGsb3NzuM+3fptVXQDZQ==', // "password"
+      password: 'dev:password', // Simple dev format: "password"
       stripeCustomerId: null,
       stripeSubscriptionId: null,
       subscriptionStatus: 'active', // Auto-subscribed for development

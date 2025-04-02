@@ -10,6 +10,8 @@ import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Loader2 } from "lucide-react";
+import { queryClient } from "@/lib/queryClient";
+import { useToast } from "@/hooks/use-toast";
 
 const loginSchema = z.object({
   username: z.string().min(1, "Username is required"),
@@ -33,6 +35,7 @@ const DEVELOPMENT_MODE = true;
 
 export default function AuthPage() {
   const { user, isLoading, loginMutation, registerMutation } = useAuth();
+  const { toast } = useToast();
   
   const loginForm = useForm<LoginFormValues>({
     resolver: zodResolver(loginSchema),
@@ -61,14 +64,35 @@ export default function AuthPage() {
     registerMutation.mutate(userInfo);
   };
   
-  // Handle dev login - automatically fills login form and submits
-  const handleDevLogin = () => {
-    // Preset the login form with dev credentials
-    loginForm.setValue("username", "developer");
-    loginForm.setValue("password", "password");
-    
-    // Submit the form
-    loginForm.handleSubmit(onLoginSubmit)();
+  // Handle dev login - uses direct API endpoint for super simple login
+  const handleDevLogin = async () => {
+    try {
+      // Use the special development login endpoint
+      const response = await fetch("/api/dev-login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include"
+      });
+      
+      if (!response.ok) {
+        throw new Error(`Login failed: ${response.statusText}`);
+      }
+      
+      // Get the user data
+      const user = await response.json();
+      
+      // Update the cache
+      queryClient.setQueryData(["/api/user"], user);
+      
+      // Redirect to home (handled by our component)
+    } catch (error: any) {
+      console.error("Development login failed:", error);
+      toast({
+        title: "Development Login Failed",
+        description: error.message,
+        variant: "destructive",
+      });
+    }
   };
   
   // Redirect if user is already logged in

@@ -29,9 +29,37 @@ if (process.env.STRIPE_SECRET_KEY) {
   console.warn("No STRIPE_SECRET_KEY provided. Stripe functionality will be unavailable.");
 }
 
+// Development mode flag - set to true for easier authentication
+const DEVELOPMENT_MODE = true;
+
 export async function registerRoutes(app: Express): Promise<Server> {
   // Setup authentication routes
   setupAuth(app);
+  
+  // Special development login endpoint
+  if (DEVELOPMENT_MODE) {
+    app.post("/api/dev-login", async (req, res) => {
+      try {
+        // Try to get the development user
+        const devUser = await storage.getUserByUsername("developer");
+        
+        if (!devUser) {
+          return res.status(404).json({ message: "Development user not found" });
+        }
+        
+        // Log the user in directly
+        req.login(devUser, (err) => {
+          if (err) return res.status(500).json({ message: "Login failed", error: err.message });
+          return res.status(200).json(devUser);
+        });
+      } catch (error: any) {
+        console.error("Dev login error:", error);
+        res.status(500).json({ message: "Development login failed", error: error.message });
+      }
+    });
+    
+    console.log("Development login endpoint registered at /api/dev-login");
+  }
   
   const httpServer = createServer(app);
   

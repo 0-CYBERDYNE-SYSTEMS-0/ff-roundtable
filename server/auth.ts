@@ -2,10 +2,12 @@ import passport from "passport";
 import { Strategy as LocalStrategy } from "passport-local";
 import { Express } from "express";
 import session from "express-session";
-import { scrypt, randomBytes, timingSafeEqual } from "crypto";
-import { promisify } from "util";
+import { randomBytes } from "crypto";
 import { storage } from "./storage";
 import { User as SelectUser } from "@shared/schema";
+
+// Development flag - set to true for easy authentication during development
+const DEVELOPMENT_MODE = true;
 
 declare global {
   namespace Express {
@@ -13,19 +15,33 @@ declare global {
   }
 }
 
-const scryptAsync = promisify(scrypt);
-
-async function hashPassword(password: string) {
-  const salt = randomBytes(16).toString("hex");
-  const buf = (await scryptAsync(password, salt, 64)) as Buffer;
-  return `${buf.toString("hex")}.${salt}`;
+// Simple password hashing for development
+function hashPassword(password: string): string {
+  // In development mode, use a simple format that's easy to understand and debug
+  if (DEVELOPMENT_MODE) {
+    return `dev:${password}`;
+  }
+  
+  // In production, you would use a proper hashing algorithm here
+  // This is a placeholder that shouldn't be used in production
+  return `simple:${password}`;
 }
 
-async function comparePasswords(supplied: string, stored: string) {
-  const [hashed, salt] = stored.split(".");
-  const hashedBuf = Buffer.from(hashed, "hex");
-  const suppliedBuf = (await scryptAsync(supplied, salt, 64)) as Buffer;
-  return timingSafeEqual(hashedBuf, suppliedBuf);
+// Simple password comparison for development
+function comparePasswords(supplied: string, stored: string): boolean {
+  // For development mode users with the special prefix
+  if (stored.startsWith('dev:')) {
+    return supplied === stored.substring(4); // Skip the 'dev:' prefix
+  }
+  
+  // For simple format
+  if (stored.startsWith('simple:')) {
+    return supplied === stored.substring(7); // Skip the 'simple:' prefix
+  }
+  
+  // For any other format (shouldn't happen in development)
+  console.warn('Unexpected password format. Using direct comparison.');
+  return supplied === stored;
 }
 
 export function setupAuth(app: Express) {
@@ -115,6 +131,11 @@ export function setupAuth(app: Express) {
   app.use("/api/protected", (req, res, next) => {
     if (!req.isAuthenticated()) {
       return res.status(401).json({ message: "Unauthorized" });
+    }
+    
+    // In development mode, allow access regardless of subscription status
+    if (DEVELOPMENT_MODE) {
+      return next();
     }
     
     const user = req.user as SelectUser;
