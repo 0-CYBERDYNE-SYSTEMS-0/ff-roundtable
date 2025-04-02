@@ -9,6 +9,7 @@ import { format } from "date-fns";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { formatMessageDate } from "@/lib/file-utils";
+import ModelBadge from "./ModelBadge";
 
 interface ChatInterfaceProps {
   messages: Message[];
@@ -81,11 +82,14 @@ export default function ChatInterface({
   // Group messages by date for displaying date separators
   const messagesByDate: { [date: string]: Message[] } = {};
   messages.forEach(message => {
-    const date = formatMessageDate(message.timestamp);
-    if (!messagesByDate[date]) {
-      messagesByDate[date] = [];
+    // Ensure timestamp is a valid Date
+    if (message.timestamp) {
+      const date = formatMessageDate(message.timestamp);
+      if (!messagesByDate[date]) {
+        messagesByDate[date] = [];
+      }
+      messagesByDate[date].push(message);
     }
-    messagesByDate[date].push(message);
   });
 
   // Render welcome message if no messages
@@ -119,7 +123,7 @@ export default function ChatInterface({
   return (
     <div className="w-full md:w-1/2 flex flex-col h-full bg-white">
       {/* Chat Messages */}
-      <ScrollArea className="flex-1 p-4" viewportRef={messagesEndRef}>
+      <ScrollArea className="flex-1 p-4">
         {renderWelcomeMessage()}
         
         {Object.entries(messagesByDate).map(([date, dateMessages]) => (
@@ -159,12 +163,15 @@ export default function ChatInterface({
                   <div key={message.id} className="flex items-start mb-4">
                     <div className="flex-shrink-0 mr-3">
                       <Avatar className="h-8 w-8">
-                        <AvatarImage src={expert.avatarUrl} alt={expert.name} />
+                        <AvatarImage src={expert.avatarUrl || ""} alt={expert.name} />
                         <AvatarFallback>{expert.name.charAt(0)}</AvatarFallback>
                       </Avatar>
                     </div>
                     <div className="bg-neutral-200 rounded-lg p-3 max-w-[85%]">
-                      <p className="text-sm font-medium text-neutral-800">{expert.name} ({expert.role})</p>
+                      <div className="flex items-center justify-between">
+                        <p className="text-sm font-medium text-neutral-800">{expert.name} ({expert.role})</p>
+                        <ModelBadge modelId={expert.model} size="sm" />
+                      </div>
                       <div className="markdown-content text-sm mt-1">
                         <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
                       </div>

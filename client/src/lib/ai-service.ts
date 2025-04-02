@@ -151,7 +151,7 @@ export function getExpertName(role: string): string {
   return names[role] || `${role.split(' ')[0]} Expert`;
 }
 
-// Get model based on expert role
+// Get default model based on expert role
 export function getExpertModel(role: string): string {
   const models: Record<string, string> = {
     "Soil Scientist": "claude-3-sonnet-20240229",
@@ -166,4 +166,20 @@ export function getExpertModel(role: string): string {
   };
 
   return models[role] || "gpt-3.5-turbo";
+}
+
+// Get readable model display name
+export function getModelDisplayName(modelId: string): string {
+  const displayNames: Record<string, string> = {
+    "claude-3-haiku-20240307": "Claude 3 Haiku",
+    "claude-3-sonnet-20240229": "Claude 3 Sonnet",
+    "claude-3-opus-20240229": "Claude 3 Opus",
+    "gpt-3.5-turbo": "GPT-3.5 Turbo",
+    "gpt-4-0613": "GPT-4",
+    "meta-llama/llama-2-70b-chat": "Llama 2 (70B)",
+    "perplexity/llama-3.1-sonar-small-128k-online": "Llama 3.1 Sonar",
+    "gemini/flash-2-0": "Gemini Flash 2.0"
+  };
+
+  return displayNames[modelId] || modelId.split('/').pop() || modelId;
 }

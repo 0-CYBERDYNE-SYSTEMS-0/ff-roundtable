@@ -1,66 +1,97 @@
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { X } from "lucide-react";
+import { X, ChevronDown, Settings, Check } from "lucide-react";
 import { Expert } from "@shared/schema";
+import { 
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
+import { AIModel } from "@/types";
+import ModelBadge from "./ModelBadge";
 
-// Define available experts data
+// Define available experts data with default models
 const availableExperts = [
   {
     role: "Soil Scientist",
     description: "Specializes in soil health, composition analysis, and fertilization recommendations.",
-    model: "claude-3-sonnet-20240229",
+    defaultModel: AIModel.Claude3Sonnet,
     avatarUrl: "https://images.unsplash.com/photo-1560365163-3e8d64e762ef?ixlib=rb-1.2.1&auto=format&fit=crop&w=48&h=48&q=80"
   },
   {
     role: "Crop Specialist",
     description: "Expert in crop varieties, rotation strategies, and yield optimization techniques.",
-    model: "gpt-4-0613",
+    defaultModel: AIModel.GPT4,
     avatarUrl: "https://images.unsplash.com/photo-1530836369250-ef72a3f5cda8?ixlib=rb-1.2.1&auto=format&fit=crop&w=48&h=48&q=80"
   },
   {
     role: "Irrigation Engineer",
     description: "Specializes in water management systems, irrigation scheduling, and water conservation.",
-    model: "meta-llama/llama-2-70b-chat",
+    defaultModel: AIModel.Llama2,
     avatarUrl: "https://images.unsplash.com/photo-1584824188625-0d6dd2183f9e?ixlib=rb-1.2.1&auto=format&fit=crop&w=48&h=48&q=80"
   },
   {
     role: "Pest Management",
     description: "Expert in identifying and managing pests, diseases, and implementing IPM strategies.",
-    model: "claude-3-haiku-20240307",
+    defaultModel: AIModel.Claude3Haiku,
     avatarUrl: "https://images.unsplash.com/photo-1570913149827-d2ac84ab3f9a?ixlib=rb-1.2.1&auto=format&fit=crop&w=48&h=48&q=80"
   },
   {
     role: "Meteorologist",
     description: "Specializes in weather patterns, climate impacts on agriculture, and seasonal forecasting.",
-    model: "gpt-3.5-turbo",
+    defaultModel: AIModel.GPT35Turbo,
     avatarUrl: "https://images.unsplash.com/photo-1564939558297-fc396f18e5c7?ixlib=rb-1.2.1&auto=format&fit=crop&w=48&h=48&q=80"
   },
   {
     role: "File Creator",
     description: "Creates useful files like spreadsheets, reports, and scripts based on discussion needs.",
-    model: "gpt-4-0613",
+    defaultModel: AIModel.GPT4,
     avatarUrl: "https://images.unsplash.com/photo-1598300042247-d088f8ab3a91?ixlib=rb-1.2.1&auto=format&fit=crop&w=48&h=48&q=80"
   },
   {
     role: "Research Analyst",
     description: "Accesses and analyzes current agricultural research, market trends, and industry news.",
-    model: "perplexity/llama-3.1-sonar-small-128k-online",
+    defaultModel: AIModel.Llama3Sonar,
     avatarUrl: "https://images.unsplash.com/photo-1501504905252-473c47e087f8?ixlib=rb-1.2.1&auto=format&fit=crop&w=48&h=48&q=80"
   },
   {
     role: "Imagery Specialist",
     description: "Generates agricultural visualizations, crop imagery, and visual planning aids.",
-    model: "gemini/flash-2-0",
+    defaultModel: AIModel.GeminiFlash,
     avatarUrl: "https://images.unsplash.com/photo-1607000975631-8094b497b327?ixlib=rb-1.2.1&auto=format&fit=crop&w=48&h=48&q=80"
   },
   {
     role: "Moderator",
     description: "Manages conversation summaries and context, providing key insights and bullet points.",
-    model: "claude-3-opus-20240229",
+    defaultModel: AIModel.Claude3Opus,
     avatarUrl: "https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?ixlib=rb-1.2.1&auto=format&fit=crop&w=48&h=48&q=80"
   }
 ];
+
+// Get readable model names
+function getModelDisplayName(modelId: string): string {
+  switch(modelId) {
+    case AIModel.Claude3Haiku:
+      return "Claude 3 Haiku";
+    case AIModel.Claude3Sonnet:
+      return "Claude 3 Sonnet";
+    case AIModel.Claude3Opus:
+      return "Claude 3 Opus";
+    case AIModel.GPT35Turbo:
+      return "GPT-3.5 Turbo";
+    case AIModel.GPT4:
+      return "GPT-4";
+    case AIModel.Llama2:
+      return "Llama 2 (70B)";
+    case AIModel.Llama3Sonar:
+      return "Llama 3.1 Sonar";
+    case AIModel.GeminiFlash:
+      return "Gemini Flash 2.0";
+    default:
+      return modelId.split('/').pop() || modelId;
+  }
+}
 
 interface ExpertSelectorProps {
   onClose: () => void;
@@ -68,29 +99,53 @@ interface ExpertSelectorProps {
   selectedExperts: Expert[];
 }
 
+interface SelectedExpertState {
+  expertIndex: number;
+  model: string;
+}
+
 export default function ExpertSelector({ onClose, onAddExperts, selectedExperts }: ExpertSelectorProps) {
-  const [localSelectedExperts, setLocalSelectedExperts] = useState<Set<number>>(new Set());
+  const [localSelectedExperts, setLocalSelectedExperts] = useState<SelectedExpertState[]>([]);
   
   // Check if we already have some experts selected
   const expertRoles = new Set(selectedExperts.map(e => e.role));
   
   // Handle selecting an expert
   const toggleExpert = (index: number) => {
-    const newSelected = new Set(localSelectedExperts);
+    const existingIndex = localSelectedExperts.findIndex(e => e.expertIndex === index);
     
-    if (newSelected.has(index)) {
-      newSelected.delete(index);
+    if (existingIndex !== -1) {
+      // Remove expert
+      setLocalSelectedExperts(prev => 
+        prev.filter(item => item.expertIndex !== index)
+      );
     } else {
-      newSelected.add(index);
+      // Add expert with default model
+      setLocalSelectedExperts(prev => [
+        ...prev, 
+        { 
+          expertIndex: index, 
+          model: availableExperts[index].defaultModel 
+        }
+      ]);
     }
-    
-    setLocalSelectedExperts(newSelected);
+  };
+  
+  // Handle changing model for an expert
+  const changeExpertModel = (expertIndex: number, newModel: string) => {
+    setLocalSelectedExperts(prev => 
+      prev.map(expert => 
+        expert.expertIndex === expertIndex 
+          ? { ...expert, model: newModel } 
+          : expert
+      )
+    );
   };
   
   // Handle adding experts to conversation
   const handleAddExperts = () => {
-    const selectedExpertData = Array.from(localSelectedExperts).map(index => {
-      const expert = availableExperts[index];
+    const selectedExpertData = localSelectedExperts.map(({ expertIndex, model }) => {
+      const expert = availableExperts[expertIndex];
       
       // Generate a name based on the role
       let name;
@@ -129,7 +184,7 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
       return {
         name,
         role: expert.role,
-        model: expert.model,
+        model: model,
         avatarUrl: expert.avatarUrl
       };
     });
@@ -137,7 +192,18 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
     onAddExperts(selectedExpertData);
   };
   
-  const selectedCount = localSelectedExperts.size;
+  const selectedCount = localSelectedExperts.length;
+  
+  // Check if an expert is selected
+  const isExpertSelected = (index: number) => {
+    return localSelectedExperts.some(e => e.expertIndex === index);
+  };
+  
+  // Get currently selected model for an expert
+  const getSelectedModel = (expertIndex: number) => {
+    const found = localSelectedExperts.find(e => e.expertIndex === expertIndex);
+    return found ? found.model : availableExperts[expertIndex].defaultModel;
+  };
   
   return (
     <div className="absolute inset-0 bg-white bg-opacity-95 z-10 flex flex-col p-4">
@@ -148,22 +214,22 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
         </Button>
       </div>
       
-      <p className="mb-4">Choose 4-8 AI experts to join your agricultural roundtable discussion.</p>
+      <p className="mb-4">Choose 4-8 AI experts to join your agricultural roundtable discussion. Customize each expert's AI model based on your needs.</p>
       
       <ScrollArea className="flex-1">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           {availableExperts.map((expert, index) => {
-            const isSelected = localSelectedExperts.has(index);
+            const isSelected = isExpertSelected(index);
             const isAlreadyAdded = expertRoles.has(expert.role);
+            const selectedModel = getSelectedModel(index);
             
             return (
               <div
                 key={index}
-                className={`border rounded-lg p-3 cursor-pointer transition-colors ${
+                className={`border rounded-lg p-3 transition-colors ${
                   isSelected ? 'border-primary bg-primary-light bg-opacity-10' : 
                   isAlreadyAdded ? 'border-neutral-400 bg-neutral-100 opacity-60' : 'border-neutral-300 hover:border-primary'
                 }`}
-                onClick={() => !isAlreadyAdded && toggleExpert(index)}
               >
                 <div className="flex items-center mb-2">
                   <img 
@@ -171,10 +237,54 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
                     alt={expert.role} 
                     className="w-12 h-12 rounded-full mr-3"
                   />
-                  <div>
+                  <div className="flex-1">
                     <h3 className="font-medium">{expert.role}</h3>
-                    <p className="text-xs text-neutral-600">{expert.model.split('/').pop()}</p>
+                    <div className="flex items-center mt-1">
+                      <ModelBadge modelId={selectedModel} size="sm" />
+                      
+                      {!isAlreadyAdded && isSelected && (
+                        <Popover>
+                          <PopoverTrigger asChild>
+                            <Button variant="ghost" size="sm" className="h-6 p-0 ml-2">
+                              <Settings className="h-3.5 w-3.5 text-neutral-500" />
+                            </Button>
+                          </PopoverTrigger>
+                          <PopoverContent className="w-[220px] p-2" side="bottom">
+                            <div className="flex flex-col space-y-1">
+                              <div className="px-2 py-1.5 text-sm font-medium text-neutral-700">Select AI Model</div>
+                              {Object.values(AIModel).map((modelId) => (
+                                <Button
+                                  key={modelId}
+                                  variant="ghost"
+                                  className="justify-start px-2 py-1.5 h-auto text-sm"
+                                  onClick={() => changeExpertModel(index, modelId)}
+                                >
+                                  <div className="flex items-center w-full">
+                                    <div className="flex-1 flex items-center">
+                                      <ModelBadge modelId={modelId} size="sm" />
+                                    </div>
+                                    {selectedModel === modelId && (
+                                      <Check className="h-4 w-4 text-primary ml-2" />
+                                    )}
+                                  </div>
+                                </Button>
+                              ))}
+                            </div>
+                          </PopoverContent>
+                        </Popover>
+                      )}
+                    </div>
                   </div>
+                  
+                  {!isAlreadyAdded && (
+                    <Button 
+                      variant={isSelected ? "outline" : "default"} 
+                      size="sm"
+                      onClick={() => toggleExpert(index)}
+                    >
+                      {isSelected ? "Remove" : "Add"}
+                    </Button>
+                  )}
                 </div>
                 <p className="text-sm">{expert.description}</p>
                 
