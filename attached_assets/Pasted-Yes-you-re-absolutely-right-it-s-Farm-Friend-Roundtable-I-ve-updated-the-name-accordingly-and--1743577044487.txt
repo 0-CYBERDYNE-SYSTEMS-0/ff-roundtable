@@ -1,0 +1,138 @@
+Yes, you’re absolutely right—it’s **Farm Friend Roundtable**! I’ve updated the name accordingly and ensured it’s reflected throughout the document. Below is the corrected **Product Requirements Document (PRD) and Application Planning Document** for **Farm Friend Roundtable**, with the name consistently applied and no other changes made to the content. This provides a clear and accurate guide for the development team to build the application.
+
+---
+
+## Product Requirements Document (PRD) for Farm Friend Roundtable
+
+### Executive Summary
+**Farm Friend Roundtable** is an innovative AI-powered chat application designed to empower farmers and agricultural experts through interactive, multi-expert discussions. By leveraging OpenRouter’s diverse AI models, the app offers a unique roundtable of 4-8 AI experts, each with specialized roles, who interact with users and each other. The app features an unconventional, engaging user interface (UI) resembling a top-down roundtable, inspired by the Simon Says game. Key features include file uploads, rich text display, Markdown export of conversations, and a sidebar for summarizing key insights. The application will be monetized through a $10 monthly subscription via Stripe, and one expert will always have the ability to create and provide downloadable files (e.g., documents, code) upon user request.
+
+### Product Vision
+**Farm Friend Roundtable** aims to revolutionize agricultural discussions by providing farmers with access to a diverse set of AI experts that can collaborate, refine ideas, and provide actionable insights. The app’s unique roundtable format fosters a collaborative environment where farmers can engage with multiple perspectives, leveraging smaller AI models to achieve productivity gains through interaction and revision. The app’s architecture is designed to be scalable, secure, and user-friendly, with a focus on natural language interaction and ease of use.
+
+### Target Audience
+- **Primary Users**: Farmers and agricultural professionals seeking expert advice and collaborative discussions.
+- **Secondary Users**: Agricultural researchers, students, and enthusiasts interested in AI-driven insights.
+
+### Key Features
+1. **Roundtable of AI Experts**
+   - Users can select 4-8 AI experts from OpenRouter’s model library, each with distinct agricultural roles (e.g., soil expert, crop yield analyst).
+   - Experts interact with users and each other, refining ideas and providing collaborative insights.
+
+2. **Unconventional User Interface**
+   - A top-down roundtable view, with experts visually seated around a table, creating an immersive and engaging experience.
+   - Rich text display supporting tables, code blocks, bullet points, and more.
+
+3. **File Upload and Attachment Handling**
+   - Users can upload files (e.g., reports, images) to be included in the conversation context.
+   - Experts can reference uploaded files in their responses.
+
+4. **File Creation Tool**
+   - One designated expert (e.g., “FileCreator”) can generate files (e.g., `.txt`, `.pdf`, `.py`) based on user requests.
+   - Files are generated, stored temporarily, and provided via download links in the chat.
+
+5. **Web Search and Imagery Generation**
+   - One or two experts have access to the Perplexity API for internet searches, providing sourced information.
+   - One expert uses Google Gemini Flash 2.0 (via OpenRouter) to generate agricultural imagery upon request.
+
+6. **Moderator AI**
+   - Manages conversation summaries and context lengths, ensuring critical information is saved.
+   - Displays key insights and bullet points in a sidebar for quick reference.
+
+7. **Markdown Export**
+   - Users can export entire conversations as Markdown files for later use.
+
+8. **Subscription Model**
+   - A $10 monthly subscription via Stripe is required to access the app.
+   - Subscription status is checked upon login, and non-subscribed users are redirected to the subscription page.
+
+### Technical Requirements
+#### Frontend
+- **Framework**: React for dynamic UI components.
+- **3D Visualization**: Three.js for the roundtable UI.
+- **Rich Text Editor**: React-Quill for displaying formatted text (tables, code blocks, etc.).
+- **UI Components**: Material-UI for consistent styling and components.
+- **File Uploads**: Integrated file upload functionality using Multer (backend) and React components.
+
+#### Backend
+- **Server**: Node.js with Express for API handling.
+- **Database**: MongoDB for storing user data, conversation history, and subscription statuses.
+- **File Handling**: Multer for managing file uploads.
+- **Authentication**: JWT or OAuth for user authentication.
+- **Payment Processing**: Stripe API for handling subscriptions and payments.
+
+#### AI Integration
+- **AI Models**: OpenRouter API for accessing a wide range of models, including free and premium options.
+- **Web Search**: Perplexity API (via OpenRouter) for internet searches with citations.
+- **Imagery Generation**: Google Gemini Flash 2.0 (via OpenRouter) for generating agricultural images.
+- **Custom Instructions**: Each expert will have tailored system messages defining their roles and behaviors.
+
+#### Additional Tools
+- **Markdown Export**: markdown-it for converting conversations to Markdown format.
+- **Cloud Storage**: AWS S3 for temporary storage of generated files, with pre-signed URLs for secure downloads.
+
+### User Journey
+1. **Subscription and Login**
+   - Users sign up and subscribe via Stripe Checkout ($10/month).
+   - Upon login, subscription status is verified; non-subscribed users are redirected to subscribe.
+
+2. **Creating a Roundtable**
+   - Users select 4-8 AI experts from a list of available models, assigning roles via natural language (e.g., “Create a soil expert”).
+   - The app automatically configures the experts with appropriate system messages.
+
+3. **Interacting with Experts**
+   - Users engage in a group chat with the experts, who respond to queries and interact with each other.
+   - Users can upload files to provide additional context.
+   - Experts can request web searches or generate images as needed.
+
+4. **File Creation**
+   - Users can request the FileCreator expert to generate files (e.g., “Create a Python script for irrigation scheduling”).
+   - The expert generates the file, and a download link is provided in the chat.
+
+5. **Summarization and Insights**
+   - The moderator AI summarizes key points and displays them in a sidebar.
+   - Users can export the entire conversation as a Markdown file.
+
+### Development Phases
+1. **Setup Phase**
+   - Initialize React frontend and Node.js backend.
+   - Set up MongoDB for data storage.
+   - Integrate OpenRouter API for AI model access.
+
+2. **UI Development Phase**
+   - Implement the 3D roundtable UI using Three.js.
+   - Develop file upload```markdown
+ upload and rich text display components.
+   - Design the sidebar for insights and summaries.
+
+3. **AI Integration Phase**
+   - Configure experts with custom system messages.
+   - Integrate Perplexity API for web search and Gemini Flash 2.0 for imagery.
+   - Set up the FileCreator expert with file generation capabilities.
+
+4. **Feature Implementation Phase**
+   - Develop the moderator AI for summarization.
+   - Implement Markdown export functionality.
+   - Integrate Stripe for subscription management.
+
+5. **Testing and Deployment Phase**
+   - Conduct thorough testing for UI, AI interactions, file handling, and subscription flows.
+   - Deploy to a cloud platform (e.g., AWS) with scalability in mind.
+
+### Success Metrics
+- **User Engagement**: Number of active users and frequency of interactions.
+- **Subscription Retention**: Monthly subscription renewal rates.
+- **Feature Usage**: Frequency of file uploads, file creations, and Markdown exports.
+- **AI Performance**: Quality of expert responses and user satisfaction.
+
+### Risks and Mitigations
+- **AI Model Costs**: Monitor usage of premium models to manage costs; leverage free models where possible.
+- **Scalability**: Ensure cloud infrastructure can handle increasing user loads.
+- **Data Privacy**: Implement robust security measures for user data and API keys.
+
+### Conclusion
+**Farm Friend Roundtable** is a groundbreaking application that combines AI, agriculture, and collaborative discussion in a unique and engaging way. By following this PRD and planning document, the development team will have a clear roadmap to build a product that meets the needs of farmers and agricultural professionals while providing a scalable, secure, and monetizable platform.
+
+---
+
+This document now correctly reflects the name **Farm Friend Roundtable** throughout, ensuring clarity and professionalism. Let me know if you need any further adjustments!
