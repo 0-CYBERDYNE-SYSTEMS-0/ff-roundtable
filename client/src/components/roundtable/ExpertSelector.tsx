@@ -1,10 +1,15 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { X, ChevronDown, Settings, Check } from "lucide-react";
 import { Expert } from "@shared/schema";
 import { AIModel } from "@/types";
 import ModelBadge from "./ModelBadge";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 
 // Define available experts data with default models
 const availableExperts = [
@@ -101,28 +106,6 @@ interface SelectedExpertState {
 
 export default function ExpertSelector({ onClose, onAddExperts, selectedExperts }: ExpertSelectorProps) {
   const [localSelectedExperts, setLocalSelectedExperts] = useState<SelectedExpertState[]>([]);
-  const [activeDropdown, setActiveDropdown] = useState<number | null>(null);
-  
-  // Click outside handler to close dropdowns
-  useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
-      if (activeDropdown !== null) {
-        const dropdown = document.getElementById(`model-dropdown-${activeDropdown}`);
-        const button = document.getElementById(`model-button-${activeDropdown}`);
-        
-        if (dropdown && !dropdown.contains(event.target as Node) && 
-            button && !button.contains(event.target as Node)) {
-          dropdown.classList.add('hidden');
-          setActiveDropdown(null);
-        }
-      }
-    };
-    
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => {
-      document.removeEventListener('mousedown', handleClickOutside);
-    };
-  }, [activeDropdown]);
   
   // Check if we already have some experts selected
   const expertRoles = new Set(selectedExperts.map(e => e.role));
@@ -260,71 +243,34 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
                       <ModelBadge modelId={selectedModel} size="sm" />
                       
                       {!isAlreadyAdded && isSelected && (
-                        <div className="relative ml-2">
-                          <Button 
-                            id={`model-button-${index}`}
-                            variant="ghost" 
-                            size="sm" 
-                            className="h-6 p-0"
-                            onClick={() => {
-                              // Simple dropdown toggle approach instead of using Popover
-                              const dropdown = document.getElementById(`model-dropdown-${index}`);
-                              if (dropdown) {
-                                const isCurrentlyHidden = dropdown.classList.contains('hidden');
-                                
-                                // Close any other open dropdowns
-                                const allDropdowns = document.querySelectorAll('[id^="model-dropdown-"]');
-                                allDropdowns.forEach(el => el.classList.add('hidden'));
-                                
-                                // Toggle this dropdown
-                                if (isCurrentlyHidden) {
-                                  dropdown.classList.remove('hidden');
-                                  setActiveDropdown(index);
-                                } else {
-                                  dropdown.classList.add('hidden');
-                                  setActiveDropdown(null);
-                                }
-                              }
-                            }}
-                          >
-                            <Settings className="h-3.5 w-3.5 text-neutral-500" />
-                          </Button>
-                          
-                          <div 
-                            id={`model-dropdown-${index}`}
-                            className="absolute z-50 hidden right-0 mt-1 w-[220px] rounded-md shadow-lg bg-white ring-1 ring-black ring-opacity-5 overflow-hidden"
-                          >
-                            <div className="flex flex-col">
-                              <div className="px-3 py-2 text-sm font-medium text-neutral-700 bg-neutral-50 border-b">
-                                Select AI Model
-                              </div>
-                              <div className="max-h-64 overflow-y-auto">
-                                {Object.values(AIModel).map((modelId) => (
-                                  <button
-                                    key={modelId}
-                                    className={`w-full text-left px-3 py-2 text-sm hover:bg-neutral-100 flex items-center justify-between ${
-                                      selectedModel === modelId ? 'bg-primary-50' : ''
-                                    }`}
-                                    onClick={() => {
-                                      changeExpertModel(index, modelId);
-                                      // Hide dropdown after selection
-                                      const dropdown = document.getElementById(`model-dropdown-${index}`);
-                                      if (dropdown) {
-                                        dropdown.classList.add('hidden');
-                                        setActiveDropdown(null);
-                                      }
-                                    }}
-                                  >
-                                    <ModelBadge modelId={modelId} size="sm" />
-                                    {selectedModel === modelId && (
-                                      <Check className="h-4 w-4 text-primary ml-2" />
-                                    )}
-                                  </button>
-                                ))}
-                              </div>
+                        <Popover>
+                          <PopoverTrigger asChild>
+                            <Button variant="ghost" size="sm" className="h-6 p-0 ml-2">
+                              <Settings className="h-3.5 w-3.5 text-neutral-500" />
+                            </Button>
+                          </PopoverTrigger>
+                          <PopoverContent className="w-[200px] p-0" side="bottom">
+                            <div className="px-2 py-1.5 text-sm font-medium text-neutral-700 border-b">
+                              Select AI Model
                             </div>
-                          </div>
-                        </div>
+                            <div className="p-1 max-h-[300px] overflow-y-auto">
+                              {Object.values(AIModel).map((modelId) => (
+                                <button
+                                  key={modelId}
+                                  className={`w-full rounded text-left px-2 py-1.5 text-sm hover:bg-neutral-100 flex items-center justify-between ${
+                                    selectedModel === modelId ? 'bg-primary-50' : ''
+                                  }`}
+                                  onClick={() => changeExpertModel(index, modelId)}
+                                >
+                                  <ModelBadge modelId={modelId} size="sm" />
+                                  {selectedModel === modelId && (
+                                    <Check className="h-4 w-4 text-primary ml-2" />
+                                  )}
+                                </button>
+                              ))}
+                            </div>
+                          </PopoverContent>
+                        </Popover>
                       )}
                     </div>
                   </div>
