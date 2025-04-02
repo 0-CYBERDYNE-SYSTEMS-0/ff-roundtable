@@ -1,15 +1,10 @@
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { X, ChevronDown, Settings, Check } from "lucide-react";
+import { X, Check, Settings } from "lucide-react";
 import { Expert } from "@shared/schema";
 import { AIModel } from "@/types";
 import ModelBadge from "./ModelBadge";
-import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "@/components/ui/popover";
 
 // Define available experts data with default models
 const availableExperts = [
@@ -69,30 +64,6 @@ const availableExperts = [
   }
 ];
 
-// Get readable model names
-function getModelDisplayName(modelId: string): string {
-  switch(modelId) {
-    case AIModel.Claude3Haiku:
-      return "Claude 3 Haiku";
-    case AIModel.Claude3Sonnet:
-      return "Claude 3 Sonnet";
-    case AIModel.Claude3Opus:
-      return "Claude 3 Opus";
-    case AIModel.GPT35Turbo:
-      return "GPT-3.5 Turbo";
-    case AIModel.GPT4:
-      return "GPT-4";
-    case AIModel.Llama2:
-      return "Llama 2 (70B)";
-    case AIModel.Llama3Sonar:
-      return "Llama 3.1 Sonar";
-    case AIModel.GeminiFlash:
-      return "Gemini Flash 2.0";
-    default:
-      return modelId.split('/').pop() || modelId;
-  }
-}
-
 interface ExpertSelectorProps {
   onClose: () => void;
   onAddExperts: (experts: { name: string; role: string; model: string; avatarUrl: string }[]) => void;
@@ -106,6 +77,7 @@ interface SelectedExpertState {
 
 export default function ExpertSelector({ onClose, onAddExperts, selectedExperts }: ExpertSelectorProps) {
   const [localSelectedExperts, setLocalSelectedExperts] = useState<SelectedExpertState[]>([]);
+  const [openModelSelector, setOpenModelSelector] = useState<number | null>(null);
   
   // Check if we already have some experts selected
   const expertRoles = new Set(selectedExperts.map(e => e.role));
@@ -140,6 +112,13 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
           : expert
       )
     );
+    // Close the model selector after selection
+    setOpenModelSelector(null);
+  };
+  
+  // Toggle the model selector dropdown
+  const toggleModelSelector = (index: number) => {
+    setOpenModelSelector(curr => curr === index ? null : index);
   };
   
   // Handle adding experts to conversation
@@ -222,6 +201,7 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
             const isSelected = isExpertSelected(index);
             const isAlreadyAdded = expertRoles.has(expert.role);
             const selectedModel = getSelectedModel(index);
+            const isModelSelectorOpen = openModelSelector === index;
             
             return (
               <div
@@ -243,34 +223,42 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
                       <ModelBadge modelId={selectedModel} size="sm" />
                       
                       {!isAlreadyAdded && isSelected && (
-                        <Popover>
-                          <PopoverTrigger asChild>
-                            <Button variant="ghost" size="sm" className="h-6 p-0 ml-2">
-                              <Settings className="h-3.5 w-3.5 text-neutral-500" />
-                            </Button>
-                          </PopoverTrigger>
-                          <PopoverContent className="w-[200px] p-0" side="bottom">
-                            <div className="px-2 py-1.5 text-sm font-medium text-neutral-700 border-b">
-                              Select AI Model
+                        <div className="relative ml-2">
+                          <Button 
+                            variant="ghost" 
+                            size="sm" 
+                            className="h-6 p-0"
+                            onClick={() => toggleModelSelector(index)}
+                          >
+                            <Settings className="h-3.5 w-3.5 text-neutral-500" />
+                          </Button>
+                          
+                          {isModelSelectorOpen && (
+                            <div className="absolute z-50 right-0 mt-1 w-[200px] rounded-md shadow-lg bg-white ring-1 ring-black ring-opacity-5 overflow-hidden">
+                              <div className="flex flex-col">
+                                <div className="px-2 py-1.5 text-sm font-medium text-neutral-700 border-b">
+                                  Select AI Model
+                                </div>
+                                <div className="p-1 max-h-64 overflow-y-auto">
+                                  {Object.values(AIModel).map((modelId) => (
+                                    <button
+                                      key={modelId}
+                                      className={`w-full rounded text-left px-2 py-1.5 text-sm hover:bg-neutral-100 flex items-center justify-between ${
+                                        selectedModel === modelId ? 'bg-primary-50' : ''
+                                      }`}
+                                      onClick={() => changeExpertModel(index, modelId)}
+                                    >
+                                      <ModelBadge modelId={modelId} size="sm" />
+                                      {selectedModel === modelId && (
+                                        <Check className="h-4 w-4 text-primary ml-2" />
+                                      )}
+                                    </button>
+                                  ))}
+                                </div>
+                              </div>
                             </div>
-                            <div className="p-1 max-h-[300px] overflow-y-auto">
-                              {Object.values(AIModel).map((modelId) => (
-                                <button
-                                  key={modelId}
-                                  className={`w-full rounded text-left px-2 py-1.5 text-sm hover:bg-neutral-100 flex items-center justify-between ${
-                                    selectedModel === modelId ? 'bg-primary-50' : ''
-                                  }`}
-                                  onClick={() => changeExpertModel(index, modelId)}
-                                >
-                                  <ModelBadge modelId={modelId} size="sm" />
-                                  {selectedModel === modelId && (
-                                    <Check className="h-4 w-4 text-primary ml-2" />
-                                  )}
-                                </button>
-                              ))}
-                            </div>
-                          </PopoverContent>
-                        </Popover>
+                          )}
+                        </div>
                       )}
                     </div>
                   </div>
