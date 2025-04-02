@@ -1,6 +1,6 @@
 import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "http";
-import { storage } from "./storage";
+import { storage } from "./db-storage";
 import { setupAuth } from "./auth";
 import { callOpenRouterAPI, processUserMessage, generateInsights, callPerplexityAPI, generateSystemPrompt } from "./ai";
 import multer from "multer";

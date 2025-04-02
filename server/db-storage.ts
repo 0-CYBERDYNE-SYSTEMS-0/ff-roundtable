@@ -1,17 +1,19 @@
 import { users, type User, type InsertUser, conversations, type Conversation, type InsertConversation, experts, type Expert, type InsertExpert, messages, type Message, type InsertMessage, files, type File, type InsertFile, insights, type Insight, type InsertInsight } from "@shared/schema";
+import * as expressSession from "express-session";
 import createMemoryStore from "memorystore";
-import connectPg from "connect-pg-simple";
-import { Pool } from "pg";
+import connectPgSimple from "connect-pg-simple";
+import pg from "pg";
 import { neon, neonConfig } from '@neondatabase/serverless';
 import { drizzle } from "drizzle-orm/neon-serverless";
 import { eq, desc } from "drizzle-orm";
-import * as expressSession from "express-session";
 
-const MemoryStore = createMemoryStore(expressSession);
-const PostgresSessionStore = connectPg(expressSession);
+const { Pool } = pg;
 
-// modify the interface with any CRUD methods
-// you might need
+// Create session stores
+const MemoryStore = createMemoryStore(expressSession.default || expressSession);
+const PostgresSessionStore = connectPgSimple(expressSession.default || expressSession);
+
+// Storage interface
 export interface IStorage {
   // User operations
   getUser(id: number): Promise<User | undefined>;
@@ -45,6 +47,7 @@ export interface IStorage {
   sessionStore: expressSession.Store;
 }
 
+// In-memory storage implementation
 export class MemStorage implements IStorage {
   private users: Map<number, User>;
   private conversations: Map<number, Conversation>;
@@ -53,7 +56,7 @@ export class MemStorage implements IStorage {
   private files: Map<number, File>;
   private insights: Map<number, Insight>;
   
-  sessionStore: session.SessionStore;
+  sessionStore: expressSession.Store;
   private userId: number;
   private conversationId: number;
   private expertId: number;
@@ -79,6 +82,8 @@ export class MemStorage implements IStorage {
     this.sessionStore = new MemoryStore({
       checkPeriod: 86400000 // prune expired entries every 24h
     });
+    
+    console.log("Using in-memory storage");
   }
 
   // User operations
@@ -139,7 +144,12 @@ export class MemStorage implements IStorage {
   async createConversation(insertConversation: InsertConversation): Promise<Conversation> {
     const id = this.conversationId++;
     const now = new Date();
-    const conversation: Conversation = { ...insertConversation, id, createdAt: now };
+    const conversation: Conversation = { 
+      ...insertConversation, 
+      id, 
+      createdAt: now,
+      title: insertConversation.title || "New Conversation" 
+    };
     this.conversations.set(id, conversation);
     return conversation;
   }
@@ -151,13 +161,21 @@ export class MemStorage implements IStorage {
   async getUserConversations(userId: number): Promise<Conversation[]> {
     return Array.from(this.conversations.values())
       .filter(conversation => conversation.userId === userId)
-      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+      .sort((a, b) => {
+        const timeA = a.createdAt?.getTime() || 0;
+        const timeB = b.createdAt?.getTime() || 0;
+        return timeB - timeA;
+      });
   }
   
   // Expert operations
   async createExpert(insertExpert: InsertExpert): Promise<Expert> {
     const id = this.expertId++;
-    const expert: Expert = { ...insertExpert, id };
+    const expert: Expert = { 
+      ...insertExpert, 
+      id,
+      avatarUrl: insertExpert.avatarUrl || null
+    };
     this.experts.set(id, expert);
     return expert;
   }
@@ -171,7 +189,13 @@ export class MemStorage implements IStorage {
   async createMessage(insertMessage: InsertMessage): Promise<Message> {
     const id = this.messageId++;
     const now = new Date();
-    const message: Message = { ...insertMessage, id, timestamp: now };
+    const message: Message = { 
+      ...insertMessage, 
+      id, 
+      timestamp: now,
+      userId: insertMessage.userId || null,
+      expertId: insertMessage.expertId || null
+    };
     this.messages.set(id, message);
     return message;
   }
@@ -179,7 +203,11 @@ export class MemStorage implements IStorage {
   async getConversationMessages(conversationId: number): Promise<Message[]> {
     return Array.from(this.messages.values())
       .filter(message => message.conversationId === conversationId)
-      .sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+      .sort((a, b) => {
+        const timeA = a.timestamp?.getTime() || 0;
+        const timeB = b.timestamp?.getTime() || 0;
+        return timeA - timeB;
+      });
   }
   
   // File operations
@@ -194,14 +222,23 @@ export class MemStorage implements IStorage {
   async getConversationFiles(conversationId: number): Promise<File[]> {
     return Array.from(this.files.values())
       .filter(file => file.conversationId === conversationId)
-      .sort((a, b) => b.uploadedAt.getTime() - a.uploadedAt.getTime());
+      .sort((a, b) => {
+        const timeA = a.uploadedAt?.getTime() || 0;
+        const timeB = b.uploadedAt?.getTime() || 0;
+        return timeB - timeA;
+      });
   }
   
   // Insight operations
   async createInsight(insertInsight: InsertInsight): Promise<Insight> {
     const id = this.insightId++;
     const now = new Date();
-    const insight: Insight = { ...insertInsight, id, createdAt: now };
+    const insight: Insight = { 
+      ...insertInsight, 
+      id, 
+      createdAt: now,
+      points: insertInsight.points || null
+    };
     this.insights.set(id, insight);
     return insight;
   }
@@ -209,25 +246,32 @@ export class MemStorage implements IStorage {
   async getConversationInsights(conversationId: number): Promise<Insight[]> {
     return Array.from(this.insights.values())
       .filter(insight => insight.conversationId === conversationId)
-      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+      .sort((a, b) => {
+        const timeA = a.createdAt?.getTime() || 0;
+        const timeB = b.createdAt?.getTime() || 0;
+        return timeB - timeA;
+      });
   }
 }
 
+// Database storage implementation
 export class DatabaseStorage implements IStorage {
   private db: ReturnType<typeof drizzle>;
   private pool: Pool;
-  sessionStore: session.SessionStore;
+  sessionStore: expressSession.Store;
 
   constructor() {
     neonConfig.fetchConnectionCache = true;
     
     // Use DATABASE_URL from environment variables
-    const sql = neon(process.env.DATABASE_URL!);
+    const connectionString = process.env.DATABASE_URL!;
+    const sql = neon(connectionString);
+    // @ts-ignore - There's a type mismatch issue with the newer drizzle versions
     this.db = drizzle(sql);
     
     // Create a pool for session store
     this.pool = new Pool({
-      connectionString: process.env.DATABASE_URL
+      connectionString
     });
     
     // Initialize session store
@@ -300,7 +344,10 @@ export class DatabaseStorage implements IStorage {
 
   // Expert operations
   async createExpert(expert: InsertExpert): Promise<Expert> {
-    const results = await this.db.insert(experts).values(expert).returning();
+    const results = await this.db.insert(experts).values({
+      ...expert,
+      avatarUrl: expert.avatarUrl || null
+    }).returning();
     return results[0];
   }
 
@@ -313,7 +360,11 @@ export class DatabaseStorage implements IStorage {
 
   // Message operations
   async createMessage(message: InsertMessage): Promise<Message> {
-    const results = await this.db.insert(messages).values(message).returning();
+    const results = await this.db.insert(messages).values({
+      ...message,
+      userId: message.userId || null,
+      expertId: message.expertId || null
+    }).returning();
     return results[0];
   }
 
@@ -341,7 +392,10 @@ export class DatabaseStorage implements IStorage {
 
   // Insight operations
   async createInsight(insight: InsertInsight): Promise<Insight> {
-    const results = await this.db.insert(insights).values(insight).returning();
+    const results = await this.db.insert(insights).values({
+      ...insight,
+      points: insight.points || null
+    }).returning();
     return results[0];
   }
 
@@ -358,8 +412,12 @@ export class DatabaseStorage implements IStorage {
 let storage: IStorage;
 
 try {
-  storage = new DatabaseStorage();
-  console.log("Using PostgreSQL database storage");
+  if (process.env.DATABASE_URL) {
+    storage = new DatabaseStorage();
+    console.log("Using PostgreSQL database storage");
+  } else {
+    throw new Error("DATABASE_URL not provided");
+  }
 } catch (error) {
   console.error("Failed to initialize database storage, falling back to memory storage:", error);
   storage = new MemStorage();
