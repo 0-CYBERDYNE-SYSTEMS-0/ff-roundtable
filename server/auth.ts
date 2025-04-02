@@ -111,34 +111,6 @@ export function setupAuth(app: Express) {
     res.json(req.user);
   });
   
-  // Development auto-login endpoint
-  app.get("/api/dev-login", async (req, res, next) => {
-    try {
-      console.log("Development login triggered");
-      
-      // Get the dev user from the database
-      const devUser = await storage.getUserByUsername("dev");
-      
-      if (!devUser) {
-        console.error("Dev user not found in database");
-        return res.status(500).send("Dev user not found. Please ensure a user with username 'dev' exists.");
-      }
-      
-      // Log in the user
-      req.login(devUser, (err) => {
-        if (err) {
-          console.error("Dev login error:", err);
-          return next(err);
-        }
-        console.log("Dev user logged in successfully");
-        res.redirect("/");
-      });
-    } catch (error) {
-      console.error("Dev login exception:", error);
-      next(error);
-    }
-  });
-  
   // Middleware to check subscription
   app.use("/api/protected", (req, res, next) => {
     if (!req.isAuthenticated()) {

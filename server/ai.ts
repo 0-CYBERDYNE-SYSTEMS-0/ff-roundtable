@@ -1,4 +1,4 @@
-import { storage } from "./db-storage";
+import { storage } from "./storage";
 import type { InsertMessage, Expert } from "@shared/schema";
 
 export interface AIMessage {

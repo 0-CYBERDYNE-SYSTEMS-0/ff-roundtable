@@ -123,7 +123,7 @@ export default function AuthPage() {
                     </form>
                   </Form>
                 </CardContent>
-                <CardFooter className="flex flex-col gap-2">
+                <CardFooter>
                   <Button 
                     type="submit" 
                     form="login-form" 
@@ -139,19 +139,6 @@ export default function AuthPage() {
                       "Login"
                     )}
                   </Button>
-
-                  {/* Development Quick Login */}
-                  <div className="w-full pt-2 border-t border-neutral-200 mt-2">
-                    <Button
-                      type="button"
-                      variant="outline"
-                      className="w-full"
-                      onClick={() => window.location.href = "/api/dev-login"}
-                    >
-                      Quick Dev Login
-                    </Button>
-                    <p className="text-xs text-neutral-500 mt-1 text-center">For development only</p>
-                  </div>
                 </CardFooter>
               </Card>
             </TabsContent>
