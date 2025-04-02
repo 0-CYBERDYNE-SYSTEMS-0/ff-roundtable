@@ -2,12 +2,8 @@ import { users, type User, type InsertUser, conversations, type Conversation, ty
 import * as expressSession from "express-session";
 import createMemoryStore from "memorystore";
 import connectPgSimple from "connect-pg-simple";
-import pg from "pg";
-import { neon, neonConfig } from '@neondatabase/serverless';
-import { drizzle } from "drizzle-orm/neon-serverless";
 import { eq, desc } from "drizzle-orm";
-
-const { Pool } = pg;
+import { pool, db } from "./db";
 
 // Create session stores
 const MemoryStore = createMemoryStore(expressSession.default || expressSession);
@@ -256,25 +252,16 @@ export class MemStorage implements IStorage {
 
 // Database storage implementation
 export class DatabaseStorage implements IStorage {
-  private db: ReturnType<typeof drizzle>;
-  private pool: Pool;
+  private db: typeof db;
+  private pool: typeof pool;
   sessionStore: expressSession.Store;
 
   constructor() {
-    neonConfig.fetchConnectionCache = true;
+    // Use the imported db and pool
+    this.db = db;
+    this.pool = pool;
     
-    // Use DATABASE_URL from environment variables
-    const connectionString = process.env.DATABASE_URL!;
-    const sql = neon(connectionString);
-    // @ts-ignore - There's a type mismatch issue with the newer drizzle versions
-    this.db = drizzle(sql);
-    
-    // Create a pool for session store
-    this.pool = new Pool({
-      connectionString
-    });
-    
-    // Initialize session store
+    // Initialize session store with pool
     this.sessionStore = new PostgresSessionStore({
       pool: this.pool,
       createTableIfMissing: true
