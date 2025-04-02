@@ -111,22 +111,18 @@ export function setupAuth(app: Express) {
     res.json(req.user);
   });
   
-  // Development auto-login endpoint - SIMPLIFIED VERSION
+  // Development auto-login endpoint
   app.get("/api/dev-login", async (req, res, next) => {
     try {
       console.log("Development login triggered");
       
-      // Create a dev user directly in memory
-      const devUser = {
-        id: 999,
-        username: "dev",
-        email: "dev@example.com",
-        password: "not-used",
-        createdAt: new Date(),
-        stripeCustomerId: null,
-        stripeSubscriptionId: null,
-        subscriptionStatus: "active"
-      };
+      // Get the dev user from the database
+      const devUser = await storage.getUserByUsername("dev");
+      
+      if (!devUser) {
+        console.error("Dev user not found in database");
+        return res.status(500).send("Dev user not found. Please ensure a user with username 'dev' exists.");
+      }
       
       // Log in the user
       req.login(devUser, (err) => {
