@@ -2,13 +2,13 @@ import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Plus, RefreshCw, Download, Upload, FileDown, FileText, Image, ArrowRight } from "lucide-react";
-import { Insight, File, Conversation } from "@shared/schema";
+import { Insight, File as FileSchema, Conversation } from "@shared/schema";
 import { format } from "date-fns";
 
 interface SidebarPanelProps {
   conversations: Conversation[];
   insights: Insight[];
-  files: File[];
+  files: FileSchema[];
   onStartNewSession: () => void;
   onExportMarkdown: () => void;
   onFileUpload: (file: File) => void;

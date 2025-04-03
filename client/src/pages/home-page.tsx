@@ -1,9 +1,8 @@
 import { useState, useEffect } from "react";
 import { useAuth } from "@/hooks/use-auth";
 import Header from "@/components/layout/Header";
-import SidebarPanel from "@/components/roundtable/SidebarPanel";
-import RoundtableVisualization from "@/components/roundtable/RoundtableVisualization";
-import ChatInterface from "@/components/roundtable/ChatInterface";
+import SidebarPanel from "@/components/sidebar/SidebarPanel";
+import ChatInterface from "@/components/chat/ChatInterface";
 import ExpertSelector from "@/components/roundtable/ExpertSelector";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { queryClient } from "@/lib/queryClient";
@@ -15,9 +14,9 @@ import { useWebSocket } from "@/lib/websocket-utils";
 export default function HomePage() {
   const { user } = useAuth();
   const { toast } = useToast();
-  const [showExpertSelector, setShowExpertSelector] = useState(false);
   const [activeConversation, setActiveConversation] = useState<number | null>(null);
   const [selectedExperts, setSelectedExperts] = useState<Expert[]>([]);
+  const [showExpertSelector, setShowExpertSelector] = useState(false);
   
   // WebSocket connection for real-time updates
   const socket = useWebSocket();
@@ -37,7 +36,6 @@ export default function HomePage() {
     onSuccess: (newConversation) => {
       queryClient.invalidateQueries({ queryKey: ["/api/protected/conversations"] });
       setActiveConversation(newConversation.id);
-      setShowExpertSelector(true);
       toast({
         title: "New conversation created",
       });
@@ -182,11 +180,11 @@ export default function HomePage() {
   // Handle starting a new roundtable session
   const handleStartNewSession = () => {
     createConversationMutation.mutate();
+    setShowExpertSelector(true);
   };
   
   // Handle adding experts to conversation
   const handleAddExperts = (experts: { name: string; role: string; model: string; avatarUrl: string }[]) => {
-    // Add each expert sequentially
     experts.forEach(expert => {
       addExpertMutation.mutate(expert);
     });
@@ -247,43 +245,31 @@ export default function HomePage() {
     };
   }, [socket, activeConversation]);
   
-  // Check if a new conversation should show the expert selector
-  useEffect(() => {
-    if (activeConversation && experts && experts.length === 0) {
-      setShowExpertSelector(true);
-    }
-  }, [activeConversation, experts]);
-  
   return (
     <div className="flex flex-col h-screen bg-neutral-100">
       {/* Header */}
       <Header />
       
-      {/* Main Content */}
+      {/* Main Content - Adjusted Layout */}
       <main className="flex flex-1 overflow-hidden">
-        {/* Sidebar */}
-        <SidebarPanel
-          conversations={conversations || []}
-          insights={insights || []}
-          files={files || []}
-          onStartNewSession={handleStartNewSession}
-          onExportMarkdown={exportMarkdown}
-          onFileUpload={handleFileUpload}
-          onSelectConversation={setActiveConversation}
-          activeConversationId={activeConversation}
-          onRefreshInsights={() => generateInsightsMutation.mutate()}
-          isLoadingInsights={generateInsightsMutation.isPending}
-        />
-        
-        {/* Main Visualization and Chat Area */}
-        <div className="flex-1 flex flex-col md:flex-row h-full">
-          {/* Roundtable Visualization */}
-          <RoundtableVisualization 
-            experts={selectedExperts} 
-            showExpertSelector={showExpertSelector}
+        {/* Sidebar - Takes fixed width, allows scrolling */}
+        <div className="w-80 flex-shrink-0 overflow-y-auto border-r border-neutral-200"> 
+          <SidebarPanel
+            conversations={conversations || []}
+            insights={insights || []}
+            files={files || []}
+            onStartNewSession={handleStartNewSession}
+            onExportMarkdown={exportMarkdown}
+            onFileUpload={handleFileUpload}
+            onSelectConversation={setActiveConversation}
+            activeConversationId={activeConversation}
+            onRefreshInsights={() => generateInsightsMutation.mutate()}
+            isLoadingInsights={generateInsightsMutation.isPending}
           />
-          
-          {/* Expert Selector (Modal) */}
+        </div>
+        
+        {/* Main Chat Area - Takes remaining space */}
+        <div className="flex-1 flex flex-col h-full overflow-hidden relative">
           {showExpertSelector && (
             <ExpertSelector
               onClose={() => setShowExpertSelector(false)}
@@ -292,11 +278,11 @@ export default function HomePage() {
             />
           )}
           
-          {/* Chat Interface */}
+          {/* Chat Interface - Now occupies the main area */}
           <ChatInterface
             messages={messages || []}
-            experts={selectedExperts}
-            onSendMessage={(content) => sendMessageMutation.mutate(content)}
+            experts={experts || []}
+            onSendMessage={(content: string) => sendMessageMutation.mutate(content)}
             onUploadFile={handleFileUpload}
             isLoading={sendMessageMutation.isPending}
             user={user}

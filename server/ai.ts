@@ -49,6 +49,8 @@ export async function callOpenRouterAPI(messages: AIMessage[], model: string): P
       throw new Error("OpenRouter API key not provided");
     }
     
+    console.log(`Calling OpenRouter API with model: ${model}`);
+    
     const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -71,12 +73,29 @@ export async function callOpenRouterAPI(messages: AIMessage[], model: string): P
     }
     
     const data = await response.json();
+    
+    // Add proper error handling for missing data
+    if (!data || !data.choices || !Array.isArray(data.choices) || data.choices.length === 0) {
+      console.error("Invalid response from OpenRouter API:", JSON.stringify(data));
+      throw new Error("Invalid response format from OpenRouter API");
+    }
+    
+    if (!data.choices[0] || !data.choices[0].message) {
+      console.error("Missing message in API response:", JSON.stringify(data.choices[0]));
+      throw new Error("Missing message in API response");
+    }
+    
     return {
       message: data.choices[0].message
     };
-  } catch (error) {
+  } catch (error: unknown) {
     console.error("Error calling OpenRouter API:", error);
-    throw error;
+    // Properly handle the unknown error type
+    if (error instanceof Error) {
+      throw error;
+    } else {
+      throw new Error(`Unknown error: ${String(error)}`);
+    }
   }
 }
 
@@ -87,6 +106,8 @@ export async function callPerplexityAPI(query: string): Promise<AIModelResponse>
     if (!perplexityKey) {
       throw new Error("Perplexity API key not provided");
     }
+    
+    console.log("Calling Perplexity API for research query");
     
     const response = await fetch("https://api.perplexity.ai/chat/completions", {
       method: "POST",
@@ -118,13 +139,30 @@ export async function callPerplexityAPI(query: string): Promise<AIModelResponse>
     }
     
     const data = await response.json();
+    
+    // Add proper error handling for missing data
+    if (!data || !data.choices || !Array.isArray(data.choices) || data.choices.length === 0) {
+      console.error("Invalid response from Perplexity API:", JSON.stringify(data));
+      throw new Error("Invalid response format from Perplexity API");
+    }
+    
+    if (!data.choices[0] || !data.choices[0].message) {
+      console.error("Missing message in Perplexity API response:", JSON.stringify(data.choices[0]));
+      throw new Error("Missing message in Perplexity API response");
+    }
+    
     return {
       message: data.choices[0].message,
       citations: data.citations || []
     };
-  } catch (error) {
+  } catch (error: unknown) {
     console.error("Error calling Perplexity API:", error);
-    throw error;
+    // Properly handle the unknown error type
+    if (error instanceof Error) {
+      throw error;
+    } else {
+      throw new Error(`Unknown error: ${String(error)}`);
+    }
   }
 }
 
@@ -204,7 +242,14 @@ async function getExpertResponse(
       response = await callPerplexityAPI(userMessage);
     } else {
       // Regular OpenRouter call for other experts
-      response = await callOpenRouterAPI(messages, expert.model);
+      try {
+        response = await callOpenRouterAPI(messages, expert.model);
+      } catch (err: unknown) {
+        // More detailed error for OpenRouter API issues
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        console.error(`Error with OpenRouter for model ${expert.model}:`, errorMessage);
+        throw new Error(`Failed to get response from AI model (${expert.model}): ${errorMessage}`);
+      }
     }
     
     // Create expert message
@@ -218,15 +263,16 @@ async function getExpertResponse(
     
     // Store expert message
     return await storage.createMessage(expertMessage);
-  } catch (error) {
+  } catch (error: unknown) {
     console.error(`Error getting response from ${expert.role}:`, error);
     
-    // Return error message
+    // Return error message with more details
+    const errorMessage = error instanceof Error ? error.message : String(error);
     return {
       conversationId: expert.conversationId,
       expertId: expert.id,
       userId: null,
-      content: `I apologize, but I encountered an error while processing your request. ${error.message}`,
+      content: `I apologize, but I encountered an error while processing your request. ${errorMessage}`,
       role: "assistant"
     };
   }

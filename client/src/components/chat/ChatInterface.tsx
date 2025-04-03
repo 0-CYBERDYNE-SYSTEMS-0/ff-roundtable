@@ -9,7 +9,7 @@ import { format } from "date-fns";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { formatMessageDate } from "@/lib/file-utils";
-import ModelBadge from "./ModelBadge";
+import ModelBadge from "../roundtable/ModelBadge";
 
 interface ChatInterfaceProps {
   messages: Message[];
