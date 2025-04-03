@@ -102,10 +102,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
     wss.clients.forEach((client) => {
       if (client.readyState === 1) { // OPEN
         try {
+          // Determine the type of message based on the data structure
+          let messageType = "messages_updated"; // Default type
+          
+          // If data has insights property, it's an insights update
+          if (data.type === "insights") {
+            messageType = "insights";
+          }
+          
+          // Send properly formatted message with the actual message content
           client.send(JSON.stringify({
-            type: "message",
+            type: messageType,
             conversationId,
-            data
+            message: data.type === "insights" ? null : data // For messages_updated, send the actual message
           }));
         } catch (error) {
           console.error("Error broadcasting message:", error);
@@ -359,7 +368,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const userId = req.user!.id;
       const { content } = req.body;
       
-      // Store user message and process it asynchronously
+      // Store user message
       const userMessage: InsertMessage = {
         conversationId,
         userId,
@@ -367,13 +376,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
         content,
         role: "user"
       };
-      
       const storedMessage = await storage.createMessage(userMessage);
-      
+
+      // Broadcast the user message immediately via WebSocket
+      broadcastToConversation(conversationId, storedMessage);
+
       // Start asynchronous processing of expert responses
       processUserMessage(userId, conversationId, content)
         .then(async (expertResponses) => {
-          // Store each expert response
+          // Store and broadcast each expert response individually
           for (const response of expertResponses) {
             const storedResponse = await storage.createMessage(response);
             broadcastToConversation(conversationId, storedResponse);
@@ -382,7 +393,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
           // Generate insights after processing expert responses
           generateInsights(conversationId)
             .then(() => {
-              // Broadcast updated insights
               storage.getConversationInsights(conversationId)
                 .then(insights => {
                   broadcastToConversation(conversationId, { 
@@ -396,10 +406,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
           console.error("Error processing message:", error);
         });
       
-      // Return the user message immediately
+      // Return the stored user message immediately (client might ignore this for UI, uses WS instead)
       res.status(201).json(storedMessage);
     } catch (error: any) {
-      res.status(500).json({ message: error.message });
+      console.error("Error in POST /messages:", error);
+      res.status(500).json({ message: error.message || "Internal server error" });
     }
   });
   

@@ -88,7 +88,20 @@ export default function ChatInterface({
       if (!messagesByDate[date]) {
         messagesByDate[date] = [];
       }
-      messagesByDate[date].push(message);
+      
+      // Check for duplicate messages (same content from same user/expert within 2 seconds)
+      const lastMessage = messagesByDate[date][messagesByDate[date].length - 1];
+      const isDuplicate = lastMessage && 
+        lastMessage.content === message.content &&
+        lastMessage.userId === message.userId &&
+        lastMessage.expertId === message.expertId &&
+        lastMessage.timestamp &&
+        message.timestamp &&
+        Math.abs(new Date(lastMessage.timestamp).getTime() - new Date(message.timestamp).getTime()) < 2000;
+      
+      if (!isDuplicate) {
+        messagesByDate[date].push(message);
+      }
     }
   });
 
@@ -120,6 +133,43 @@ export default function ChatInterface({
     return null;
   };
 
+  // Enhanced loading indicator component
+  const renderLoadingIndicator = () => {
+    if (!isLoading) return null;
+
+    return (
+      <div className="space-y-4">
+        {experts.map((expert, index) => (
+          <div key={expert.id} className="flex items-start mb-4 animate-pulse">
+            <div className="flex-shrink-0 mr-3">
+              <Avatar className="h-8 w-8">
+                <AvatarImage src={expert.avatarUrl || ""} alt={expert.name} />
+                <AvatarFallback>{expert.name.charAt(0)}</AvatarFallback>
+              </Avatar>
+            </div>
+            <div className="bg-neutral-100 rounded-lg p-3 max-w-[85%] relative overflow-hidden">
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-sm font-medium text-neutral-800">{expert.name} ({expert.role})</p>
+                <ModelBadge modelId={expert.model} size="sm" />
+              </div>
+              <div className="h-4 bg-neutral-200 rounded w-3/4 mb-2"></div>
+              <div className="h-4 bg-neutral-200 rounded w-1/2"></div>
+              <div className="absolute bottom-0 left-0 w-full h-1">
+                <div 
+                  className="h-full bg-primary opacity-25"
+                  style={{
+                    width: '100%',
+                    animation: 'loading 2s infinite ease-in-out',
+                  }}
+                ></div>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    );
+  };
+
   return (
     <div className="w-full md:w-1/2 flex flex-col h-full bg-white">
       {/* Chat Messages */}
@@ -139,8 +189,8 @@ export default function ChatInterface({
               if (message.userId && !message.expertId) {
                 return (
                   <div key={message.id} className="flex items-start mb-4 justify-end">
-                    <div className="bg-primary-light text-white rounded-lg p-3 max-w-[85%]">
-                      <div className="markdown-content">
+                    <div className="bg-primary text-white dark:bg-primary-dark rounded-lg p-3 max-w-[85%] shadow-sm">
+                      <div className="markdown-content prose-sm prose-invert">
                         <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
                       </div>
                     </div>
@@ -185,19 +235,8 @@ export default function ChatInterface({
           </div>
         ))}
         
-        {/* Loading indicator for pending expert responses */}
-        {isLoading && (
-          <div className="flex items-start mb-4">
-            <div className="flex-shrink-0 mr-3">
-              <div className="w-8 h-8 rounded-full bg-neutral-300 flex items-center justify-center">
-                <Loader2 className="h-5 w-5 animate-spin text-neutral-600" />
-              </div>
-            </div>
-            <div className="bg-neutral-200 rounded-lg p-3">
-              <p className="text-sm text-neutral-600">Experts are thinking...</p>
-            </div>
-          </div>
-        )}
+        {/* Enhanced loading indicators */}
+        {renderLoadingIndicator()}
         
         <div ref={messagesEndRef} />
       </ScrollArea>
@@ -239,6 +278,20 @@ export default function ChatInterface({
           </Button>
         </div>
       </div>
+      
+      {/* Loading indicator for pending expert responses */}
+      {isLoading && (
+        <div className="flex items-start mb-4">
+          <div className="flex-shrink-0 mr-3">
+            <div className="w-8 h-8 rounded-full bg-neutral-300 flex items-center justify-center">
+              <Loader2 className="h-5 w-5 animate-spin text-neutral-600" />
+            </div>
+          </div>
+          <div className="bg-neutral-200 rounded-lg p-3">
+            <p className="text-sm text-neutral-600">Experts are thinking...</p>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

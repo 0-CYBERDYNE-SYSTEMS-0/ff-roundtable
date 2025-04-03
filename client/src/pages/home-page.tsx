@@ -93,21 +93,71 @@ export default function HomePage() {
   });
   
   // Send message mutation
-  const sendMessageMutation = useMutation({
+  const sendMessageMutation = useMutation<
+    Message,
+    Error,
+    string,
+    { previousMessages?: Message[] }
+  >({
     mutationFn: async (content: string) => {
       if (!activeConversation) throw new Error("No active conversation");
-      const res = await apiRequest("POST", `/api/protected/conversations/${activeConversation}/messages`, { content });
+      if (!user) throw new Error("User not authenticated");
+
+      const res = await apiRequest("POST", `/api/protected/conversations/${activeConversation}/messages`, { 
+        content, 
+        userId: user.id
+      });
+      
+      if (!res.ok) {
+        const errorData = await res.json();
+        throw new Error(errorData.message || 'Failed to send message');
+      }
+      
       return await res.json();
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: [`/api/protected/conversations/${activeConversation}/messages`] });
+    onMutate: async (newMessageContent: string) => {
+      if (!activeConversation || !user) return;
+
+      const messagesQueryKey = [`/api/protected/conversations/${activeConversation}/messages`];
+
+      await queryClient.cancelQueries({ queryKey: messagesQueryKey });
+
+      const previousMessages = queryClient.getQueryData<Message[]>(messagesQueryKey);
+
+      queryClient.setQueryData<Message[]>(messagesQueryKey, (old = []) => [
+        ...old,
+        {
+          id: Date.now(),
+          conversationId: activeConversation,
+          userId: user.id,
+          expertId: null,
+          content: newMessageContent,
+          role: "user",
+          timestamp: new Date(),
+        },
+      ]);
+
+      return { previousMessages };
     },
-    onError: (error: Error) => {
+    onError: (err, newMessageContent, context) => {
+      if (!activeConversation) return;
+      const messagesQueryKey = [`/api/protected/conversations/${activeConversation}/messages`];
+      
+      if (context?.previousMessages) {
+        queryClient.setQueryData(messagesQueryKey, context.previousMessages);
+      }
       toast({
         title: "Failed to send message",
-        description: error.message,
+        description: err.message,
         variant: "destructive",
       });
+    },
+    onSettled: () => {
+      if (!activeConversation) return;
+      const messagesQueryKey = [`/api/protected/conversations/${activeConversation}/messages`];
+      
+      console.log("Message mutation settled, invalidating messages query to sync with server.");
+      queryClient.invalidateQueries({ queryKey: messagesQueryKey });
     },
   });
   
@@ -224,12 +274,37 @@ export default function HomePage() {
           const data = JSON.parse(event.data);
           
           if (data.conversationId === activeConversation) {
-            if (data.type === "message") {
-              // Update messages
-              queryClient.invalidateQueries({ queryKey: [`/api/protected/conversations/${activeConversation}/messages`] });
+            if (data.type === "messages_updated") {
+              console.log("WebSocket: Received messages_updated signal");
+              
+              // Instead of just invalidating, which causes a refetch,
+              // we'll directly update the cache if we have message data
+              if (data.message) {
+                // Get current messages from cache
+                const messagesQueryKey = [`/api/protected/conversations/${activeConversation}/messages`];
+                const currentMessages = queryClient.getQueryData<Message[]>(messagesQueryKey) || [];
+                
+                // Check if this message already exists in our cache
+                const messageExists = currentMessages.some(msg => msg.id === data.message.id);
+                
+                if (!messageExists) {
+                  // Add the new message to our cache immediately
+                  queryClient.setQueryData<Message[]>(messagesQueryKey, 
+                    [...currentMessages, data.message]
+                  );
+                  console.log("WebSocket: Added new message from expert to cache");
+                }
+              } else {
+                // Fallback to invalidation if no message data is provided
+                queryClient.invalidateQueries({ 
+                  queryKey: [`/api/protected/conversations/${activeConversation}/messages`] 
+                });
+              }
             } else if (data.type === "insights") {
-              // Update insights
-              queryClient.invalidateQueries({ queryKey: [`/api/protected/conversations/${activeConversation}/insights`] });
+              console.log("WebSocket: Received insights update signal, invalidating insights query.");
+              queryClient.invalidateQueries({ 
+                queryKey: [`/api/protected/conversations/${activeConversation}/insights`] 
+              });
             }
           }
         } catch (error) {
