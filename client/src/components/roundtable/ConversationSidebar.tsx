@@ -1,0 +1,191 @@
+import { useState, useEffect } from 'react';
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Message, Expert } from "@shared/schema";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { BarChart, LineChart, Map, PieChart, Table } from 'lucide-react';
+
+interface ConversationSidebarProps {
+  messages: Message[];
+  experts: Expert[];
+  insights: any[];
+  visualizations: any[];
+}
+
+interface Visualization {
+  type: 'chart' | 'map' | 'iframe' | 'table';
+  title: string;
+  data: any;
+  url?: string;
+}
+
+export default function ConversationSidebar({
+  messages,
+  experts,
+  insights,
+  visualizations
+}: ConversationSidebarProps) {
+  const [activeTab, setActiveTab] = useState('insights');
+  const [activeVisualizations, setActiveVisualizations] = useState<Visualization[]>([]);
+
+  // Process messages to extract visualization requests and URLs
+  useEffect(() => {
+    const extractedVisualizations: Visualization[] = [];
+    
+    messages.forEach(message => {
+      if (message.expertId) {
+        // Look for URL patterns
+        const urlMatches = message.content.match(/\bhttps?:\/\/\S+/gi);
+        if (urlMatches) {
+          urlMatches.forEach(url => {
+            // Determine visualization type based on URL
+            if (url.includes('maps.google.com') || url.includes('openstreetmap.org')) {
+              extractedVisualizations.push({
+                type: 'map',
+                title: 'Location Map',
+                data: null,
+                url
+              });
+            } else if (url.includes('chart.googleapis.com')) {
+              extractedVisualizations.push({
+                type: 'chart',
+                title: 'Data Visualization',
+                data: null,
+                url
+              });
+            }
+          });
+        }
+
+        // Look for data visualization markers
+        if (message.content.includes('```chart') || message.content.includes('```visualization')) {
+          // Extract chart data between code blocks
+          const chartMatch = message.content.match(/```chart\n([\s\S]*?)```/);
+          if (chartMatch) {
+            try {
+              const chartData = JSON.parse(chartMatch[1]);
+              extractedVisualizations.push({
+                type: 'chart',
+                title: chartData.title || 'Data Visualization',
+                data: chartData
+              });
+            } catch (e) {
+              console.error('Failed to parse chart data:', e);
+            }
+          }
+        }
+      }
+    });
+
+    setActiveVisualizations(extractedVisualizations);
+  }, [messages]);
+
+  const renderVisualization = (vis: Visualization) => {
+    switch (vis.type) {
+      case 'map':
+        return (
+          <div className="w-full h-[300px] rounded-lg overflow-hidden border border-neutral-200">
+            <iframe
+              src={vis.url}
+              className="w-full h-full"
+              frameBorder="0"
+              allowFullScreen
+              loading="lazy"
+              referrerPolicy="no-referrer-when-downgrade"
+            />
+          </div>
+        );
+      case 'iframe':
+        return (
+          <div className="w-full h-[300px] rounded-lg overflow-hidden border border-neutral-200">
+            <iframe
+              src={vis.url}
+              className="w-full h-full"
+              frameBorder="0"
+              allowFullScreen
+            />
+          </div>
+        );
+      case 'chart':
+        return (
+          <div className="w-full h-[300px] rounded-lg overflow-hidden border border-neutral-200 bg-white p-4">
+            {/* Placeholder for chart rendering - you'll want to use a charting library like recharts or chart.js */}
+            <div className="flex items-center justify-center h-full text-neutral-400">
+              <BarChart className="w-6 h-6 mr-2" />
+              Chart Visualization
+            </div>
+          </div>
+        );
+      default:
+        return null;
+    }
+  };
+
+  return (
+    <div className="h-full flex flex-col">
+      <Tabs defaultValue="insights" className="w-full h-full">
+        <div className="border-b border-neutral-200 px-4">
+          <TabsList className="mb-[-1px]">
+            <TabsTrigger value="insights" onClick={() => setActiveTab('insights')}>
+              Insights
+            </TabsTrigger>
+            <TabsTrigger value="visualizations" onClick={() => setActiveTab('visualizations')}>
+              Visualizations
+            </TabsTrigger>
+          </TabsList>
+        </div>
+
+        <TabsContent value="insights" className="flex-1 mt-0">
+          <ScrollArea className="h-full px-4">
+            {insights.map((insight, index) => (
+              <Card key={index} className="mb-4">
+                <CardHeader>
+                  <CardTitle className="text-sm font-medium">{insight.title}</CardTitle>
+                  <CardDescription className="text-xs text-neutral-500">
+                    Generated from conversation
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <ul className="list-disc list-inside space-y-1">
+                    {insight.points.map((point: string, i: number) => (
+                      <li key={i} className="text-sm text-neutral-700">{point}</li>
+                    ))}
+                  </ul>
+                </CardContent>
+              </Card>
+            ))}
+          </ScrollArea>
+        </TabsContent>
+
+        <TabsContent value="visualizations" className="flex-1 mt-0">
+          <ScrollArea className="h-full px-4">
+            {activeVisualizations.map((vis, index) => (
+              <Card key={index} className="mb-4">
+                <CardHeader>
+                  <CardTitle className="text-sm font-medium">{vis.title}</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  {renderVisualization(vis)}
+                </CardContent>
+              </Card>
+            ))}
+            {activeVisualizations.length === 0 && (
+              <div className="text-center text-neutral-500 mt-8">
+                <div className="flex flex-col items-center space-y-2">
+                  <div className="flex space-x-2">
+                    <BarChart className="w-5 h-5" />
+                    <LineChart className="w-5 h-5" />
+                    <PieChart className="w-5 h-5" />
+                    <Map className="w-5 h-5" />
+                  </div>
+                  <p className="text-sm">No visualizations available yet.</p>
+                  <p className="text-xs">Ask the experts to create charts or share locations!</p>
+                </div>
+              </div>
+            )}
+          </ScrollArea>
+        </TabsContent>
+      </Tabs>
+    </div>
+  );
+} 

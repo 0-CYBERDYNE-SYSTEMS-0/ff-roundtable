@@ -321,49 +321,62 @@ export default function HomePage() {
   }, [socket, activeConversation]);
   
   return (
-    <div className="flex flex-col h-screen bg-neutral-100">
-      {/* Header */}
+    <div className="flex flex-col h-screen">
       <Header />
       
-      {/* Main Content - Adjusted Layout */}
-      <main className="flex flex-1 overflow-hidden">
-        {/* Sidebar - Takes fixed width, allows scrolling */}
-        <div className="w-80 flex-shrink-0 overflow-y-auto border-r border-neutral-200"> 
-          <SidebarPanel
-            conversations={conversations || []}
-            insights={insights || []}
-            files={files || []}
-            onStartNewSession={handleStartNewSession}
-            onExportMarkdown={exportMarkdown}
-            onFileUpload={handleFileUpload}
-            onSelectConversation={setActiveConversation}
-            activeConversationId={activeConversation}
-            onRefreshInsights={() => generateInsightsMutation.mutate()}
-            isLoadingInsights={generateInsightsMutation.isPending}
-          />
-        </div>
+      <div className="flex-1 flex overflow-hidden">
+        {/* Left Sidebar */}
+        <SidebarPanel
+          conversations={conversations || []}
+          insights={insights || []}
+          files={files || []}
+          onStartNewSession={handleStartNewSession}
+          onExportMarkdown={exportMarkdown}
+          onFileUpload={handleFileUpload}
+          onSelectConversation={setActiveConversation}
+          activeConversationId={activeConversation}
+          onRefreshInsights={() => generateInsightsMutation.mutate()}
+          isLoadingInsights={generateInsightsMutation.isPending}
+        />
         
-        {/* Main Chat Area - Takes remaining space */}
-        <div className="flex-1 flex flex-col h-full overflow-hidden relative">
-          {showExpertSelector && (
-            <ExpertSelector
-              onClose={() => setShowExpertSelector(false)}
-              onAddExperts={handleAddExperts}
-              selectedExperts={selectedExperts}
+        {/* Main Content Area */}
+        <div className="flex-1 flex flex-col">
+          {activeConversation ? (
+            <ChatInterface
+              messages={messages || []}
+              experts={experts || []}
+              onSendMessage={(content) => sendMessageMutation.mutate(content)}
+              onUploadFile={handleFileUpload}
+              isLoading={sendMessageMutation.isPending}
+              user={user}
+              insights={insights || []}
+              visualizations={[]} // We'll populate this with extracted visualizations
             />
+          ) : (
+            <div className="flex-1 flex items-center justify-center">
+              <div className="text-center">
+                <h2 className="text-xl font-semibold text-neutral-800 mb-2">Welcome to Farm Friend Roundtable</h2>
+                <p className="text-neutral-600 mb-4">Start a new conversation to begin chatting with agricultural experts</p>
+                <button
+                  onClick={handleStartNewSession}
+                  className="bg-primary text-white px-4 py-2 rounded-lg hover:bg-primary-dark transition-colors"
+                >
+                  Start New Roundtable
+                </button>
+              </div>
+            </div>
           )}
-          
-          {/* Chat Interface - Now occupies the main area */}
-          <ChatInterface
-            messages={messages || []}
-            experts={experts || []}
-            onSendMessage={(content: string) => sendMessageMutation.mutate(content)}
-            onUploadFile={handleFileUpload}
-            isLoading={sendMessageMutation.isPending}
-            user={user}
-          />
         </div>
-      </main>
+      </div>
+
+      {/* Expert Selector Modal */}
+      {showExpertSelector && (
+        <ExpertSelector
+          onClose={() => setShowExpertSelector(false)}
+          onAddExperts={handleAddExperts}
+          selectedExperts={selectedExperts}
+        />
+      )}
     </div>
   );
 }
