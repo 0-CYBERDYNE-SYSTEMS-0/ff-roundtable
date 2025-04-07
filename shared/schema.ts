@@ -37,6 +37,8 @@ export const messages = pgTable("messages", {
   userId: integer("user_id").references(() => users.id),
   content: text("content").notNull(),
   role: text("role").notNull(),
+  expertName: text("expert_name"),
+  expertRole: text("expert_role"),
   timestamp: timestamp("timestamp").defaultNow(),
 });
 

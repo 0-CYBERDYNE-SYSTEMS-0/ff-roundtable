@@ -2,14 +2,15 @@ import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { setupAuth } from "./auth";
-import { callOpenRouterAPI, processUserMessage, generateInsights, callPerplexityAPI, generateSystemPrompt } from "./ai";
+import { callOpenRouterAPI, callPerplexityAPI, generateSystemPrompt, getExpertResponse, generateInsights } from "./ai";
+import { processMessageTurnBased, InteractionOrchestrator, getConversationState } from "./orchestrator";
 import multer from "multer";
 import path from "path";
 import fs from "fs";
 import { randomBytes } from "crypto";
 import Stripe from "stripe";
 import { WebSocketServer } from "ws";
-import { InsertConversation, InsertExpert, InsertMessage } from "@shared/schema";
+import { InsertConversation, InsertExpert, InsertMessage, Message } from "@shared/schema";
 
 // Initialize file upload middleware
 const upload = multer({
@@ -376,37 +377,26 @@ export async function registerRoutes(app: Express): Promise<Server> {
         content,
         role: "user"
       };
-      const storedMessage = await storage.createMessage(userMessage);
+      const storedMessage: Message = await storage.createMessage(userMessage);
 
       // Broadcast the user message immediately via WebSocket
       broadcastToConversation(conversationId, storedMessage);
 
-      // Start asynchronous processing of expert responses
-      processUserMessage(userId, conversationId, content)
-        .then(async (expertResponses) => {
-          // Store and broadcast each expert response individually
-          for (const response of expertResponses) {
-            const storedResponse = await storage.createMessage(response);
-            broadcastToConversation(conversationId, storedResponse);
-          }
-          
-          // Generate insights after processing expert responses
-          generateInsights(conversationId)
-            .then(() => {
-              storage.getConversationInsights(conversationId)
-                .then(insights => {
-                  broadcastToConversation(conversationId, { 
-                    type: "insights", 
-                    insights 
-                  });
-                });
-            });
-        })
-        .catch(error => {
-          console.error("Error processing message:", error);
+      // Start *turn-based* asynchronous processing of expert responses
+      processMessageTurnBased(
+        userId, 
+        conversationId, 
+        storedMessage,
+        broadcastToConversation
+      ).catch(error => {
+        console.error("Error during turn-based processing initiation:", error);
+        broadcastToConversation(conversationId, {
+            type: "error",
+            message: "Failed to start expert processing."
         });
+      });
       
-      // Return the stored user message immediately (client might ignore this for UI, uses WS instead)
+      // Return the stored user message immediately
       res.status(201).json(storedMessage);
     } catch (error: any) {
       console.error("Error in POST /messages:", error);
@@ -605,6 +595,84 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.send(markdown);
     } catch (error: any) {
       res.status(500).json({ message: error.message });
+    }
+  });
+
+  // --- Helper function to get orchestrator instance (or handle missing state) ---
+  const getOrchestratorForRequest = async (req: Request, res: Response): Promise<InteractionOrchestrator | null> => {
+      const conversationId = parseInt(req.params.id);
+      const state = getConversationState(conversationId);
+      if (!state) {
+          res.status(404).json({ message: "Conversation state not found or not initialized." });
+          return null;
+      }
+      const conversation = await storage.getConversation(conversationId);
+      if (!conversation || conversation.userId !== req.user!.id) {
+          res.status(403).json({ message: "Forbidden" });
+          return null;
+      }
+      return new InteractionOrchestrator(conversationId);
+  };
+  
+  // --- Orchestrator Control Endpoints ---
+
+  app.post("/api/protected/conversations/:id/pause", async (req, res) => {
+    try {
+      const orchestrator = await getOrchestratorForRequest(req, res);
+      if (!orchestrator) return;
+      
+      orchestrator.pause();
+      res.status(200).json({ message: "Pause signal sent." });
+
+    } catch (error: any) {
+      console.error("Error in POST /pause:", error);
+      res.status(500).json({ message: error.message || "Internal server error" });
+    }
+  });
+
+  app.post("/api/protected/conversations/:id/resume", async (req, res) => {
+    try {
+      const orchestrator = await getOrchestratorForRequest(req, res);
+      if (!orchestrator) return;
+
+      orchestrator.resume();
+      res.status(200).json({ message: "Resume signal sent." });
+      
+    } catch (error: any) {
+      console.error("Error in POST /resume:", error);
+      res.status(500).json({ message: error.message || "Internal server error" });
+    }
+  });
+
+  app.post("/api/protected/conversations/:id/autonomous/enable", async (req, res) => {
+    try {
+      const orchestrator = await getOrchestratorForRequest(req, res);
+      if (!orchestrator) return; 
+
+      // Optional: Get maxTurns from request body
+      const { maxTurns } = req.body; // e.g., { "maxTurns": 10 }
+      const maxTurnsNum = (typeof maxTurns === 'number' && maxTurns >= 0) ? maxTurns : undefined;
+
+      orchestrator.enableAutonomous(maxTurnsNum);
+      res.status(200).json({ message: "Autonomous mode enabled." });
+      
+    } catch (error: any) {
+      console.error("Error in POST /autonomous/enable:", error);
+      res.status(500).json({ message: error.message || "Internal server error" });
+    }
+  });
+
+  app.post("/api/protected/conversations/:id/autonomous/disable", async (req, res) => {
+    try {
+      const orchestrator = await getOrchestratorForRequest(req, res);
+      if (!orchestrator) return; 
+
+      orchestrator.disableAutonomous();
+      res.status(200).json({ message: "Autonomous mode disabled." });
+      
+    } catch (error: any) {
+      console.error("Error in POST /autonomous/disable:", error);
+      res.status(500).json({ message: error.message || "Internal server error" });
     }
   });
 

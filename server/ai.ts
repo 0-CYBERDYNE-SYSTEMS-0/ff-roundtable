@@ -1,11 +1,13 @@
 import { storage } from "./storage";
-import type { InsertMessage, Expert, InsertFile } from "@shared/schema";
+// Import shared DB types
+import type { InsertMessage, Expert, InsertFile, Message, File } from "@shared/schema"; 
 import OpenAI from "openai";
 import path from "path";
 import fs from "fs";
 import axios from "axios";
 import { randomBytes } from "crypto";
 
+// Define the structure for messages sent to AI APIs
 export interface AIMessage {
   role: "system" | "user" | "assistant";
   content: string;
@@ -20,13 +22,18 @@ export interface AIModelResponse {
 }
 
 // Generate a system prompt for an expert
-export function generateSystemPrompt(expert: Expert): string {
+// Pass availableRoles separately
+export function generateSystemPrompt(expert: Expert, availableRoles?: string[]): string {
   const basePrompt = `You are an AI expert in the role of ${expert.role} participating in a roundtable discussion on agricultural topics.
 As a ${expert.role}, your expertise is highly valued, and you should focus on providing insights specific to your domain.
 Always be respectful, helpful, and conversational while maintaining your expert perspective.
 
-You are part of a team of experts, each with their own specialty. If a question would be better answered by another expert, you can acknowledge this, but still provide your perspective from your area of expertise.
+You are part of a team of experts: [${availableRoles?.join(', ') || 'various roles'}].
+`;
 
+  const interactionPrompt = `During discussion, actively engage with other experts. Reference their points and ask clarifying questions.
+If you want to direct a comment or question to a specific expert, use '@[Role Name]' (e.g., '@Soil Scientist').
+Be concise and clear in your responses.
 `;
 
   // Add role-specific instructions
@@ -77,69 +84,82 @@ When appropriate, explain how weather conditions impact farming decisions and ri
       roleInstructions = `Focus on analyzing satellite, drone, or field imagery to provide visual insights and interpretations. If images are provided, describe what you see and its relevance.`;
       break;
     case "Moderator":
-      roleInstructions = `Facilitate the discussion, summarize key points, ensure all experts contribute, and manage conversation flow. You may also be asked to synthesize information from other experts.`;
+      roleInstructions = `Facilitate the discussion, summarize key points, ensure all experts contribute, and manage conversation flow. 
+      When asked who should speak next, analyze the last few messages and the overall goal. Respond ONLY with the role name of the expert who should speak next (e.g., 'Crop Specialist'). Do not add any other text. If unsure, suggest 'RoundRobin'.`;
       break;
     default:
       roleInstructions = `Provide insights based on your general agricultural knowledge.`;
   }
 
-  return basePrompt + roleInstructions;
+  return basePrompt + interactionPrompt + roleInstructions;
 }
 
 // Function to call OpenRouter API
 export async function callOpenRouterAPI(messages: AIMessage[], model: string): Promise<AIModelResponse> {
+  console.log(`[DEBUG] Entering callOpenRouterAPI for model: ${model}`);
   try {
     const openRouterKey = process.env.OPENROUTER_API_KEY;
     if (!openRouterKey) {
+      console.error("[DEBUG] OpenRouter API key not provided");
       throw new Error("OpenRouter API key not provided");
     }
     
-    console.log(`Calling OpenRouter API with model: ${model}`);
+    console.log(`[DEBUG] Calling OpenRouter fetch: https://openrouter.ai/api/v1/chat/completions, Model: ${model}`);
     
     const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "Authorization": `Bearer ${openRouterKey}`,
-        "HTTP-Referer": "https://farm-friend-roundtable.replit.app",
-        "X-Title": "Farm Friend Roundtable"
+        "HTTP-Referer": "https://farm-friend-roundtable.replit.app", // Replace with your actual referer if different
+        "X-Title": "Farm Friend Roundtable" // Replace with your actual title if different
       },
       body: JSON.stringify({
         model: model,
         messages: messages,
         temperature: 0.7,
-        max_tokens: 1024,
+        max_tokens: 8192,
       }),
     });
     
+    console.log(`[DEBUG] OpenRouter fetch completed. Status: ${response.status}`);
+    
     if (!response.ok) {
       const errorText = await response.text();
+      console.error(`[DEBUG] OpenRouter API Error Response Text: ${errorText}`);
       throw new Error(`OpenRouter API Error (${response.status}): ${errorText}`);
     }
     
+    console.log("[DEBUG] OpenRouter response OK. Parsing JSON...");
     const data = await response.json();
+    console.log("[DEBUG] OpenRouter JSON parsed successfully.");
     
+    // === Add check for top-level error object even if status was 200 ===
+    if (data && data.error) {
+        console.error(`[DEBUG] OpenRouter returned error object despite 200 OK:`, JSON.stringify(data.error));
+        // Construct a user-friendly error message if possible
+        const errorMsg = data.error.message || JSON.stringify(data.error);
+        throw new Error(`OpenRouter Provider Error: ${errorMsg}`);
+    }
+    // ==================================================================
+
     // Add proper error handling for missing data
-    if (!data || !data.choices || !Array.isArray(data.choices) || data.choices.length === 0) {
-      console.error("Invalid response from OpenRouter API:", JSON.stringify(data));
+    if (!data || !data.choices || !Array.isArray(data.choices) || data.choices.length === 0 || !data.choices[0] || !data.choices[0].message) {
+      console.error("[DEBUG] Invalid/Incomplete response structure from OpenRouter API:", JSON.stringify(data));
       throw new Error("Invalid response format from OpenRouter API");
     }
     
-    if (!data.choices[0] || !data.choices[0].message) {
-      console.error("Missing message in API response:", JSON.stringify(data.choices[0]));
-      throw new Error("Missing message in API response");
-    }
-    
+    console.log("[DEBUG] OpenRouter response structure validated. Returning message.");
     return {
       message: data.choices[0].message
     };
   } catch (error: unknown) {
-    console.error("Error calling OpenRouter API:", error);
+    console.error("[DEBUG] Error caught within callOpenRouterAPI:", error);
     // Properly handle the unknown error type
     if (error instanceof Error) {
-      throw error;
+      throw error; // Re-throw the original error
     } else {
-      throw new Error(`Unknown error: ${String(error)}`);
+      throw new Error(`Unknown error in callOpenRouterAPI: ${String(error)}`);
     }
   }
 }
@@ -161,7 +181,7 @@ export async function callPerplexityAPI(query: string): Promise<AIModelResponse>
         "Authorization": `Bearer ${perplexityKey}`
       },
       body: JSON.stringify({
-        model: "llama-3.1-sonar-small-128k-online",
+        model: "sonar",
         messages: [
           {
             role: "system",
@@ -211,398 +231,287 @@ export async function callPerplexityAPI(query: string): Promise<AIModelResponse>
   }
 }
 
-// Function to process user message and get expert responses
+// Helper function to safely map DB roles to AI API roles
+const mapDbRoleToApiRole = (dbRole: string): AIMessage['role'] => {
+  if (dbRole === 'user') return 'user';
+  if (dbRole === 'assistant') return 'assistant';
+  if (dbRole === 'system') return 'system'; // Explicitly handle system role
+  // Fallback for unexpected roles, maybe log a warning
+  console.warn(`Mapping unknown DB role "${dbRole}" to "assistant" for AI API.`);
+  return 'assistant'; 
+};
+
+// Helper function to read and truncate file content
+async function readFileContent(file: File, maxLength = 2000): Promise<string | null> {
+    // Basic check for potentially text-based types
+    const isTextBased = file.fileType.startsWith('text/') || 
+                       ['csv', 'json', 'javascript', 'typescript', 'python', 'markdown'].some(ext => file.fileType.includes(ext));
+
+    if (!isTextBased) {
+        return `[Content of non-text file (${file.fileType}) is not available in this context]`;
+    }
+
+    try {
+        // Construct absolute path from the relative URL stored
+        const relativePath = file.fileUrl.startsWith('/') ? file.fileUrl.substring(1) : file.fileUrl;
+        const filePath = path.join(process.cwd(), relativePath); 
+
+        if (!fs.existsSync(filePath)) {
+             console.error(`readFileContent: File not found at path: ${filePath} (derived from ${file.fileUrl})`);
+             return `[File ${file.filename} not found on server]`;
+        }
+
+        const content = await fs.promises.readFile(filePath, 'utf8');
+        if (content.length > maxLength) {
+            return content.substring(0, maxLength) + '\n... [Content Truncated] ...';
+        }
+        return content;
+    } catch (error) {
+        console.error(`readFileContent: Error reading file ${file.filename}:`, error);
+        return `[Error reading content of file ${file.filename}]`;
+    }
+}
+
+// Function to generate response for a single expert
+// Export this function so the orchestrator can use it
+export async function getExpertResponse(
+  expert: Expert, 
+  history: Message[], 
+  referenceMessageContent: string, 
+  files: File[],
+  availableRoles: string[] 
+): Promise<InsertMessage> { 
+  console.log(`Generating response for expert: ${expert.name} (${expert.role})`);
+  const systemPrompt = generateSystemPrompt(expert, availableRoles); 
+  
+  // 1. Initialize messages array with system prompt
+  const messages: AIMessage[] = [
+    { role: "system", content: systemPrompt }
+  ];
+
+  // 2. Add File Context (if any) as a system message
+  if (files.length > 0) {
+     let fileContextString = "\n\n--- Attached Files Context ---\n";
+     for (const file of files) {
+         const contentSnippet = await readFileContent(file); // Read content
+         fileContextString += `\nFile Name: ${file.filename} (${file.fileType})\n`;
+         if (contentSnippet) {
+              fileContextString += `Content Snippet:\n\`\`\`\n${contentSnippet}\n\`\`\`\n`;
+         }
+     }
+     fileContextString += "\n--- End Attached Files Context ---\n";
+     messages.push({ 
+         role: "system", 
+         content: fileContextString 
+     });
+  }
+
+  // 3. Add relevant history messages
+   messages.push(...history.map(msg => ({
+      role: mapDbRoleToApiRole(msg.role),
+      content: msg.content
+   })).slice(-15)); // Limit history length to avoid excessive context
+
+   // 4. Add the latest reference message last
+   messages.push({ role: "user", content: referenceMessageContent });
+
+   console.log(`[DEBUG] Sending ${messages.length} messages to LLM for ${expert.role}.`);
+   // Optional: Log the full message structure for detailed debugging
+   // console.log("[DEBUG] Messages:", JSON.stringify(messages, null, 2)); 
+
+  try {
+    let response: AIModelResponse;
+    
+    // Special handling for Research Analyst (Perplexity)
+    if (expert.role === "Research Analyst") {
+      // Perplexity might work better with just the query + file context?
+      // Let's try sending only system, file context, and reference message
+      const perplexityMessages = messages.filter(m => m.role === 'system' || m.role === 'user');
+      // Ensure the last message is the user query
+      if (perplexityMessages[perplexityMessages.length - 1]?.role !== 'user') {
+           perplexityMessages.push({ role: "user", content: referenceMessageContent });
+      }
+      console.log(`[DEBUG] Sending ${perplexityMessages.length} messages specifically to Perplexity.`);
+      response = await callPerplexityAPI(referenceMessageContent); // Perplexity API call structure might need only the query
+      // TODO: Re-evaluate if perplexity call should use messages array instead
+    } 
+    // Special handling for File Creator (JSON response expected)
+    else if (expert.role === "File Creator") {
+       response = await callOpenRouterAPI(messages, expert.model);
+       
+       try {
+         const fileData = JSON.parse(response.message.content);
+         
+         // Validate structure
+         if (!fileData.filename || !fileData.filetype || !fileData.content) {
+           throw new Error("Invalid JSON structure from File Creator");
+         }
+         
+         // Create file (similar logic to original processUserMessage)
+         const uploadsDir = path.join(process.cwd(), "uploads");
+         if (!fs.existsSync(uploadsDir)) {
+           fs.mkdirSync(uploadsDir);
+         }
+         const uniqueFilename = `${randomBytes(8).toString("hex")}-${fileData.filename}`;
+         const filePath = path.join(uploadsDir, uniqueFilename);
+         fs.writeFileSync(filePath, fileData.content);
+         const fileUrl = `/uploads/${uniqueFilename}`;
+
+         const newFile: InsertFile = {
+            conversationId: expert.conversationId,
+            filename: fileData.filename,
+            fileUrl: fileUrl,
+            fileType: fileData.filetype,
+            uploadedBy: `Expert: ${expert.name}`, // Mark as uploaded by expert
+         };
+         await storage.createFile(newFile);
+         
+         // Adjust response message to confirm file creation
+         response.message.content = `Created file: ${fileData.filename}`;
+
+       } catch (jsonError) {
+          console.error("File Creator error processing JSON:", jsonError);
+          // Fallback to a normal text response if JSON is invalid or file saving fails
+          response.message.content = "(File Creator Error: Could not process request to create file. Please ensure the request is clear and try again.)";
+       }
+    }
+    // Default handling for other experts (OpenRouter)
+    else {
+      response = await callOpenRouterAPI(messages, expert.model);
+    }
+    
+    return {
+      conversationId: expert.conversationId,
+      expertId: expert.id,
+      userId: null,
+      content: response.message.content,
+      role: "assistant",
+      expertName: expert.name,
+      expertRole: expert.role
+    };
+
+  } catch (error) {
+    console.error(`Error getting response from expert ${expert.name}:`, error);
+    // Return an error message formatted for storage
+    return {
+      conversationId: expert.conversationId,
+      expertId: expert.id,
+      userId: null,
+      content: `(Error generating response for ${expert.name}: ${error instanceof Error ? error.message : String(error)})`,
+      role: "assistant",
+      expertName: expert.name,
+      expertRole: expert.role,
+      // Consider adding an 'isError' flag if needed for UI
+    };
+  }
+}
+
+// OLD function - keep for reference or until fully deprecated
+// Function to process user message and get expert responses (PARALLEL)
+/*
 export async function processUserMessage(
   userId: number,
   conversationId: number, 
   userMessage: string
 ): Promise<InsertMessage[]> {
-  try {
-    // Create user message
-    const userMessageData: InsertMessage = {
-      conversationId,
-      userId,
-      expertId: null,
-      content: userMessage,
-      role: "user"
-    };
-    
-    // Store user message
-    await storage.createMessage(userMessageData);
-    
-    // Get conversation experts
-    const experts = await storage.getConversationExperts(conversationId);
-    if (experts.length === 0) {
-      throw new Error("No experts found for this conversation");
-    }
-    
-    // Get conversation history
-    const history = await storage.getConversationMessages(conversationId);
-    
-    // Get conversation files
-    const files = await storage.getConversationFiles(conversationId);
-    
-    // Process responses from each expert
-    const expertResponses: InsertMessage[] = [];
-    
-    for (const expert of experts) {
-      const expertResponse = await getExpertResponse(expert, history, userMessage, files);
-      expertResponses.push(expertResponse);
-    }
-    
-    return expertResponses;
-  } catch (error) {
-    console.error("Error processing user message:", error);
-    throw error;
-  }
+// ... existing parallel processing logic ...
 }
+*/
 
-// Helper to extract file content for context
-async function getFileContent(fileUrl: string, fileType: string): Promise<string | null> {
-  try {
-    // Get the absolute path from the relative URL
-    const filePath = path.join(process.cwd(), fileUrl.replace(/^\//, ''));
-    
-    // Check if file exists
-    if (!fs.existsSync(filePath)) {
-      console.error(`File not found: ${filePath}`);
-      return null;
-    }
-    
-    // Handle different file types
-    if (fileType.startsWith('text/') || 
-        fileType.includes('json') || 
-        fileType.includes('javascript') || 
-        fileType.includes('csv') ||
-        fileType.includes('xml')) {
-      // Read text files directly
-      return fs.readFileSync(filePath, 'utf8');
-    } else if (fileType.startsWith('image/')) {
-      // For images, just return a placeholder
-      return `[This is an image file that the experts can reference but cannot be directly included in the text. The image is available at ${fileUrl}]`;
-    } else {
-      // For other binary files, just indicate their presence
-      return `[This is a binary file (${fileType}) that can be referenced but not directly included in the text. The file is available at ${fileUrl}]`;
-    }
-  } catch (error) {
-    console.error(`Error retrieving file content: ${error}`);
-    return null;
-  }
-}
-
-// Helper function to create and save a file generated by AI
-async function createAndSaveFile(
-  conversationId: number,
-  fileName: string,
-  fileType: string,
-  content: string
-): Promise<InsertFile> {
-  try {
-    // Generate unique file name
-    const uniqueId = randomBytes(8).toString("hex");
-    const sanitizedFileName = fileName.replace(/[^a-zA-Z0-9_.-]/g, "_").replace(/^\.+$/, '_');
-    const uniqueFileName = `${uniqueId}-${sanitizedFileName}`;
-    
-    // Ensure uploads directory exists
-    const uploadsDir = path.join(process.cwd(), "uploads");
-    if (!fs.existsSync(uploadsDir)) {
-      fs.mkdirSync(uploadsDir, { recursive: true });
-    }
-    
-    // Write file
-    const filePath = path.join(uploadsDir, uniqueFileName);
-    fs.writeFileSync(filePath, content, "utf8");
-    
-    // Create file record in storage
-    const fileRecord: InsertFile = {
-      conversationId,
-      filename: sanitizedFileName,
-      fileUrl: `/uploads/${uniqueFileName}`,
-      fileType: fileType || "application/octet-stream",
-      uploadedBy: "ai"
-    };
-    
-    return await storage.createFile(fileRecord);
-    
-  } catch (error) {
-    console.error("Error saving generated file:", error);
-    if (error instanceof Error) {
-      throw new Error(`Failed to save generated file: ${error.message}`);
-    }
-    throw new Error("An unknown error occurred while saving the generated file.");
-  }
-}
-
-// Function to get a response from a specific expert
-async function getExpertResponse(
-  expert: Expert, 
-  conversationHistory: any[], 
-  userMessage: string,
-  files: any[] = []
-): Promise<InsertMessage> {
-  let expertMessage: InsertMessage; // Define message object outside try/catch
-
-  try {
-    // Prepare system prompt for the expert
-    const systemPrompt = expert.systemPrompt || generateSystemPrompt(expert);
-    
-    // Prepare messages for AI model
-    const messages: AIMessage[] = [
-      { role: "system", content: systemPrompt }
-    ];
-    
-    // Process files and add their context to the expert
-    if (files.length > 0) {
-      let fileContext = "The following files have been uploaded to the conversation and might be relevant:\n\n";
-      
-      for (const file of files) {
-        // Provide a link/reference and type for all files
-        fileContext += `- File: ${file.filename} (${file.fileType}) - available at ${file.fileUrl}\n`;
-        
-        // Include content snippets for specific roles or text-based files if needed for context
-        const shouldIncludeContent = (expert.role === "Moderator" || expert.role === "File Creator") ||
-                                     (expert.role === "Imagery Specialist" && file.fileType.startsWith("image/")) ||
-                                     (file.fileType?.startsWith("text/") || file.fileType?.includes("json") || file.fileType?.includes("csv")); 
-                                     
-        if (shouldIncludeContent && !file.fileType?.startsWith("image/")) {
-          const content = await getFileContent(file.fileUrl, file.fileType);
-          if (content) {
-            // Add a limited snippet to avoid excessive context length
-            const snippet = content.substring(0, 500); 
-            fileContext += `  Content Snippet: ${snippet}${content.length > 500 ? '...' : ''}\n\n`;
-          }
-        } else if (file.fileType?.startsWith("image/")) {
-          fileContext += "  (Image content available for analysis)\n\n";
-        } else {
-          fileContext += "  (File content not displayed in context)\n\n";
-        }
-      }
-      
-      // Add file context as a system message
-      messages.push({ 
-        role: "system", 
-        content: fileContext + "Reference these files in your responses when relevant."
-      });
-    }
-    
-    // Add relevant conversation history (ensure proper roles and filtering)
-    const historyToAdd = conversationHistory
-      .slice(-15) // Limit history length
-      .map(msg => {
-          // Map user messages
-          if (msg.role === 'user') return { role: 'user', content: msg.content };
-          // Map this expert's previous messages
-          if (msg.role === 'assistant' && msg.expertId === expert.id) return { role: 'assistant', content: msg.content };
-          // Map system messages about file uploads (if needed, simplified here)
-          if (msg.role === 'system' && msg.content.includes('Uploaded file:')) {
-            // Maybe simplify this representation for the AI
-            return { role: 'system', content: `System note: ${msg.content}` }; 
-          }
-          return null; // Ignore other messages (e.g., other experts' responses)
-      })
-      .filter(Boolean) as AIMessage[]; // Filter out nulls and assert type
-
-    messages.push(...historyToAdd);
-    
-    // Ensure the user's current message is the last one
-    if (messages[messages.length - 1]?.role !== "user" || messages[messages.length - 1]?.content !== userMessage) {
-         // Check if the user message is already in the filtered history to avoid duplicates
-         if (!historyToAdd.some(m => m.role === 'user' && m.content === userMessage)) {
-            messages.push({ role: "user", content: userMessage });
-         }
-    }
-   
-    let response: AIModelResponse;
-    
-    // Special handling for research analyst (Perplexity)
-    if (expert.role === "Research Analyst") {
-      // Perplexity often works best with just the direct query
-      response = await callPerplexityAPI(userMessage); 
-    } 
-    // Special handling for imagery specialist with image files
-    else if (expert.role === "Imagery Specialist" && files.some(f => f.fileType.startsWith("image/"))) {
-      // Prepare messages potentially including image URLs for vision model
-      // This might require specific formatting for the vision model API
-      // Assuming callOpenRouterAPI handles multimodal input appropriately if model supports it
-      const visionModelId = expert.model || "openai/gpt-4o"; // Use expert's model or default vision
-      try {
-          // Add image URLs to the last user message content if necessary for the model
-          const userMessageWithImages = { ...messages.pop() } as AIMessage; // Get last user message
-          const imageFiles = files.filter(f => f.fileType.startsWith("image/"));
-          
-          // Example: Construct content part for vision model (adapt based on API requirements)
-          const imageContentParts: any[] = imageFiles.map(f => ({
-              type: "image_url",
-              image_url: {
-                // Assuming fileUrl is accessible or needs modification for the API
-                url: `data:${f.fileType};base64,...` // Or direct URL if supported
-                // Note: Actual image data loading (e.g., to base64) might be needed here
-              }
-          }));
-
-          // Reconstruct messages for vision model (API dependent)
-          // This is a placeholder structure - specific API docs needed
-          const visionMessages = [
-              ...messages, 
-              { 
-                role: "user", 
-                content: [
-                    { type: "text", text: userMessageWithImages.content },
-                    ...imageContentParts // Add image parts here
-                ]
-              }
-          ];
-
-          // response = await callOpenRouterAPI(visionMessages, visionModelId); // Pass modified messages
-          // TEMPORARY: Fallback to text-only until vision handling is fully implemented
-          console.warn("Vision model integration placeholder used. Sending text-only to:", visionModelId);
-          response = await callOpenRouterAPI(messages, visionModelId);
-
-      } catch (err) {
-        console.error(`Error with vision model, falling back to standard model: ${err}`);
-        // Fallback to standard text-based call
-        messages.push({ role: "user", content: userMessage }); // Re-add user message if popped
-        response = await callOpenRouterAPI(messages, expert.model || "gpt-3.5-turbo"); // Use original model or default
-      }
-    }
-    else {
-      // Regular OpenRouter call for other experts
-      try {
-        response = await callOpenRouterAPI(messages, expert.model);
-      } catch (err: unknown) {
-        const errorMessage = err instanceof Error ? err.message : String(err);
-        console.error(`Error with OpenRouter for model ${expert.model}:`, errorMessage);
-        throw new Error(`Failed to get response from AI model (${expert.model}): ${errorMessage}`);
-      }
-    }
-    
-    // --- File Creator Logic ---
-    if (expert.role === "File Creator") {
-      try {
-        // Attempt to parse the response as JSON
-        const fileData = JSON.parse(response.message.content);
-        
-        // Validate the expected structure
-        if (fileData && typeof fileData.filename === 'string' && typeof fileData.content === 'string') {
-          // File type is optional but useful
-          const fileType = typeof fileData.filetype === 'string' ? fileData.filetype : 'text/plain'; 
-          
-          // Save the file using the helper function
-          const savedFile = await createAndSaveFile(
-            expert.conversationId,
-            fileData.filename,
-            fileType,
-            fileData.content
-          );
-          
-          // Create a confirmation message linking to the file
-          expertMessage = {
-            conversationId: expert.conversationId,
-            expertId: expert.id,
-            userId: null,
-            // Use markdown link format: [link text](url)
-            content: `I have created the file: [${savedFile.filename}](${savedFile.fileUrl})`, 
-            role: "assistant"
-          };
-          
-        } else {
-          // Malformed JSON or missing fields, fallback to text response
-          console.warn("File Creator response was not valid JSON or missed required fields. Treating as text.");
-          expertMessage = {
-            conversationId: expert.conversationId,
-            expertId: expert.id,
-            userId: null,
-            content: "I tried to create the file, but there was an issue with the format. Here is the content I generated:\n\n" + response.message.content,
-            role: "assistant"
-          };
-        }
-      } catch (parseError) {
-        // JSON parsing failed, treat the response as regular text
-        console.warn("File Creator response was not valid JSON. Treating as text:", parseError);
-        expertMessage = {
-          conversationId: expert.conversationId,
-          expertId: expert.id,
-          userId: null,
-          content: "I generated the following content, but couldn't format it as a downloadable file:\n\n" + response.message.content,
-          role: "assistant"
-        };
-      }
-    } else {
-      // --- Default Logic for other experts ---
-      expertMessage = {
-        conversationId: expert.conversationId,
-        expertId: expert.id,
-        userId: null,
-        content: response.message.content,
-        role: "assistant"
-      };
-    }
-    
-    // Store the final message (either confirmation or regular response)
-    return await storage.createMessage(expertMessage);
-
-  } catch (error) {
-    console.error(`Error getting response from ${expert.role}:`, error);
-    
-    // Ensure expertMessage is defined even in case of error before storage call
-    expertMessage = {
-      conversationId: expert.conversationId,
-      expertId: expert.id,
-      userId: null,
-      content: `I apologize, but I encountered an error while processing your request${error instanceof Error ? ': ' + error.message : ''}. Please try again later.`,
-      role: "assistant"
-    };
-    
-    // Attempt to store the error message, but don't crash if this fails too
-    try {
-      return await storage.createMessage(expertMessage);
-    } catch (storageError) {
-       console.error(`Failed to store error message for ${expert.role}:`, storageError);
-       // Return the error message object directly, it won't be stored but might be usable upstream
-       return expertMessage; 
-    }
-  }
-}
-
-// Generate insights from conversation
+// Function to generate insights (Re-enabled)
 export async function generateInsights(conversationId: number): Promise<void> {
   try {
     const messages = await storage.getConversationMessages(conversationId);
     if (messages.length < 3) return; // Not enough messages for insights
     
-    const lastMessages = messages.slice(-10).map(m => m.content).join("\n");
+    // Base insights on a larger portion of the conversation
+    const historyText = messages
+      .slice(-20) // Use last 20 messages
+      .map(m => `${m.expertName || m.role}: ${m.content}`) // Add role/name
+      .join("\n");
     
     const insightPrompt = `
-    Based on the following agricultural conversation, identify 1-3 key insights or recommendations:
+    Based on the following agricultural conversation transcript, identify 1-3 key insights, recommendations, or unresolved questions. Be concise.
     
-    ${lastMessages}
+    Transcript:
+    ${historyText}
     
-    Format your response as a JSON object with this structure:
+    Format your response STRICTLY as a JSON object with this structure:
     {
-      "title": "Brief topic title",
-      "points": ["Point 1", "Point 2", "Point 3"]
+      "title": "Brief overall topic",
+      "points": ["Insight/Recommendation 1", "Insight/Recommendation 2", "Insight/Recommendation 3"]
     }
+    Only output the JSON object.
     `;
     
     const response = await callOpenRouterAPI([
       { role: "system", content: "You extract key insights from agricultural conversations. Respond only with the requested JSON format." },
       { role: "user", content: insightPrompt }
-    ], "claude-3-sonnet-20240229");
+      // Use a capable model for summarization/extraction
+      // Using Mixtral Instruct as a generally available good option
+    ], "mistralai/mixtral-8x7b-instruct"); 
     
     try {
       const insightData = JSON.parse(response.message.content);
       
       if (insightData.title && Array.isArray(insightData.points) && insightData.points.length > 0) {
-        await storage.createInsight({
+        // Store insight using the existing create function
+        console.log(`Storing insights for conversation ${conversationId}:`, insightData);
+        await storage.createInsight({ 
           conversationId,
           title: insightData.title,
           points: insightData.points
         });
+        // TODO: Broadcast the new insights via WebSocket?
+      } else {
+         console.warn(`generateInsights: Received invalid JSON structure for ${conversationId}`, insightData);
       }
     } catch (e) {
-      console.error("Error parsing insights JSON:", e);
+      console.error(`generateInsights: Error parsing insights JSON for ${conversationId}:`, e, "\nRaw Response:", response.message.content);
     }
   } catch (error) {
-    console.error("Error generating insights:", error);
+    console.error(`generateInsights: Error generating insights for ${conversationId}:`, error);
   }
+}
+
+// New function to ask the Moderator who should speak next
+export async function getModeratorNextSpeakerSuggestion(
+  moderatorExpert: Expert,
+  history: Message[],
+  availableRoles: string[]
+): Promise<string | null> {
+    if (moderatorExpert.role !== 'Moderator') {
+        console.warn("Attempted to get speaker suggestion from non-moderator expert.");
+        return null;
+    }
+    console.log("Asking Moderator for next speaker suggestion...");
+    const moderatorSystemPrompt = generateSystemPrompt(moderatorExpert, availableRoles);
+    const queryPrompt = `Based on the recent conversation history, which expert should speak next to best advance the discussion towards resolution or new insights? The available expert roles are: [${availableRoles.join(', ')}]. Respond only with the role name or 'RoundRobin'.`;
+
+    const messages: AIMessage[] = [
+        { role: "system", content: moderatorSystemPrompt },
+        ...history.slice(-6).map(msg => ({ // Limit history for this specific query
+             role: mapDbRoleToApiRole(msg.role),
+             content: msg.content
+        })),
+        { role: "user", content: queryPrompt }
+    ];
+
+    try {
+        // Use a cheaper/faster model for this focused task if desired
+        const response = await callOpenRouterAPI(messages, moderatorExpert.model || 'mistralai/mistral-7b-instruct'); 
+        const suggestedRole = response.message.content.trim().replace(/\.$/, ''); // Clean up response
+        
+        // Validate if the suggestion is one of the available roles or RoundRobin
+        if (availableRoles.includes(suggestedRole) || suggestedRole === 'RoundRobin') {
+             console.log(`Moderator suggested next speaker: ${suggestedRole}`);
+            return suggestedRole;
+        } else {
+            console.warn(`Moderator suggested an invalid role: '${suggestedRole}'. Falling back.`);
+            return null; // Fallback if suggestion is invalid
+        }
+    } catch (error) {
+        console.error("Error querying Moderator for next speaker:", error);
+        return null; // Fallback on error
+    }
 }

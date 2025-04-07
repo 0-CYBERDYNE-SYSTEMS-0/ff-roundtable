@@ -10,6 +10,16 @@ import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { Expert, Message, Insight, File as FileType, Conversation } from "@shared/schema";
 import { useWebSocket } from "@/lib/websocket-utils";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { PlayIcon, PauseIcon, SettingsIcon, ZapIcon, ZapOffIcon } from "lucide-react";
+
+// Define the type for interaction modes matching the backend
+type InteractionMode = 
+    | "idle" 
+    | "processing_sequential" 
+    | "paused" 
+    | "autonomous";
 
 export default function HomePage() {
   const { user } = useAuth();
@@ -17,6 +27,12 @@ export default function HomePage() {
   const [activeConversation, setActiveConversation] = useState<number | null>(null);
   const [selectedExperts, setSelectedExperts] = useState<Expert[]>([]);
   const [showExpertSelector, setShowExpertSelector] = useState(false);
+  
+  // Add state for interaction control
+  const [interactionMode, setInteractionMode] = useState<InteractionMode>("idle");
+  const [isAutonomousEnabled, setIsAutonomousEnabled] = useState<boolean>(true); // Default to true initially
+  // We might also want to store maxAutonomousTurns if we allow setting it from UI
+  // const [maxAutonomousTurns, setMaxAutonomousTurns] = useState<number>(0);
   
   // WebSocket connection for real-time updates
   const socket = useWebSocket();
@@ -133,6 +149,8 @@ export default function HomePage() {
           expertId: null,
           content: newMessageContent,
           role: "user",
+          expertName: null,
+          expertRole: null,
           timestamp: new Date(),
         },
       ]);
@@ -154,10 +172,11 @@ export default function HomePage() {
     },
     onSettled: () => {
       if (!activeConversation) return;
-      const messagesQueryKey = [`/api/protected/conversations/${activeConversation}/messages`];
+      // const messagesQueryKey = [`/api/protected/conversations/${activeConversation}/messages`];
       
-      console.log("Message mutation settled, invalidating messages query to sync with server.");
-      queryClient.invalidateQueries({ queryKey: messagesQueryKey });
+      console.log("Message mutation settled. Update will come via WebSocket.");
+      // Remove the invalidation call here
+      // queryClient.invalidateQueries({ queryKey: messagesQueryKey }); 
     },
   });
   
@@ -207,6 +226,57 @@ export default function HomePage() {
     onError: (error: Error) => {
       toast({
         title: "Failed to generate insights",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
+  });
+  
+  // --- Interaction Control Mutations ---
+
+  // Enable Autonomous Mode mutation
+  const enableAutoMutation = useMutation({
+    // Takes an optional number for maxTurns
+    mutationFn: async (maxTurns?: number) => { 
+      if (!activeConversation) throw new Error("No active conversation");
+      const body: { maxTurns?: number } = {};
+      if (typeof maxTurns === 'number') {
+        body.maxTurns = maxTurns;
+      }
+      const res = await apiRequest("POST", `/api/protected/conversations/${activeConversation}/autonomous/enable`, body);
+      return await res.json();
+    },
+    onSuccess: () => {
+      toast({
+        title: "Autonomous mode enabled",
+      });
+       // State update will come via WebSocket
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Failed to enable autonomous mode",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
+  });
+
+  // Disable Autonomous Mode mutation
+  const disableAutoMutation = useMutation({
+    mutationFn: async () => {
+      if (!activeConversation) throw new Error("No active conversation");
+      const res = await apiRequest("POST", `/api/protected/conversations/${activeConversation}/autonomous/disable`, {});
+      return await res.json();
+    },
+    onSuccess: () => {
+      toast({
+        title: "Autonomous mode disabled",
+      });
+       // State update will come via WebSocket
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Failed to disable autonomous mode",
         description: error.message,
         variant: "destructive",
       });
@@ -266,59 +336,115 @@ export default function HomePage() {
     }
   }, [experts]);
   
-  // Effect to handle WebSocket messages
+  // === WebSocket Message Handling ===
   useEffect(() => {
-    if (socket) {
-      socket.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          
-          if (data.conversationId === activeConversation) {
-            if (data.type === "messages_updated") {
-              console.log("WebSocket: Received messages_updated signal");
-              
-              // Instead of just invalidating, which causes a refetch,
-              // we'll directly update the cache if we have message data
-              if (data.message) {
-                // Get current messages from cache
-                const messagesQueryKey = [`/api/protected/conversations/${activeConversation}/messages`];
-                const currentMessages = queryClient.getQueryData<Message[]>(messagesQueryKey) || [];
-                
-                // Check if this message already exists in our cache
-                const messageExists = currentMessages.some(msg => msg.id === data.message.id);
-                
-                if (!messageExists) {
-                  // Add the new message to our cache immediately
-                  queryClient.setQueryData<Message[]>(messagesQueryKey, 
-                    [...currentMessages, data.message]
-                  );
-                  console.log("WebSocket: Added new message from expert to cache");
-                }
-              } else {
-                // Fallback to invalidation if no message data is provided
-                queryClient.invalidateQueries({ 
-                  queryKey: [`/api/protected/conversations/${activeConversation}/messages`] 
-                });
-              }
-            } else if (data.type === "insights") {
-              console.log("WebSocket: Received insights update signal, invalidating insights query.");
-              queryClient.invalidateQueries({ 
-                queryKey: [`/api/protected/conversations/${activeConversation}/insights`] 
-              });
-            }
-          }
-        } catch (error) {
-          console.error("Error parsing WebSocket message:", error);
+    if (!socket || !activeConversation) return;
+
+    const handleWebSocketMessage = (event: MessageEvent) => {
+      try {
+        const parsedData = JSON.parse(event.data);
+        console.log("WebSocket received:", parsedData);
+
+        // Check if the message is for the active conversation
+        if (parsedData.conversationId !== activeConversation) {
+            console.log("WS message ignored (wrong conversation)");
+            return;
         }
-      };
-    }
-    
-    return () => {
-      if (socket) {
-        socket.onmessage = null;
+
+        // Handle different message types
+        switch (parsedData.type) {
+          case "messages_updated":
+          case "message_error": // Handle errors similarly to new messages for display
+            // Check if the message data exists in the payload
+            if (parsedData.message && parsedData.message.id) {
+              const newMessage: Message = parsedData.message;
+              const messagesQueryKey = [`/api/protected/conversations/${activeConversation}/messages`];
+              
+              // Update the query cache directly
+              queryClient.setQueryData<Message[]>(messagesQueryKey, (oldData) => {
+                if (!oldData) return [newMessage]; // If cache is empty, start with new message
+                // Avoid adding duplicates
+                if (oldData.some(msg => msg.id === newMessage.id)) {
+                  return oldData;
+                }
+                return [...oldData, newMessage];
+              });
+              console.log("WebSocket: Added/updated message in cache.", newMessage.id);
+            } else {
+              // Fallback to invalidation if message payload is missing (shouldn't happen ideally)
+              console.warn("WebSocket: messages_updated signal received without message payload. Invalidating query.");
+              queryClient.invalidateQueries({ queryKey: [`/api/protected/conversations/${activeConversation}/messages`] });
+            }
+            break;
+          
+          case "state_update":
+            console.log("WebSocket: Received state_update signal", parsedData);
+            if (parsedData.mode) {
+              console.log(`[UI State] Setting interactionMode to: ${parsedData.mode}`);
+              setInteractionMode(parsedData.mode as InteractionMode);
+            }
+            if (typeof parsedData.isAutonomousEnabled === 'boolean') {
+              console.log(`[UI State] Setting isAutonomousEnabled to: ${parsedData.isAutonomousEnabled}`);
+              setIsAutonomousEnabled(parsedData.isAutonomousEnabled);
+            }
+            // Optionally update maxAutonomousTurns if needed for UI display
+            /*
+            if (typeof parsedData.maxAutonomousTurns === 'number') {
+               // setMaxAutonomousTurns(parsedData.maxAutonomousTurns);
+            }
+            */
+            break;
+
+          case "insights":
+             console.log("WebSocket: Received insights signal");
+             queryClient.invalidateQueries({ queryKey: [`/api/protected/conversations/${activeConversation}/insights`] });
+             break;
+
+          // Handle other types like connection confirmation, file updates etc. if needed
+          case "connection":
+            console.log("WebSocket: Connection confirmed.");
+            break;
+
+          default:
+            console.log("WebSocket: Received unhandled message type:", parsedData.type);
+        }
+      } catch (error) {
+        console.error("Error processing WebSocket message:", error);
       }
     };
-  }, [socket, activeConversation]);
+
+    socket.addEventListener("message", handleWebSocketMessage);
+
+    // Cleanup function
+    return () => {
+      socket.removeEventListener("message", handleWebSocketMessage);
+    };
+  }, [socket, activeConversation]); // Re-run effect if socket or active conversation changes
+  
+  // === Control Handlers ===
+  // REMOVED handlePause and handleResume
+
+  // Handler specifically for Enabling Auto Mode
+  const handleEnableAutonomous = () => {
+    console.log("[UI Click] Handle Enable Autonomous triggered.");
+    if (activeConversation) {
+        console.log("[UI Click] Calling enableAutoMutation.mutate(undefined)");
+        enableAutoMutation.mutate(undefined); 
+    } else {
+         console.log("[UI Click] Enable Autonomous condition not met (no active conversation).");
+    }
+  };
+
+  // Handler specifically for Disabling Auto Mode
+  const handleDisableAutonomous = () => {
+    console.log("[UI Click] Handle Disable Autonomous triggered.");
+    if (activeConversation) {
+        console.log("[UI Click] Calling disableAutoMutation.mutate()");
+        disableAutoMutation.mutate();
+    } else {
+         console.log("[UI Click] Disable Autonomous condition not met (no active conversation).");
+    }
+  };
   
   return (
     <div className="flex flex-col h-screen">
@@ -340,32 +466,89 @@ export default function HomePage() {
         />
         
         {/* Main Content Area */}
-        <div className="flex-1 flex flex-col">
-          {activeConversation ? (
-            <ChatInterface
-              messages={messages || []}
-              experts={experts || []}
-              onSendMessage={(content) => sendMessageMutation.mutate(content)}
-              onUploadFile={handleFileUpload}
-              isLoading={sendMessageMutation.isPending}
-              user={user}
-              insights={insights || []}
-              visualizations={[]} // We'll populate this with extracted visualizations
-            />
-          ) : (
-            <div className="flex-1 flex items-center justify-center">
-              <div className="text-center">
-                <h2 className="text-xl font-semibold text-neutral-800 mb-2">Welcome to Farm Friend Roundtable</h2>
-                <p className="text-neutral-600 mb-4">Start a new conversation to begin chatting with agricultural experts</p>
-                <button
-                  onClick={handleStartNewSession}
-                  className="bg-primary text-white px-4 py-2 rounded-lg hover:bg-primary-dark transition-colors"
-                >
-                  Start New Roundtable
-                </button>
-              </div>
-            </div>
-          )}
+        <div className="flex-1 flex flex-col overflow-hidden min-h-0">
+            {/* Log state values just before rendering controls - Corrected JSX */} 
+            {activeConversation && (() => { 
+                console.log(`[Render Check] Mode: ${interactionMode}, AutoEnabled: ${isAutonomousEnabled}, EnablePending: ${enableAutoMutation.isPending}, DisablePending: ${disableAutoMutation.isPending}`);
+                return null; // Return null to render nothing
+            })()}
+            {/* === Interaction Control Bar (Positioned at the top of this column) === */} 
+            {activeConversation && (
+                 <div className="flex-shrink-0 flex items-center justify-between px-4 py-2 border-b bg-slate-50">
+                     <div className="flex items-center gap-2">
+                         <span className="text-sm font-medium text-slate-600">Status:</span>
+                         <Badge variant={interactionMode === 'paused' ? 'secondary' : interactionMode === 'idle' ? 'outline' : 'default'}
+                                className={`${interactionMode === 'autonomous' || interactionMode === 'processing_sequential' ? 'bg-green-100 text-green-800' : ''}
+                                          ${interactionMode === 'paused' ? 'bg-yellow-100 text-yellow-800' : ''}`}>
+                             {interactionMode.replace('_', ' ')}
+                         </Badge>
+                          <span className="text-sm font-medium text-slate-600 ml-4">Autonomous:</span>
+                         <Badge variant={isAutonomousEnabled ? 'default' : 'secondary'}
+                                className={isAutonomousEnabled ? 'bg-blue-100 text-blue-800' : ''}>
+                             {isAutonomousEnabled ? 'Enabled' : 'Disabled'}
+                         </Badge>
+                     </div>
+                     <div className="flex items-center gap-2">
+                          {/* Buttons moved here, removed pause/resume */}
+                          {/* Conditionally Render Disable Button */} 
+                         {isAutonomousEnabled && (
+                            <Button 
+                                variant="outline" 
+                                size="sm" 
+                                onClick={handleDisableAutonomous} 
+                                disabled={disableAutoMutation.isPending} 
+                                aria-label="Disable Autonomous Mode"
+                                >
+                                <ZapOffIcon className="h-4 w-4 mr-1" />
+                                Disable Auto
+                            </Button>
+                         )}
+
+                         {/* Conditionally Render Enable Button */} 
+                         {!isAutonomousEnabled && (
+                             <Button 
+                                 variant="outline" 
+                                 size="sm" 
+                                 onClick={handleEnableAutonomous} 
+                                 disabled={enableAutoMutation.isPending} 
+                                 aria-label="Enable Autonomous Mode"
+                                 >
+                                 <ZapIcon className="h-4 w-4 mr-1" />
+                                 Enable Auto
+                             </Button>
+                         )}
+                     </div>
+                 </div>
+            )}
+
+            {/* === Chat Area (Takes remaining space) === */} 
+             <div className="flex-1 overflow-y-auto">
+                 {activeConversation ? (
+                    <ChatInterface
+                        messages={messages || []}
+                        experts={experts || []}
+                        onSendMessage={(content) => sendMessageMutation.mutate(content)}
+                        onUploadFile={handleFileUpload}
+                        isLoading={sendMessageMutation.isPending}
+                        user={user}
+                        insights={insights || []}
+                        visualizations={[]}
+                    />
+                ) : (
+                    <div className="flex-1 flex items-center justify-center">
+                        <div className="text-center">
+                            <h2 className="text-xl font-semibold text-neutral-800 mb-2">Welcome to Farm Friend Roundtable</h2>
+                            <p className="text-neutral-600 mb-4">Start a new conversation to begin chatting with agricultural experts</p>
+                            <button
+                                onClick={handleStartNewSession}
+                                className="bg-primary text-white px-4 py-2 rounded-lg hover:bg-primary-dark transition-colors"
+                            >
+                                Start New Roundtable
+                            </button>
+                        </div>
+                    </div>
+                )}
+             </div>
         </div>
       </div>
 
