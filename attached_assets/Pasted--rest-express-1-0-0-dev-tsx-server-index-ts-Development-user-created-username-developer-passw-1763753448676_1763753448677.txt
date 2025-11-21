@@ -1,0 +1,66 @@
+
+> rest-express@1.0.0 dev
+> tsx server/index.ts
+
+Development user created: username=developer, password=password
+Development login endpoint registered at /api/dev-login
+WebSocket server initialized on path: /ws
+7:21:41 PM [express] serving on port 5000
+WebSocket client connected
+WebSocket client disconnected
+WebSocket client connected
+Browserslist: browsers data (caniuse-lite) is 13 months old. Please run:
+  npx update-browserslist-db@latest
+  Why you should do it regularly: https://github.com/browserslist/update-db#readme
+7:21:45 PM [express] GET /api/user 401 in 2ms
+WebSocket client disconnected
+7:25:01 PM [express] GET /api/user 401 in 1ms
+7:25:05 PM [express] POST /api/dev-login 200 in 5ms :: {"id":1,"username":"developer","email":"dev@e…
+7:25:05 PM [express] GET /api/subscription-status 304 in 1ms :: {"subscribed":true,"status":"active"}
+7:25:05 PM [express] GET /api/protected/conversations 200 in 1ms :: []
+WebSocket client connected
+7:25:11 PM [express] POST /api/protected/conversations 201 in 1ms :: {"userId":1,"title":"New Conver…
+7:25:11 PM [express] GET /api/protected/conversations/1/messages 200 in 2ms :: []
+7:25:11 PM [express] GET /api/protected/conversations 200 in 2ms :: [{"userId":1,"title":"New Conver…
+7:25:11 PM [express] GET /api/protected/conversations/1/experts 200 in 1ms :: []
+7:25:11 PM [express] GET /api/protected/conversations/1/insights 304 in 1ms :: []
+7:25:11 PM [express] GET /api/protected/conversations/1/files 304 in 1ms :: []
+7:26:44 PM [express] POST /api/protected/conversations/1/experts 201 in 2ms :: {"conversationId":1,"…
+7:26:44 PM [express] POST /api/protected/conversations/1/experts 201 in 1ms :: {"conversationId":1,"…
+7:26:44 PM [express] POST /api/protected/conversations/1/experts 201 in 1ms :: {"conversationId":1,"…
+7:26:44 PM [express] POST /api/protected/conversations/1/experts 201 in 1ms :: {"conversationId":1,"…
+7:26:44 PM [express] GET /api/protected/conversations/1/experts 200 in 1ms :: [{"conversationId":1,"…
+7:26:44 PM [express] GET /api/protected/conversations/1/experts 200 in 2ms :: [{"conversationId":1,"…
+7:26:44 PM [express] GET /api/protected/conversations/1/experts 200 in 1ms :: [{"conversationId":1,"…
+7:26:44 PM [express] GET /api/protected/conversations/1/experts 304 in 1ms :: [{"conversationId":1,"…
+Initialized state for 1, Auto ON (max 8 turns)
+State updated for 1: mode=processing_sequential, expertIndex=-1, autoTurns=0/8, interrupted=false
+Broadcasted state update for 1: mode=processing_sequential, autoEnabled=true
+Orchestrator starting processing sequence for conv 1
+7:27:07 PM [express] POST /api/protected/conversations/1/messages 201 in 2ms :: {"conversationId":1,…
+State updated for 1: mode=processing_sequential, expertIndex=0, autoTurns=0/8, interrupted=false
+Orchestrator turn: Expert Dr. Soil (Index: 0, Mode: processing_sequential, Auto Turn: 0/8)
+Generating response for expert: Dr. Soil (Soil Scientist)
+[DEBUG] Sending 3 messages to LLM for Soil Scientist.
+[DEBUG] Entering callOpenRouterAPI for model: x-ai/grok-4.1-fast:free
+[DEBUG] Calling OpenRouter fetch: https://openrouter.ai/api/v1/chat/completions, Model: x-ai/grok-4.1-fast:free
+7:27:07 PM [express] GET /api/protected/conversations/1/messages 200 in 1ms :: [{"conversationId":1,…
+7:27:07 PM [express] GET /api/protected/conversations/1/messages 304 in 1ms :: [{"conversationId":1,…
+[DEBUG] OpenRouter fetch completed. Status: 200
+[DEBUG] OpenRouter response OK. Parsing JSON...
+[DEBUG] OpenRouter JSON parsed successfully.
+[DEBUG] OpenRouter response structure validated. Returning message.
+Orchestrator broadcasted response from Dr. Soil
+[DEBUG] Decide Next Action for 1 | Current Mode: processing_sequential | Last Expert Index: 0 | Next Calculated Index: 0 | Auto Turns: 0/8
+[DEBUG] wasEndOfSequentialRound = false
+[DEBUG] Set continueProcessing = true (Continuing Sequential)
+[DEBUG] Final check before scheduling: continueProcessing=true, finalMode=processing_sequential, finalInterrupted=false
+[DEBUG] Scheduling next turn via setImmediate.
+State updated for 1: mode=processing_sequential, expertIndex=1, autoTurns=0/8, interrupted=false
+Orchestrator turn: Expert Hydro Engineer (Index: 1, Mode: processing_sequential, Auto Turn: 0/8)
+Generating response for expert: Hydro Engineer (Irrigation Engineer)
+[DEBUG] Sending 4 messages to LLM for Irrigation Engineer.
+[DEBUG] Entering callOpenRouterAPI for model: z-ai/glm-4.5-air:free
+[DEBUG] Calling OpenRouter fetch: https://openrouter.ai/api/v1/chat/completions, Model: z-ai/glm-4.5-air:free
+[DEBUG] OpenRouter fetch completed. Status: 200
+[DEBUG] OpenRouter response OK. Parsing JSON...

@@ -103,20 +103,53 @@ export async function registerRoutes(app: Express): Promise<Server> {
     wss.clients.forEach((client) => {
       if (client.readyState === 1) { // OPEN
         try {
-          // Determine the type of message based on the data structure
-          let messageType = "messages_updated"; // Default type
-          
-          // If data has insights property, it's an insights update
-          if (data.type === "insights") {
-            messageType = "insights";
+          // Handle state_update messages (mode, autonomous status)
+          if (data.type === "state_update") {
+            client.send(JSON.stringify({
+              type: "state_update",
+              conversationId,
+              mode: data.mode,
+              isAutonomousEnabled: data.isAutonomousEnabled,
+              maxAutonomousTurns: data.maxAutonomousTurns
+            }));
           }
-          
-          // Send properly formatted message with the actual message content
-          client.send(JSON.stringify({
-            type: messageType,
-            conversationId,
-            message: data.type === "insights" ? null : data // For messages_updated, send the actual message
-          }));
+          // Handle insights updates
+          else if (data.type === "insights") {
+            client.send(JSON.stringify({
+              type: "insights",
+              conversationId
+            }));
+          }
+          // Handle error messages
+          else if (data.type === "message_error") {
+            client.send(JSON.stringify({
+              type: "message_error",
+              conversationId,
+              message: {
+                id: Date.now(),
+                conversationId,
+                content: `(Error generating response: ${data.message || 'Unknown error'})`,
+                role: "assistant",
+                expertId: data.expertId,
+                expertName: data.expertName,
+                expertRole: null,
+                userId: null,
+                timestamp: new Date()
+              }
+            }));
+          }
+          // Handle regular messages (Message objects)
+          else if (data.id && data.conversationId !== undefined && data.content) {
+            client.send(JSON.stringify({
+              type: "messages_updated",
+              conversationId,
+              message: data
+            }));
+          }
+          // Fallback for unknown types
+          else {
+            console.warn("Unknown broadcast data type:", data);
+          }
         } catch (error) {
           console.error("Error broadcasting message:", error);
         }

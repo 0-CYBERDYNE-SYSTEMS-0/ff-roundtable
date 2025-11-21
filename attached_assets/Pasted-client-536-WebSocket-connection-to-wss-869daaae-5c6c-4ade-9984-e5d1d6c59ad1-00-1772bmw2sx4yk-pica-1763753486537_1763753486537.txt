@@ -1,0 +1,37 @@
+client:536 WebSocket connection to 'wss://869daaae-5c6c-4ade-9984-e5d1d6c59ad1-00-1772bmw2sx4yk.picard.replit.dev/?token=Ri8rdqzi-CDw' failed: 
+setupWebSocket @ client:536
+client:536 Uncaught (in promise) SyntaxError: Failed to construct 'WebSocket': The URL 'wss://localhost:undefined/?token=Ri8rdqzi-CDw' is invalid.
+    at setupWebSocket (client:536:19)
+    at fallback (client:509:16)
+    at WebSocket.<anonymous> (client:555:7)
+chunk-RPCDYKBN.js?v=d01d6ba8:21551 Download the React DevTools for a better development experience: https://reactjs.org/link/react-devtools
+/api/user:1  Failed to load resource: the server responded with a status of 401 (Unauthorized)
+websocket-utils.ts:16 Attempting to connect to WebSocket at: wss://869daaae-5c6c-4ade-9984-e5d1d6c59ad1-00-1772bmw2sx4yk.picard.replit.dev/ws
+websocket-utils.ts:23 WebSocket connection established
+home-page.tsx:472 [Render Check] Mode: idle, AutoEnabled: true, EnablePending: false, DisablePending: false
+home-page.tsx:472 [Render Check] Mode: idle, AutoEnabled: true, EnablePending: false, DisablePending: false
+home-page.tsx:472 [Render Check] Mode: idle, AutoEnabled: true, EnablePending: false, DisablePending: false
+home-page.tsx:472 [Render Check] Mode: idle, AutoEnabled: true, EnablePending: false, DisablePending: false
+home-page.tsx:472 [Render Check] Mode: idle, AutoEnabled: true, EnablePending: false, DisablePending: false
+home-page.tsx:472 [Render Check] Mode: idle, AutoEnabled: true, EnablePending: false, DisablePending: false
+home-page.tsx:472 [Render Check] Mode: idle, AutoEnabled: true, EnablePending: false, DisablePending: false
+home-page.tsx:472 [Render Check] Mode: idle, AutoEnabled: true, EnablePending: false, DisablePending: false
+home-page.tsx:472 [Render Check] Mode: idle, AutoEnabled: true, EnablePending: false, DisablePending: false
+home-page.tsx:472 [Render Check] Mode: idle, AutoEnabled: true, EnablePending: false, DisablePending: false
+home-page.tsx:472 [Render Check] Mode: idle, AutoEnabled: true, EnablePending: false, DisablePending: false
+home-page.tsx:472 [Render Check] Mode: idle, AutoEnabled: true, EnablePending: false, DisablePending: false
+home-page.tsx:346 WebSocket received: Object
+home-page.tsx:372 WebSocket: Added/updated message in cache. 1
+home-page.tsx:346 WebSocket received: Object
+home-page.tsx:375 WebSocket: messages_updated signal received without message payload. Invalidating query.
+handleWebSocketMessage @ home-page.tsx:375
+home-page.tsx:472 [Render Check] Mode: idle, AutoEnabled: true, EnablePending: false, DisablePending: false
+home-page.tsx:346 WebSocket received: Object
+home-page.tsx:375 WebSocket: messages_updated signal received without message payload. Invalidating query.
+handleWebSocketMessage @ home-page.tsx:375
+home-page.tsx:177 Message mutation settled. Update will come via WebSocket.
+home-page.tsx:472 [Render Check] Mode: idle, AutoEnabled: true, EnablePending: false, DisablePending: false
+home-page.tsx:472 [Render Check] Mode: idle, AutoEnabled: true, EnablePending: false, DisablePending: false
+home-page.tsx:346 WebSocket received: Object
+home-page.tsx:372 WebSocket: Added/updated message in cache. 2
+home-page.tsx:472 [Render Check] Mode: idle, AutoEnabled: true, EnablePending: false, DisablePending: false

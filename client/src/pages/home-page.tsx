@@ -31,6 +31,7 @@ export default function HomePage() {
   // Add state for interaction control
   const [interactionMode, setInteractionMode] = useState<InteractionMode>("idle");
   const [isAutonomousEnabled, setIsAutonomousEnabled] = useState<boolean>(true); // Default to true initially
+  const [isProcessing, setIsProcessing] = useState<boolean>(false); // Track if experts are currently responding
   // We might also want to store maxAutonomousTurns if we allow setting it from UI
   // const [maxAutonomousTurns, setMaxAutonomousTurns] = useState<number>(0);
   
@@ -370,6 +371,7 @@ export default function HomePage() {
                 return [...oldData, newMessage];
               });
               console.log("WebSocket: Added/updated message in cache.", newMessage.id);
+              setIsProcessing(false); // Message received, processing complete
             } else {
               // Fallback to invalidation if message payload is missing (shouldn't happen ideally)
               console.warn("WebSocket: messages_updated signal received without message payload. Invalidating query.");
@@ -382,6 +384,8 @@ export default function HomePage() {
             if (parsedData.mode) {
               console.log(`[UI State] Setting interactionMode to: ${parsedData.mode}`);
               setInteractionMode(parsedData.mode as InteractionMode);
+              // Set isProcessing to true when entering processing_sequential or autonomous mode
+              setIsProcessing(parsedData.mode === "processing_sequential" || parsedData.mode === "autonomous");
             }
             if (typeof parsedData.isAutonomousEnabled === 'boolean') {
               console.log(`[UI State] Setting isAutonomousEnabled to: ${parsedData.isAutonomousEnabled}`);
