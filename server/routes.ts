@@ -12,6 +12,17 @@ import Stripe from "stripe";
 import { WebSocketServer } from "ws";
 import { InsertConversation, InsertExpert, InsertMessage, Message } from "@shared/schema";
 
+// Load dev config
+let devConfig: any = null;
+try {
+  const devConfigPath = path.join(process.cwd(), "server", "dev-config.json");
+  if (fs.existsSync(devConfigPath)) {
+    devConfig = JSON.parse(fs.readFileSync(devConfigPath, "utf-8"));
+  }
+} catch (e) {
+  console.warn("Could not load dev-config.json");
+}
+
 // Initialize file upload middleware
 const upload = multer({
   dest: path.join(process.cwd(), "uploads"),
@@ -60,6 +71,46 @@ export async function registerRoutes(app: Express): Promise<Server> {
     });
     
     console.log("Development login endpoint registered at /api/dev-login");
+    
+    // Quick setup endpoint for testing
+    if (devConfig && devConfig.enabled) {
+      app.post("/api/dev/quick-setup", async (req, res) => {
+        try {
+          const userId = req.user?.id;
+          if (!userId) {
+            return res.status(401).json({ message: "Not authenticated" });
+          }
+          
+          // Create conversation
+          const conversation = await storage.createConversation({
+            userId,
+            title: "Quick Test Roundtable"
+          });
+          
+          // Add all experts from config
+          const expertPromises = devConfig.experts.map((expert: any) =>
+            storage.createExpert({
+              conversationId: conversation.id,
+              name: expert.name,
+              role: expert.role,
+              model: expert.model,
+              avatarUrl: expert.avatarUrl,
+              systemPrompt: generateSystemPrompt(expert.role)
+            })
+          );
+          
+          await Promise.all(expertPromises);
+          
+          res.json({ 
+            conversationId: conversation.id,
+            expertCount: devConfig.experts.length 
+          });
+        } catch (error: any) {
+          console.error("Dev quick setup error:", error);
+          res.status(500).json({ message: error.message });
+        }
+      });
+    }
   }
   
   const httpServer = createServer(app);

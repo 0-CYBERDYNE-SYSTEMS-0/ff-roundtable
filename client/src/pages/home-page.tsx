@@ -12,7 +12,7 @@ import { Expert, Message, Insight, File as FileType, Conversation } from "@share
 import { useWebSocket } from "@/lib/websocket-utils";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { PlayIcon, PauseIcon, SettingsIcon, ZapIcon, ZapOffIcon } from "lucide-react";
+import { PlayIcon, PauseIcon, SettingsIcon, ZapIcon, ZapOffIcon, Zap } from "lucide-react";
 
 // Define the type for interaction modes matching the backend
 type InteractionMode = 
@@ -60,6 +60,29 @@ export default function HomePage() {
     onError: (error: Error) => {
       toast({
         title: "Failed to create conversation",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
+  });
+  
+  // Quick setup for development
+  const quickSetupMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/dev/quick-setup", {});
+      return await res.json();
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/protected/conversations"] });
+      setActiveConversation(data.conversationId);
+      toast({
+        title: "Roundtable ready",
+        description: `Loaded ${data.expertCount} experts`,
+      });
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Quick setup failed",
         description: error.message,
         variant: "destructive",
       });
