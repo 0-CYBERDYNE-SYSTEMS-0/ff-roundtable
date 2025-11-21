@@ -760,5 +760,86 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // TEST ENDPOINT - Development only
+  if (DEVELOPMENT_MODE) {
+    app.post("/api/dev/test-artifacts/:conversationId", async (req, res) => {
+      try {
+        const conversationId = parseInt(req.params.conversationId);
+        
+        // Create a test message with various artifacts
+        const testMessage = {
+          id: Date.now(),
+          conversationId,
+          expertId: 1,
+          userId: null,
+          content: "Here are the test artifacts you requested:",
+          role: "assistant",
+          expertName: "Test Expert",
+          expertRole: "Test Role",
+          timestamp: new Date(),
+          artifacts: [
+            {
+              type: "json",
+              title: "Crop Rotation Plan",
+              content: JSON.stringify({
+                farmName: "Green Acres",
+                totalAcres: 50,
+                years: [
+                  {
+                    year: 2025,
+                    fields: [
+                      {
+                        fieldId: "A",
+                        acres: 16.7,
+                        crop: "Corn",
+                        soilType: "Loam",
+                        nutrients: { nitrogen: "High", phosphorus: "Medium" }
+                      },
+                      {
+                        fieldId: "B",
+                        acres: 16.7,
+                        crop: "Soybeans",
+                        soilType: "Clay Loam",
+                        nutrients: { nitrogen: "Low", phosphorus: "High" }
+                      }
+                    ]
+                  }
+                ]
+              }, null, 2),
+              language: "json"
+            },
+            {
+              type: "table",
+              title: "Soil Analysis Results",
+              content: "| Field | pH | Nitrogen | Phosphorus | Potassium |\n|-------|-----|----------|------------|----------|\n| A | 6.5 | High | Medium | Low |\n| B | 6.8 | Low | High | Medium |\n| C | 7.0 | Medium | Medium | High |"
+            }
+          ]
+        };
+        
+        // Directly add to storage
+        const createdMessage = await storage.createMessage({
+          conversationId,
+          expertId: testMessage.expertId,
+          userId: null,
+          content: testMessage.content,
+          role: testMessage.role,
+          expertName: testMessage.expertName,
+          expertRole: testMessage.expertRole
+        });
+        
+        // Manually set artifacts (since InsertMessage schema doesn't include them)
+        (createdMessage as any).artifacts = testMessage.artifacts;
+        
+        // Broadcast via WebSocket
+        broadcastToConversation(conversationId, createdMessage);
+        
+        res.status(201).json(createdMessage);
+      } catch (error: any) {
+        console.error("Error creating test artifacts:", error);
+        res.status(500).json({ message: error.message });
+      }
+    });
+  }
+
   return httpServer;
 }
