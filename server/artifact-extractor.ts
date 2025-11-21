@@ -12,7 +12,8 @@ export function extractArtifacts(content: string): { artifacts: Artifact[]; clea
   const artifactBlockRegex = /```(html|json|chart|code|table|jsx|typescript|javascript|python)\n([\s\S]*?)```/gi;
   let match;
   
-  while ((match = artifactBlockRegex.exec(content)) !== null) {
+  // Run regex on cleanContent and update it progressively
+  while ((match = artifactBlockRegex.exec(cleanContent)) !== null) {
     const type = match[1].toLowerCase();
     const rawContent = match[2].trim();
     
@@ -47,8 +48,9 @@ export function extractArtifacts(content: string): { artifacts: Artifact[]; clea
       language
     });
     
-    // Remove from content to get clean version
+    // Remove from cleanContent immediately and reset regex
     cleanContent = cleanContent.replace(match[0], "");
+    artifactBlockRegex.lastIndex = 0; // Reset regex position after mutation
   }
   
   // Pattern 2: Markdown tables (detect | ... | patterns)
@@ -56,7 +58,7 @@ export function extractArtifacts(content: string): { artifacts: Artifact[]; clea
   let tableMatch;
   let tableCount = 0;
   
-  while ((tableMatch = tableRegex.exec(content)) !== null) {
+  while ((tableMatch = tableRegex.exec(cleanContent)) !== null) {
     const tableContent = tableMatch[0].trim();
     
     artifacts.push({
@@ -69,27 +71,8 @@ export function extractArtifacts(content: string): { artifacts: Artifact[]; clea
     cleanContent = cleanContent.replace(tableContent, "");
   }
   
-  // Pattern 3: JSON code blocks (detect JSON structure)
-  const jsonBlockRegex = /```(json|JSON)\n([\s\S]*?)```/g;
-  let jsonMatch;
-  
-  while ((jsonMatch = jsonBlockRegex.exec(content)) !== null) {
-    const rawContent = jsonMatch[2].trim();
-    
-    // Verify it's valid JSON
-    try {
-      JSON.parse(rawContent);
-      artifacts.push({
-        type: "json",
-        title: "JSON Data",
-        content: rawContent,
-        language: "json"
-      });
-      cleanContent = cleanContent.replace(jsonMatch[0], "");
-    } catch {
-      // Not valid JSON, skip
-    }
-  }
+  // Pattern 3 removed: Pattern 1 already handles ```json blocks
+  // No need to extract JSON blocks again - this was causing duplicate artifacts
   
   // Trim excessive whitespace from clean content
   cleanContent = cleanContent.replace(/\n\n\n+/g, "\n\n").trim();

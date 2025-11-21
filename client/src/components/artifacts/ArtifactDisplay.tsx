@@ -1,9 +1,10 @@
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { Artifact } from "@shared/schema";
 import { Copy, Download, Maximize2, Code, Table, BarChart3, FileJson, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from "recharts";
+import DOMPurify from "isomorphic-dompurify";
 
 interface ArtifactDisplayProps {
   artifact: Artifact;
@@ -11,6 +12,17 @@ interface ArtifactDisplayProps {
 
 export default function ArtifactDisplay({ artifact }: ArtifactDisplayProps) {
   const [showFullscreen, setShowFullscreen] = useState(false);
+
+  // Sanitize HTML content to prevent XSS attacks
+  const sanitizedHTML = useMemo(() => {
+    if (artifact.type === "html") {
+      return DOMPurify.sanitize(artifact.content, {
+        ADD_TAGS: ["iframe"],
+        ADD_ATTR: ["allow", "allowfullscreen", "frameborder", "scrolling"]
+      });
+    }
+    return artifact.content;
+  }, [artifact.content, artifact.type]);
 
   const handleCopy = () => {
     navigator.clipboard.writeText(artifact.content);
@@ -182,11 +194,14 @@ export default function ArtifactDisplay({ artifact }: ArtifactDisplayProps) {
         return <div className="text-sm text-neutral-600">Unsupported chart type</div>;
 
       case "html":
+        // HTML content is sanitized with DOMPurify to prevent XSS attacks
+        // sandbox allows both scripts and same-origin for full functionality
         return (
           <iframe
-            srcDoc={artifact.content}
+            srcDoc={sanitizedHTML}
             className="w-full h-80 border border-neutral-200 rounded"
-            sandbox={{ allow: ["scripts"] }}
+            sandbox="allow-scripts allow-same-origin"
+            title="HTML Artifact"
           />
         );
 
