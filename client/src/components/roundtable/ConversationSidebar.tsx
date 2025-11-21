@@ -29,6 +29,8 @@ export default function ConversationSidebar({
   const [activeTab, setActiveTab] = useState('insights');
   const [activeVisualizations, setActiveVisualizations] = useState<Visualization[]>([]);
   const [allArtifacts, setAllArtifacts] = useState<Artifact[]>([]);
+  const [sidebarWidth, setSidebarWidth] = useState(320);
+  const [isResizing, setIsResizing] = useState(false);
 
   // Extract artifacts from messages
   useEffect(() => {
@@ -95,6 +97,22 @@ export default function ConversationSidebar({
     setActiveVisualizations(extractedVisualizations);
   }, [messages]);
 
+  const handleMouseDown = () => {
+    setIsResizing(true);
+  };
+
+  const handleMouseUp = () => {
+    setIsResizing(false);
+  };
+
+  const handleMouseMove = (e: React.MouseEvent) => {
+    if (!isResizing) return;
+    const newWidth = e.clientX;
+    if (newWidth > 250 && newWidth < 600) {
+      setSidebarWidth(newWidth);
+    }
+  };
+
   const renderVisualization = (vis: Visualization) => {
     switch (vis.type) {
       case 'map':
@@ -137,9 +155,15 @@ export default function ConversationSidebar({
   };
 
   return (
-    <div className="h-full flex flex-col">
-      <Tabs defaultValue="insights" className="w-full h-full">
-        <div className="border-b border-neutral-200 px-4">
+    <div 
+      className="h-full flex flex-col relative" 
+      style={{ width: sidebarWidth }}
+      onMouseMove={handleMouseMove}
+      onMouseUp={handleMouseUp}
+      onMouseLeave={handleMouseUp}
+    >
+      <Tabs defaultValue="insights" className="w-full h-full flex flex-col">
+        <div className="border-b border-neutral-200 px-4 flex-shrink-0">
           <TabsList className="mb-[-1px]">
             <TabsTrigger value="insights" onClick={() => setActiveTab('insights')}>
               Insights
@@ -153,8 +177,8 @@ export default function ConversationSidebar({
           </TabsList>
         </div>
 
-        <TabsContent value="insights" className="flex-1 mt-0">
-          <ScrollArea className="h-full px-4">
+        <TabsContent value="insights" className="flex-1 mt-0 min-h-0">
+          <ScrollArea className="h-full w-full px-4">
             {insights.map((insight, index) => (
               <Card key={index} className="mb-4">
                 <CardHeader>
@@ -175,8 +199,8 @@ export default function ConversationSidebar({
           </ScrollArea>
         </TabsContent>
 
-        <TabsContent value="artifacts" className="flex-1 mt-0">
-          <ScrollArea className="h-full px-4">
+        <TabsContent value="artifacts" className="flex-1 mt-0 min-h-0">
+          <ScrollArea className="h-full w-full px-4">
             {allArtifacts.length > 0 ? (
               allArtifacts.map((artifact, index) => (
                 <ArtifactDisplay key={index} artifact={artifact} />
@@ -193,8 +217,8 @@ export default function ConversationSidebar({
           </ScrollArea>
         </TabsContent>
 
-        <TabsContent value="visualizations" className="flex-1 mt-0">
-          <ScrollArea className="h-full px-4">
+        <TabsContent value="visualizations" className="flex-1 mt-0 min-h-0">
+          <ScrollArea className="h-full w-full px-4">
             {activeVisualizations.map((vis, index) => (
               <Card key={index} className="mb-4">
                 <CardHeader>
@@ -222,6 +246,15 @@ export default function ConversationSidebar({
           </ScrollArea>
         </TabsContent>
       </Tabs>
+
+      {/* Resizable handle */}
+      <div
+        onMouseDown={handleMouseDown}
+        className={`absolute right-0 top-0 w-1 h-full bg-neutral-200 hover:bg-blue-500 cursor-col-resize transition-colors ${
+          isResizing ? "bg-blue-500" : ""
+        }`}
+        title="Drag to resize sidebar"
+      />
     </div>
   );
 } 
