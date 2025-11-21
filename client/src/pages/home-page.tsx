@@ -402,7 +402,8 @@ export default function HomePage() {
                 return [...oldData, newMessage];
               });
               console.log("WebSocket: Added/updated message in cache.", newMessage.id);
-              setIsProcessing(false); // Message received, processing complete
+              // DON'T set isProcessing to false here - let state_update control it
+              // The spinner should keep showing until mode changes to "idle"
             } else {
               // Fallback to invalidation if message payload is missing (shouldn't happen ideally)
               console.warn("WebSocket: messages_updated signal received without message payload. Invalidating query.");
