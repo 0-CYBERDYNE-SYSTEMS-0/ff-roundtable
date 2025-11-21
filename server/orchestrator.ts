@@ -299,7 +299,7 @@ export class InteractionOrchestrator {
         if (processingEndedNaturally) {
              console.log("[DEBUG] Processing ended naturally. Updating state to idle and generating insights.");
              updateConversationState(this.conversationId, { mode: "idle", currentExpertIndex: -1, totalAutonomousTurnsTaken: 0 });
-             generateInsights(this.conversationId).catch(console.error);
+             generateInsights(this.conversationId, state.broadcastFn).catch(console.error);
              continueProcessing = false; // Ensure we don't schedule next turn
         }
         

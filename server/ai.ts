@@ -1,6 +1,7 @@
 import { storage } from "./storage";
 // Import shared DB types
-import type { InsertMessage, Expert, InsertFile, Message, File } from "@shared/schema"; 
+import type { InsertMessage, Expert, InsertFile, Message, File, Artifact } from "@shared/schema"; 
+import { extractArtifacts } from "./artifact-extractor";
 import OpenAI from "openai";
 import path from "path";
 import fs from "fs";
@@ -380,14 +381,18 @@ export async function getExpertResponse(
       response = await callOpenRouterAPI(messages, expert.model);
     }
     
+    // Extract artifacts from response
+    const { artifacts, cleanContent } = extractArtifacts(response.message.content);
+    
     return {
       conversationId: expert.conversationId,
       expertId: expert.id,
       userId: null,
-      content: response.message.content,
+      content: cleanContent,
       role: "assistant",
       expertName: expert.name,
-      expertRole: expert.role
+      expertRole: expert.role,
+      artifacts: artifacts
     };
 
   } catch (error) {
@@ -419,7 +424,7 @@ export async function processUserMessage(
 */
 
 // Function to generate insights (Re-enabled)
-export async function generateInsights(conversationId: number): Promise<void> {
+export async function generateInsights(conversationId: number, broadcastFn?: (convId: number, data: any) => void): Promise<void> {
   try {
     const messages = await storage.getConversationMessages(conversationId);
     if (messages.length < 3) return; // Not enough messages for insights
@@ -462,7 +467,10 @@ export async function generateInsights(conversationId: number): Promise<void> {
           title: insightData.title,
           points: insightData.points
         });
-        // TODO: Broadcast the new insights via WebSocket?
+        // Broadcast the new insights via WebSocket
+        if (broadcastFn) {
+          broadcastFn(conversationId, { type: "insights" });
+        }
       } else {
          console.warn(`generateInsights: Received invalid JSON structure for ${conversationId}`, insightData);
       }

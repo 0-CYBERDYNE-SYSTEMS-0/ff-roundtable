@@ -1,4 +1,4 @@
-import { pgTable, text, serial, integer, boolean, timestamp } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, integer, boolean, timestamp, json } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -39,6 +39,7 @@ export const messages = pgTable("messages", {
   role: text("role").notNull(),
   expertName: text("expert_name"),
   expertRole: text("expert_role"),
+  artifacts: json("artifacts").default([]),
   timestamp: timestamp("timestamp").defaultNow(),
 });
 
@@ -59,6 +60,16 @@ export const insights = pgTable("insights", {
   points: text("points").notNull().array(),
   createdAt: timestamp("created_at").defaultNow(),
 });
+
+// Artifact type definition
+export const artifactSchema = z.object({
+  type: z.enum(["html", "json", "table", "chart", "code"]),
+  title: z.string(),
+  content: z.string(),
+  language: z.string().optional(),
+});
+
+export type Artifact = z.infer<typeof artifactSchema>;
 
 // Schemas
 export const insertUserSchema = createInsertSchema(users).omit({
@@ -81,6 +92,7 @@ export const insertExpertSchema = createInsertSchema(experts).omit({
 export const insertMessageSchema = createInsertSchema(messages).omit({
   id: true,
   timestamp: true,
+  artifacts: true,
 });
 
 export const insertFileSchema = createInsertSchema(files).omit({
