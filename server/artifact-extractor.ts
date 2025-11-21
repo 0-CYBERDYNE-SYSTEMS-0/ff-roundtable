@@ -69,10 +69,64 @@ export function extractArtifacts(content: string): { artifacts: Artifact[]; clea
     });
     
     cleanContent = cleanContent.replace(tableContent, "");
+    tableRegex.lastIndex = 0; // Reset regex position after mutation
   }
   
-  // Pattern 3 removed: Pattern 1 already handles ```json blocks
-  // No need to extract JSON blocks again - this was causing duplicate artifacts
+  // Pattern 3: Detect unfenced JSON blocks (structured data without code fences)
+  // Use a more sophisticated approach to find balanced JSON objects/arrays
+  let jsonCount = 0;
+  let searchPos = 0;
+  
+  while (searchPos < cleanContent.length) {
+    // Look for opening braces/brackets
+    const openBrace = cleanContent.indexOf('{', searchPos);
+    const openBracket = cleanContent.indexOf('[', searchPos);
+    
+    if (openBrace === -1 && openBracket === -1) break;
+    
+    const startPos = (openBrace === -1) ? openBracket : 
+                      (openBracket === -1) ? openBrace :
+                      Math.min(openBrace, openBracket);
+    
+    // Try to find matching closing brace/bracket
+    const openChar = cleanContent[startPos];
+    const closeChar = openChar === '{' ? '}' : ']';
+    let depth = 1;
+    let endPos = startPos + 1;
+    
+    while (endPos < cleanContent.length && depth > 0) {
+      if (cleanContent[endPos] === openChar) depth++;
+      else if (cleanContent[endPos] === closeChar) depth--;
+      endPos++;
+    }
+    
+    if (depth === 0) {
+      const potentialJson = cleanContent.substring(startPos, endPos).trim();
+      
+      // Only extract if it's valid JSON and reasonably sized
+      if (potentialJson.length > 20) {
+        try {
+          JSON.parse(potentialJson);
+          
+          artifacts.push({
+            type: "json",
+            title: `JSON Data ${++jsonCount}`,
+            content: potentialJson,
+            language: "json"
+          });
+          
+          // Remove the JSON and continue from the start of removal
+          cleanContent = cleanContent.substring(0, startPos) + cleanContent.substring(endPos);
+          searchPos = startPos; // Continue from where we removed
+          continue;
+        } catch {
+          // Not valid JSON, continue searching after this position
+        }
+      }
+    }
+    
+    searchPos = startPos + 1; // Move past this character
+  }
   
   // Trim excessive whitespace from clean content
   cleanContent = cleanContent.replace(/\n\n\n+/g, "\n\n").trim();
