@@ -533,7 +533,7 @@ export default function HomePage() {
                         experts={experts || []}
                         onSendMessage={(content) => sendMessageMutation.mutate(content)}
                         onUploadFile={handleFileUpload}
-                        isLoading={sendMessageMutation.isPending}
+                        isLoading={sendMessageMutation.isPending || isProcessing}
                         user={user}
                         insights={insights || []}
                         visualizations={[]}

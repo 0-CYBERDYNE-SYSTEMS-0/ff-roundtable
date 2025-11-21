@@ -3,7 +3,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Message, Expert, Artifact } from "@shared/schema";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { BarChart, LineChart, Map, PieChart, Table } from 'lucide-react';
+import { BarChart, LineChart, Map, PieChart, Table, Code } from 'lucide-react';
 import ArtifactDisplay from "../artifacts/ArtifactDisplay";
 
 interface ConversationSidebarProps {
@@ -28,6 +28,20 @@ export default function ConversationSidebar({
 }: ConversationSidebarProps) {
   const [activeTab, setActiveTab] = useState('insights');
   const [activeVisualizations, setActiveVisualizations] = useState<Visualization[]>([]);
+  const [allArtifacts, setAllArtifacts] = useState<Artifact[]>([]);
+
+  // Extract artifacts from messages
+  useEffect(() => {
+    const extractedArtifacts: Artifact[] = [];
+    
+    messages.forEach(message => {
+      if (message.artifacts && Array.isArray(message.artifacts)) {
+        extractedArtifacts.push(...message.artifacts);
+      }
+    });
+
+    setAllArtifacts(extractedArtifacts);
+  }, [messages]);
 
   // Process messages to extract visualization requests and URLs
   useEffect(() => {
@@ -130,6 +144,9 @@ export default function ConversationSidebar({
             <TabsTrigger value="insights" onClick={() => setActiveTab('insights')}>
               Insights
             </TabsTrigger>
+            <TabsTrigger value="artifacts" onClick={() => setActiveTab('artifacts')}>
+              Artifacts ({allArtifacts.length})
+            </TabsTrigger>
             <TabsTrigger value="visualizations" onClick={() => setActiveTab('visualizations')}>
               Visualizations
             </TabsTrigger>
@@ -155,6 +172,24 @@ export default function ConversationSidebar({
                 </CardContent>
               </Card>
             ))}
+          </ScrollArea>
+        </TabsContent>
+
+        <TabsContent value="artifacts" className="flex-1 mt-0">
+          <ScrollArea className="h-full px-4">
+            {allArtifacts.length > 0 ? (
+              allArtifacts.map((artifact, index) => (
+                <ArtifactDisplay key={index} artifact={artifact} />
+              ))
+            ) : (
+              <div className="text-center text-neutral-500 mt-8">
+                <div className="flex flex-col items-center space-y-2">
+                  <Code className="w-6 h-6 text-neutral-400" />
+                  <p className="text-sm">No artifacts generated yet.</p>
+                  <p className="text-xs">Experts will generate code, charts, tables, and more as you discuss!</p>
+                </div>
+              </div>
+            )}
           </ScrollArea>
         </TabsContent>
 
