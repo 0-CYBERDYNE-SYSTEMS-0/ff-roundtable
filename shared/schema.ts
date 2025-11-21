@@ -116,7 +116,10 @@ export type InsertExpert = z.infer<typeof insertExpertSchema>;
 export type Expert = typeof experts.$inferSelect;
 
 export type InsertMessage = z.infer<typeof insertMessageSchema>;
-export type Message = typeof messages.$inferSelect;
+// Extend Message type to properly type artifacts as Artifact[]
+export type Message = Omit<typeof messages.$inferSelect, 'artifacts'> & {
+  artifacts?: Artifact[];
+};
 
 export type InsertFile = z.infer<typeof insertFileSchema>;
 export type File = typeof files.$inferSelect;

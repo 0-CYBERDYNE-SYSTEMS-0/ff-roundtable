@@ -11,6 +11,7 @@ import remarkGfm from "remark-gfm";
 import { formatMessageDate } from "@/lib/file-utils";
 import ModelBadge from "../roundtable/ModelBadge";
 import ConversationSidebar from "../roundtable/ConversationSidebar";
+import ArtifactDisplay from "../artifacts/ArtifactDisplay";
 
 interface ChatInterfaceProps {
   messages: Message[];
@@ -224,14 +225,29 @@ export default function ChatInterface({
                           <AvatarFallback>{expert.name.charAt(0)}</AvatarFallback>
                         </Avatar>
                       </div>
-                      <div className="bg-neutral-200 rounded-lg p-3 max-w-[85%]">
-                        <div className="flex items-center justify-between">
-                          <p className="text-sm font-medium text-neutral-800">{expert.name} ({expert.role})</p>
-                          <ModelBadge modelId={expert.model} size="sm" />
+                      <div className="max-w-[85%] space-y-2">
+                        <div className="bg-neutral-200 rounded-lg p-3">
+                          <div className="flex items-center justify-between">
+                            <p className="text-sm font-medium text-neutral-800">{expert.name} ({expert.role})</p>
+                            <ModelBadge modelId={expert.model} size="sm" />
+                          </div>
+                          <div className="markdown-content text-sm mt-1">
+                            <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+                          </div>
                         </div>
-                        <div className="markdown-content text-sm mt-1">
-                          <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
-                        </div>
+                        
+                        {/* Render artifacts inline */}
+                        {message.artifacts && message.artifacts.length > 0 && (
+                          <div className="space-y-2" data-testid={`artifacts-message-${message.id}`}>
+                            {message.artifacts.map((artifact, index) => (
+                              <ArtifactDisplay
+                                key={`${message.id}-artifact-${index}`}
+                                artifact={artifact}
+                                data-testid={`artifact-${artifact.type}-${index}`}
+                              />
+                            ))}
+                          </div>
+                        )}
                       </div>
                     </div>
                   );
