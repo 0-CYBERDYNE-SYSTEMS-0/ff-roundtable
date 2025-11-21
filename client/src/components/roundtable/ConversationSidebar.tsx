@@ -247,13 +247,17 @@ export default function ConversationSidebar({
         </TabsContent>
       </Tabs>
 
-      {/* Resizable handle */}
+      {/* Resizable handle - visible as UI endpoint */}
       <div
         onMouseDown={handleMouseDown}
-        className={`absolute right-0 top-0 w-1 h-full bg-neutral-200 hover:bg-blue-500 cursor-col-resize transition-colors ${
-          isResizing ? "bg-blue-500" : ""
+        className={`absolute -right-1.5 top-0 w-3 h-full bg-gradient-to-r from-transparent via-blue-400 to-transparent hover:from-blue-300 hover:via-blue-500 hover:to-blue-300 cursor-col-resize transition-colors ${
+          isResizing ? "from-blue-500 via-blue-600 to-blue-500" : ""
         }`}
-        title="Drag to resize sidebar"
+        style={{
+          opacity: isResizing ? 1 : 0.3,
+          transition: isResizing ? 'none' : 'opacity 0.2s'
+        }}
+        title="Drag to resize sidebar (250-600px)"
       />
     </div>
   );

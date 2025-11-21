@@ -183,10 +183,10 @@ export class MemStorage implements IStorage {
   }
   
   // Message operations
-  async createMessage(insertMessage: InsertMessage): Promise<Message> {
+  async createMessage(insertMessage: InsertMessage & { artifacts?: any[] }): Promise<Message> {
     const id = this.messageId++;
     const now = new Date();
-    const message: Message = { ...insertMessage, id, timestamp: now };
+    const message: Message = { ...insertMessage, id, timestamp: now, artifacts: insertMessage.artifacts || [] };
     this.messages.set(id, message);
     return message;
   }
