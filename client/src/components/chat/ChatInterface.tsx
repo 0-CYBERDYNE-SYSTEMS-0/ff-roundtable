@@ -237,8 +237,16 @@ export default function ChatInterface({
                         </div>
                         
                         {/* Render artifacts inline */}
+                        {(() => {
+                          console.log(`[ChatInterface] Message ${message.id}: artifacts=`, message.artifacts, `length=${message.artifacts?.length || 0}`);
+                          return null;
+                        })()}
                         {message.artifacts && message.artifacts.length > 0 && (
                           <div className="space-y-2" data-testid={`artifacts-message-${message.id}`}>
+                            {(() => {
+                              console.log(`[ChatInterface] RENDERING ${message.artifacts.length} artifacts for message ${message.id}`);
+                              return null;
+                            })()}
                             {message.artifacts.map((artifact, index) => (
                               <ArtifactDisplay
                                 key={`${message.id}-artifact-${index}`}

@@ -384,6 +384,14 @@ export default function HomePage() {
               const newMessage: Message = parsedData.message;
               const messagesQueryKey = [`/api/protected/conversations/${activeConversation}/messages`];
               
+              // DEBUG: Check if artifacts are in the message
+              console.log("WebSocket message received:", {
+                id: newMessage.id,
+                hasArtifacts: !!newMessage.artifacts,
+                artifactsLength: newMessage.artifacts?.length || 0,
+                artifacts: newMessage.artifacts
+              });
+              
               // Update the query cache directly
               queryClient.setQueryData<Message[]>(messagesQueryKey, (oldData) => {
                 if (!oldData) return [newMessage]; // If cache is empty, start with new message
