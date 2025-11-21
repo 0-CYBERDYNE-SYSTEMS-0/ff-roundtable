@@ -565,13 +565,22 @@ export default function HomePage() {
                     <div className="flex-1 flex items-center justify-center">
                         <div className="text-center">
                             <h2 className="text-xl font-semibold text-neutral-800 mb-2">Welcome to Farm Friend Roundtable</h2>
-                            <p className="text-neutral-600 mb-4">Start a new conversation to begin chatting with agricultural experts</p>
-                            <button
-                                onClick={handleStartNewSession}
-                                className="bg-primary text-white px-4 py-2 rounded-lg hover:bg-primary-dark transition-colors"
-                            >
-                                Start New Roundtable
-                            </button>
+                            <p className="text-neutral-600 mb-6">Start a new conversation to begin chatting with agricultural experts</p>
+                            <div className="flex gap-3 justify-center">
+                                <button
+                                    onClick={handleStartNewSession}
+                                    className="bg-primary text-white px-4 py-2 rounded-lg hover:bg-primary-dark transition-colors"
+                                >
+                                    Start New Roundtable
+                                </button>
+                                <button
+                                    onClick={() => quickSetupMutation.mutate()}
+                                    disabled={quickSetupMutation.isPending}
+                                    className="bg-amber-500 text-white px-4 py-2 rounded-lg hover:bg-amber-600 transition-colors disabled:opacity-50 flex items-center gap-2"
+                                >
+                                    ⚡ Quick Test
+                                </button>
+                            </div>
                         </div>
                     </div>
                 )}
