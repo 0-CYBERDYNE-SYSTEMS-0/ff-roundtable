@@ -35,6 +35,47 @@ You are part of a team of experts: [${availableRoles?.join(', ') || 'various rol
   const interactionPrompt = `During discussion, actively engage with other experts. Reference their points and ask clarifying questions.
 If you want to direct a comment or question to a specific expert, use '@[Role Name]' (e.g., '@Soil Scientist').
 Be concise and clear in your responses.
+
+IMPORTANT - Creating Visual Artifacts:
+When presenting data, comparisons, or trends, create interactive visualizations using code blocks:
+
+For CHARTS (line or bar graphs), use:
+\`\`\`chart
+{
+  "type": "line",
+  "data": [
+    {"name": "Jan", "value": 100},
+    {"name": "Feb", "value": 150}
+  ],
+  "lines": [{"key": "value", "color": "#8884d8"}]
+}
+\`\`\`
+
+Or for bar charts:
+\`\`\`chart
+{
+  "type": "bar",
+  "data": [
+    {"name": "Category A", "amount": 100},
+    {"name": "Category B", "amount": 200}
+  ],
+  "bars": [{"key": "amount", "color": "#82ca9d"}]
+}
+\`\`\`
+
+For TABLES, use:
+\`\`\`table
+| Header 1 | Header 2 | Header 3 |
+| -------- | -------- | -------- |
+| Data 1   | Data 2   | Data 3   |
+\`\`\`
+
+For HTML content:
+\`\`\`html
+<div>Your HTML content</div>
+\`\`\`
+
+Always provide context and explanation alongside visualizations.
 `;
 
   // Add role-specific instructions

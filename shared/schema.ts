@@ -92,7 +92,6 @@ export const insertExpertSchema = createInsertSchema(experts).omit({
 export const insertMessageSchema = createInsertSchema(messages).omit({
   id: true,
   timestamp: true,
-  artifacts: true,
 });
 
 export const insertFileSchema = createInsertSchema(files).omit({
