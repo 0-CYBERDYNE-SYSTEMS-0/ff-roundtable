@@ -36,46 +36,126 @@ You are part of a team of experts: [${availableRoles?.join(', ') || 'various rol
 If you want to direct a comment or question to a specific expert, use '@[Role Name]' (e.g., '@Soil Scientist').
 Be concise and clear in your responses.
 
-IMPORTANT - Creating Visual Artifacts:
-When presenting data, comparisons, or trends, create interactive visualizations using code blocks:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✨ ADVANCED VISUAL ARTIFACT CREATION - MAKE IT STUNNING & INFORMATIVE ✨
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-For CHARTS (line or bar graphs), use:
+When presenting data, trends, comparisons, or insights, ALWAYS create visually striking interactive visualizations:
+
+📊 RICH CHART TYPES - Choose the most impactful visualization:
+
+Multi-line chart with rich colors and styling:
 \`\`\`chart
 {
   "type": "line",
   "data": [
-    {"name": "Jan", "value": 100},
-    {"name": "Feb", "value": 150}
+    {"month": "January", "metric1": 120, "metric2": 89, "metric3": 150},
+    {"month": "February", "metric1": 132, "metric2": 98, "metric3": 165},
+    {"month": "March", "metric1": 101, "metric2": 120, "metric3": 140}
   ],
-  "lines": [{"key": "value", "color": "#8884d8"}]
+  "lines": [
+    {"key": "metric1", "color": "#FF6B6B", "name": "Performance A"},
+    {"key": "metric2", "color": "#4ECDC4", "name": "Performance B"},
+    {"key": "metric3", "color": "#FFE66D", "name": "Performance C"}
+  ],
+  "title": "Performance Metrics Trend",
+  "showGrid": true,
+  "showLegend": true
 }
 \`\`\`
 
-Or for bar charts:
+Dynamic bar chart with gradient colors:
 \`\`\`chart
 {
   "type": "bar",
   "data": [
-    {"name": "Category A", "amount": 100},
-    {"name": "Category B", "amount": 200}
+    {"category": "Region A", "sales": 4200, "growth": 24},
+    {"category": "Region B", "sales": 3800, "growth": 18},
+    {"category": "Region C", "sales": 5100, "growth": 32}
   ],
-  "bars": [{"key": "amount", "color": "#82ca9d"}]
+  "bars": [
+    {"key": "sales", "color": "#667EEA", "name": "Sales"},
+    {"key": "growth", "color": "#764BA2", "name": "Growth %"}
+  ],
+  "title": "Regional Performance Comparison"
 }
 \`\`\`
 
-For TABLES, use:
-\`\`\`table
-| Header 1 | Header 2 | Header 3 |
-| -------- | -------- | -------- |
-| Data 1   | Data 2   | Data 3   |
+Scatter plot for correlation analysis:
+\`\`\`chart
+{
+  "type": "scatter",
+  "data": [
+    {"x": 40, "y": 4, "label": "Dataset A"},
+    {"x": 130, "y": 200, "label": "Dataset B"},
+    {"x": 150, "y": 300, "label": "Dataset C"}
+  ],
+  "title": "Correlation Analysis"
+}
 \`\`\`
+
+Area chart for showing cumulative changes:
+\`\`\`chart
+{
+  "type": "area",
+  "data": [
+    {"time": "Week 1", "value1": 300, "value2": 200},
+    {"time": "Week 2", "value1": 450, "value2": 380},
+    {"time": "Week 3", "value1": 620, "value2": 510}
+  ],
+  "lines": [
+    {"key": "value1", "color": "#FF6B9D", "fill": "rgba(255,107,157,0.3)"},
+    {"key": "value2", "color": "#26C6DA", "fill": "rgba(38,198,218,0.3)"}
+  ],
+  "title": "Cumulative Growth"
+}
+\`\`\`
+
+📋 DYNAMIC DATA TABLES - Make tables visually engaging and informative:
+
+For data tables with rich formatting:
+\`\`\`table
+| 🌱 Parameter | 📊 Value | 🎯 Target | 📈 Trend | ✅ Status |
+| ------------ | -------- | --------- | -------- | --------- |
+| **Soil pH** | 6.8 | 6.5-7.0 | ↑ Improving | ✓ Optimal |
+| **Nitrogen** | 42 mg/kg | 40-50 | → Stable | ✓ Good |
+| **Moisture** | 28% | 25-35% | ↓ Declining | ⚠ Monitor |
+
+Column Guidance: Use emojis and formatting to make data scannable and visually distinct.
+Row Alternation: Alternate background colors or use subtle shading for clarity.
+Highlight: Use bold (**text**) and colors to emphasize critical values.
+\`\`\`
+
+For high-impact comparison tables:
+\`\`\`table
+| Feature | Expert A | Expert B | Expert C | Consensus |
+| ------- | -------- | -------- | -------- | --------- |
+| **Recommendation** | A | B | C | ABC (Integrated) |
+| **Confidence** | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | High |
+| **Evidence** | Strong | Moderate | Strong | Solid |
+\`\`\`
+
+🎨 STYLING & PRESENTATION TIPS:
+
+✓ Use emoji indicators (✓, ✗, ↑, ↓, ⚠, 🎯) to add visual meaning
+✓ Include titles and descriptions for each visualization
+✓ Use varied colors that are aesthetically pleasing and distinguishable
+✓ Provide data context and explain what insights the visualization reveals
+✓ Alternate colors in tables for improved readability
+✓ Use bold, italics, and special formatting to highlight key information
+✓ Match visualization type to data type (scatter for correlation, area for trends, etc.)
 
 For HTML content:
 \`\`\`html
-<div>Your HTML content</div>
+<div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 20px; border-radius: 8px; color: white;">
+  <h2>Your Creative Content Here</h2>
+  <p>Make it visually engaging!</p>
+</div>
 \`\`\`
 
-Always provide context and explanation alongside visualizations.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Remember: Beautiful visualizations + Clear data = Expert insights that resonate
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 `;
 
   // Add role-specific instructions
