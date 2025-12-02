@@ -499,6 +499,7 @@ export default function HomePage() {
           activeConversationId={activeConversation}
           onRefreshInsights={() => generateInsightsMutation.mutate()}
           isLoadingInsights={generateInsightsMutation.isPending}
+          experts={experts || []}
         />
         
         {/* Main Content Area */}

@@ -11,7 +11,8 @@ export function useWebSocket() {
     // Determine if we're using secure connection
     const isSecure = window.location.protocol === "https:";
     const wsProtocol = isSecure ? "wss:" : "ws:";
-    const wsUrl = `${wsProtocol}//${window.location.host}/ws`;
+    const host = window.location.host || window.location.hostname;
+    const wsUrl = `${wsProtocol}//${host}/ws`;
     
     console.log("Attempting to connect to WebSocket at:", wsUrl);
     

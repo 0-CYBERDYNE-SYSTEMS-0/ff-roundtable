@@ -179,23 +179,33 @@ export default function ConversationSidebar({
 
         <TabsContent value="insights" className="flex-1 mt-0 min-h-0">
           <ScrollArea className="h-full w-full px-4">
-            {insights.map((insight, index) => (
-              <Card key={index} className="mb-4">
-                <CardHeader>
-                  <CardTitle className="text-sm font-medium">{insight.title}</CardTitle>
-                  <CardDescription className="text-xs text-neutral-500">
-                    Generated from conversation
-                  </CardDescription>
-                </CardHeader>
-                <CardContent>
-                  <ul className="list-disc list-inside space-y-1">
-                    {insight.points.map((point: string, i: number) => (
-                      <li key={i} className="text-sm text-neutral-700">{point}</li>
-                    ))}
-                  </ul>
-                </CardContent>
-              </Card>
-            ))}
+            {insights && insights.length > 0 ? (
+              insights.map((insight, index) => (
+                <Card key={index} className="mb-4">
+                  <CardHeader>
+                    <CardTitle className="text-sm font-medium">{insight.title}</CardTitle>
+                    <CardDescription className="text-xs text-neutral-500">
+                      Generated from conversation
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <ul className="list-disc list-inside space-y-1">
+                      {insight.points.map((point: string, i: number) => (
+                        <li key={i} className="text-sm text-neutral-700">{point}</li>
+                      ))}
+                    </ul>
+                  </CardContent>
+                </Card>
+              ))
+            ) : (
+              <div className="text-center text-neutral-500 mt-12 space-y-4">
+                <div className="flex flex-col items-center space-y-2">
+                  <div className="text-4xl">📊</div>
+                  <p className="text-sm font-medium">No insights yet</p>
+                  <p className="text-xs">Experts will generate key insights as your discussion progresses</p>
+                </div>
+              </div>
+            )}
           </ScrollArea>
         </TabsContent>
 

@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Plus, RefreshCw, Download, Upload, FileDown, FileText, Image, ArrowRight } from "lucide-react";
-import { Insight, File as FileSchema, Conversation } from "@shared/schema";
+import { Plus, RefreshCw, Download, Upload, FileDown, FileText, Image, ArrowRight, Users } from "lucide-react";
+import { Insight, File as FileSchema, Conversation, Expert } from "@shared/schema";
 import { format } from "date-fns";
 
 interface SidebarPanelProps {
@@ -16,6 +16,7 @@ interface SidebarPanelProps {
   activeConversationId: number | null;
   onRefreshInsights: () => void;
   isLoadingInsights: boolean;
+  experts?: Expert[];
 }
 
 export default function SidebarPanel({
@@ -28,7 +29,8 @@ export default function SidebarPanel({
   onSelectConversation,
   activeConversationId,
   onRefreshInsights,
-  isLoadingInsights
+  isLoadingInsights,
+  experts = []
 }: SidebarPanelProps) {
   const [activeTab, setActiveTab] = useState<'conversations' | 'insights' | 'files'>('insights');
   
@@ -63,6 +65,29 @@ export default function SidebarPanel({
             Export as Markdown
           </Button>
         </div>
+
+        {/* Experts Panel Header */}
+        <div className="p-4 border-b border-neutral-300 bg-gradient-to-br from-blue-50 to-indigo-50">
+          <div className="flex items-center gap-2 mb-2">
+            <Users className="h-5 w-5 text-primary" />
+            <h2 className="font-serif font-bold text-sm text-primary">Expert Panel</h2>
+          </div>
+          {experts.length === 0 ? (
+            <div className="text-xs text-neutral-600 py-3 px-2 bg-white rounded border border-neutral-200 text-center">
+              <p className="font-medium mb-1">No experts selected</p>
+              <p>Add experts to begin the roundtable</p>
+            </div>
+          ) : (
+            <div className="space-y-1">
+              {experts.map((expert) => (
+                <div key={expert.id} className="text-xs bg-white rounded p-2 border border-neutral-200">
+                  <p className="font-medium text-neutral-800">{expert.name}</p>
+                  <p className="text-neutral-500 text-xs">{expert.role}</p>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
         
         {/* Tabs */}
         <div className="flex border-b border-neutral-300">
@@ -95,9 +120,15 @@ export default function SidebarPanel({
               </div>
               
               {conversations.length === 0 ? (
-                <div className="text-center py-8 text-neutral-500">
-                  <p>No conversations yet</p>
-                  <p className="text-sm mt-2">Click "New Roundtable" to start</p>
+                <div className="text-center py-12 text-neutral-500 space-y-4">
+                  <div className="bg-neutral-100 rounded-lg p-8">
+                    <div className="text-4xl mb-3">📋</div>
+                    <p className="font-medium">No conversations yet</p>
+                    <p className="text-sm mt-2">Click "New Roundtable" above to start your first conversation</p>
+                  </div>
+                  <div className="bg-blue-50 rounded-lg p-4 border border-blue-200">
+                    <p className="text-xs text-blue-700">💡 Tip: Each roundtable brings together multiple experts to discuss your agricultural topics.</p>
+                  </div>
                 </div>
               ) : (
                 <div className="space-y-2">
@@ -109,7 +140,7 @@ export default function SidebarPanel({
                     >
                       <h3 className="font-medium">{conversation.title}</h3>
                       <p className="text-xs text-neutral-600">
-                        {format(new Date(conversation.createdAt), 'MMM d, yyyy • h:mm a')}
+                        {conversation.createdAt ? format(new Date(conversation.createdAt), 'MMM d, yyyy • h:mm a') : 'Unknown date'}
                       </p>
                     </div>
                   ))}
@@ -135,9 +166,15 @@ export default function SidebarPanel({
               </div>
               
               {insights.length === 0 ? (
-                <div className="text-center py-8 text-neutral-500">
-                  <p>No insights generated yet</p>
-                  <p className="text-sm mt-2">Continue your conversation to generate insights</p>
+                <div className="text-center py-12 text-neutral-500 space-y-4">
+                  <div className="bg-neutral-100 rounded-lg p-8">
+                    <div className="text-4xl mb-3">💡</div>
+                    <p className="font-medium">No insights generated yet</p>
+                    <p className="text-sm mt-2">Keep chatting with your experts to unlock valuable insights</p>
+                  </div>
+                  <div className="bg-green-50 rounded-lg p-4 border border-green-200">
+                    <p className="text-xs text-green-700">🌱 Insights automatically generate as conversations grow and patterns emerge.</p>
+                  </div>
                 </div>
               ) : (
                 <div className="space-y-3">
@@ -145,7 +182,7 @@ export default function SidebarPanel({
                     <div key={insight.id} className="bg-neutral-200 rounded-lg p-3 mb-3">
                       <h3 className="font-medium text-primary-dark">{insight.title}</h3>
                       <ul className="text-sm mt-1">
-                        {insight.points.map((point, index) => (
+                        {insight.points && insight.points.map((point, index) => (
                           <li key={index} className="flex items-start mb-1">
                             <ArrowRight className="text-secondary h-4 w-4 mr-1 mt-0.5 flex-shrink-0" />
                             <span>{point}</span>
@@ -170,13 +207,12 @@ export default function SidebarPanel({
                     className="hidden"
                     onChange={handleFileInputChange}
                   />
-                  <label htmlFor="file-upload">
+                  <label htmlFor="file-upload" className="cursor-pointer">
                     <Button 
                       variant="ghost" 
                       size="icon" 
                       className="text-primary cursor-pointer h-8 w-8" 
                       title="Upload File"
-                      as="span"
                     >
                       <Upload className="h-4 w-4" />
                     </Button>
@@ -185,9 +221,15 @@ export default function SidebarPanel({
               </div>
               
               {files.length === 0 ? (
-                <div className="text-center py-8 text-neutral-500">
-                  <p>No files uploaded yet</p>
-                  <p className="text-sm mt-2">Click the upload button to add files</p>
+                <div className="text-center py-12 text-neutral-500 space-y-4">
+                  <div className="bg-neutral-100 rounded-lg p-8">
+                    <div className="text-4xl mb-3">📁</div>
+                    <p className="font-medium">No files uploaded yet</p>
+                    <p className="text-sm mt-2">Click the upload button to add documents or images</p>
+                  </div>
+                  <div className="bg-orange-50 rounded-lg p-4 border border-orange-200">
+                    <p className="text-xs text-orange-700">📄 Share files with experts to get tailored advice based on your specific documents.</p>
+                  </div>
                 </div>
               ) : (
                 <div>
