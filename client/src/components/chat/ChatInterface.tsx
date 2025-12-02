@@ -37,17 +37,21 @@ export default function ChatInterface({
   const [messageContent, setMessageContent] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const [isInitialLoad, setIsInitialLoad] = useState(true);
 
-  // Auto-scroll to bottom when new messages are added
-  useEffect(() => {
-    if (messagesEndRef.current) {
-      messagesEndRef.current.scrollIntoView({ behavior: isInitialLoad ? "auto" : "smooth" });
-      if (isInitialLoad && messages.length > 0) {
-        setIsInitialLoad(false);
-      }
-    }
-  }, [messages, isInitialLoad]);
+  // Get background color for expert based on ID
+  const getExpertBubbleColor = (expertId: number) => {
+    const colors = [
+      "bg-blue-100",
+      "bg-green-100",
+      "bg-purple-100",
+      "bg-pink-100",
+      "bg-yellow-100",
+      "bg-cyan-100",
+      "bg-orange-100",
+      "bg-red-100",
+    ];
+    return colors[expertId % colors.length];
+  };
 
   // Handle sending a message
   const handleSendMessage = () => {
@@ -226,7 +230,7 @@ export default function ChatInterface({
                         </Avatar>
                       </div>
                       <div className="max-w-[85%] space-y-2">
-                        <div className="bg-neutral-200 rounded-lg p-3">
+                        <div className={`${getExpertBubbleColor(message.expertId)} rounded-lg p-3`}>
                           <div className="flex items-center justify-between">
                             <p className="text-sm font-medium text-neutral-800">{expert.name} ({expert.role})</p>
                             <ModelBadge modelId={expert.model} size="sm" />
