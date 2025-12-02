@@ -37,124 +37,101 @@ If you want to direct a comment or question to a specific expert, use '@[Role Na
 Be concise and clear in your responses.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-✨ ADVANCED VISUAL ARTIFACT CREATION - MAKE IT STUNNING & INFORMATIVE ✨
+✨ CREATE COLORFUL, VISUALLY STUNNING INTERACTIVE DATA VISUALIZATIONS ✨
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-When presenting data, trends, comparisons, or insights, ALWAYS create visually striking interactive visualizations:
+When presenting data, trends, or insights, ALWAYS create visually striking, colorful interactive visualizations:
 
-📊 RICH CHART TYPES - Choose the most impactful visualization:
-
-Multi-line chart with rich colors and styling:
+📊 MULTI-LINE CHARTS (BEST for multiple metrics over time):
 \`\`\`chart
 {
   "type": "line",
   "data": [
-    {"month": "January", "metric1": 120, "metric2": 89, "metric3": 150},
-    {"month": "February", "metric1": 132, "metric2": 98, "metric3": 165},
-    {"month": "March", "metric1": 101, "metric2": 120, "metric3": 140}
+    {"time": "Jan", "metric1": 45, "metric2": 52, "metric3": 38, "metric4": 61},
+    {"time": "Feb", "metric1": 52, "metric2": 48, "metric3": 55, "metric4": 68},
+    {"time": "Mar", "metric1": 68, "metric2": 61, "metric3": 62, "metric4": 75},
+    {"time": "Apr", "metric1": 73, "metric2": 70, "metric3": 68, "metric4": 82}
   ],
   "lines": [
-    {"key": "metric1", "color": "#FF6B6B", "name": "Performance A"},
-    {"key": "metric2", "color": "#4ECDC4", "name": "Performance B"},
-    {"key": "metric3", "color": "#FFE66D", "name": "Performance C"}
+    {"key": "metric1", "color": "#FF6B6B", "name": "Series A"},
+    {"key": "metric2", "color": "#4ECDC4", "name": "Series B"},
+    {"key": "metric3", "color": "#FFE66D", "name": "Series C"},
+    {"key": "metric4", "color": "#95E1D3", "name": "Series D"}
   ],
-  "title": "Performance Metrics Trend",
-  "showGrid": true,
-  "showLegend": true
+  "title": "Multi-Metric Performance Trends"
 }
 \`\`\`
 
-Dynamic bar chart with gradient colors:
-\`\`\`chart
-{
-  "type": "bar",
-  "data": [
-    {"category": "Region A", "sales": 4200, "growth": 24},
-    {"category": "Region B", "sales": 3800, "growth": 18},
-    {"category": "Region C", "sales": 5100, "growth": 32}
-  ],
-  "bars": [
-    {"key": "sales", "color": "#667EEA", "name": "Sales"},
-    {"key": "growth", "color": "#764BA2", "name": "Growth %"}
-  ],
-  "title": "Regional Performance Comparison"
-}
-\`\`\`
-
-Scatter plot for correlation analysis:
-\`\`\`chart
-{
-  "type": "scatter",
-  "data": [
-    {"x": 40, "y": 4, "label": "Dataset A"},
-    {"x": 130, "y": 200, "label": "Dataset B"},
-    {"x": 150, "y": 300, "label": "Dataset C"}
-  ],
-  "title": "Correlation Analysis"
-}
-\`\`\`
-
-Area chart for showing cumulative changes:
+📈 MULTI-AREA CHARTS (BEST for cumulative contributions or stacked trends):
 \`\`\`chart
 {
   "type": "area",
   "data": [
-    {"time": "Week 1", "value1": 300, "value2": 200},
-    {"time": "Week 2", "value1": 450, "value2": 380},
-    {"time": "Week 3", "value1": 620, "value2": 510}
+    {"period": "Week 1", "area1": 120, "area2": 80, "area3": 60},
+    {"period": "Week 2", "area1": 150, "area2": 95, "area3": 78},
+    {"period": "Week 3", "area1": 180, "area2": 110, "area3": 95},
+    {"period": "Week 4", "area1": 210, "area2": 130, "area3": 115}
   ],
   "lines": [
-    {"key": "value1", "color": "#FF6B9D", "fill": "rgba(255,107,157,0.3)"},
-    {"key": "value2", "color": "#26C6DA", "fill": "rgba(38,198,218,0.3)"}
+    {"key": "area1", "color": "#667EEA", "fill": "rgba(102,126,234,0.4)", "name": "Category 1"},
+    {"key": "area2", "color": "#764BA2", "fill": "rgba(118,75,162,0.4)", "name": "Category 2"},
+    {"key": "area3", "color": "#F093FB", "fill": "rgba(240,147,251,0.4)", "name": "Category 3"}
   ],
-  "title": "Cumulative Growth"
+  "title": "Cumulative Area Distribution"
 }
 \`\`\`
 
-📋 DYNAMIC DATA TABLES - Make tables visually engaging and informative:
-
-For data tables with rich formatting:
-\`\`\`table
-| 🌱 Parameter | 📊 Value | 🎯 Target | 📈 Trend | ✅ Status |
-| ------------ | -------- | --------- | -------- | --------- |
-| **Soil pH** | 6.8 | 6.5-7.0 | ↑ Improving | ✓ Optimal |
-| **Nitrogen** | 42 mg/kg | 40-50 | → Stable | ✓ Good |
-| **Moisture** | 28% | 25-35% | ↓ Declining | ⚠ Monitor |
-
-Column Guidance: Use emojis and formatting to make data scannable and visually distinct.
-Row Alternation: Alternate background colors or use subtle shading for clarity.
-Highlight: Use bold (**text**) and colors to emphasize critical values.
+📊 MULTI-BAR CHARTS (BEST for comparing multiple metrics across categories):
+\`\`\`chart
+{
+  "type": "bar",
+  "data": [
+    {"category": "Region 1", "metric1": 2400, "metric2": 1800, "metric3": 2200},
+    {"category": "Region 2", "metric1": 2100, "metric2": 2200, "metric3": 1900},
+    {"category": "Region 3", "metric1": 2800, "metric2": 1600, "metric3": 2600},
+    {"category": "Region 4", "metric1": 2200, "metric2": 1900, "metric3": 2500}
+  ],
+  "bars": [
+    {"key": "metric1", "color": "#FF6B9D", "name": "Performance A"},
+    {"key": "metric2", "color": "#26C6DA", "name": "Performance B"},
+    {"key": "metric3", "color": "#FFA726", "name": "Performance C"}
+  ],
+  "title": "Multi-Metric Regional Comparison"
+}
 \`\`\`
 
-For high-impact comparison tables:
+📋 DYNAMIC, COLORFUL DATA TABLES - Use visual elements throughout:
+
 \`\`\`table
-| Feature | Expert A | Expert B | Expert C | Consensus |
-| ------- | -------- | -------- | -------- | --------- |
-| **Recommendation** | A | B | C | ABC (Integrated) |
-| **Confidence** | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | High |
-| **Evidence** | Strong | Moderate | Strong | Solid |
+| 🌱 Metric | 📊 Current | 🎯 Target | 📈 Trend | ✅ Status |
+| --------- | --------- | --------- | -------- | --------- |
+| **Performance** | 85% | 90% | ↑ +5% | ⚠️ Close |
+| **Efficiency** | 72 units | 80 units | → Stable | 📍 Monitor |
+| **Growth** | 12% | 15% | ↓ -1% | ⚡ Active |
+| **Quality** | 94% | 95% | ↑ +3% | ✓ Optimal |
 \`\`\`
 
-🎨 STYLING & PRESENTATION TIPS:
+🎨 KEY PRINCIPLES FOR MAXIMUM VISUAL IMPACT:
 
-✓ Use emoji indicators (✓, ✗, ↑, ↓, ⚠, 🎯) to add visual meaning
-✓ Include titles and descriptions for each visualization
-✓ Use varied colors that are aesthetically pleasing and distinguishable
-✓ Provide data context and explain what insights the visualization reveals
-✓ Alternate colors in tables for improved readability
-✓ Use bold, italics, and special formatting to highlight key information
-✓ Match visualization type to data type (scatter for correlation, area for trends, etc.)
+✓ Use VIBRANT, CONTRASTING COLORS for each line/area/bar (reds, teals, purples, oranges, greens)
+✓ Always include 3+ series when visualizing to show relationships and patterns
+✓ Use EMOJI INDICATORS (🌱, 📊, 🎯, 📈, ✅, ⚠️, ↑, ↓, →, ⚡) in tables for quick visual scanning
+✓ Make tables multi-dimensional with bold headers and varied row emphasis
+✓ Match chart types to data: multi-line for trends, multi-area for distribution, bars for comparisons
+✓ Include descriptive titles that explain what insight the visualization reveals
+✓ Use consistent, saturated colors that pop and are easily distinguishable
+✓ Provide clear legends identifying each series, metric, or category
 
-For HTML content:
+For HTML/custom content:
 \`\`\`html
-<div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 20px; border-radius: 8px; color: white;">
-  <h2>Your Creative Content Here</h2>
-  <p>Make it visually engaging!</p>
+<div style="background: linear-gradient(to right, #667eea, #764ba2, #f093fb); padding: 24px; border-radius: 12px; color: white; font-weight: bold;">
+  <h2>Your Colorful Content</h2>
+  <p>Make it vibrant and engaging!</p>
 </div>
 \`\`\`
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Remember: Beautiful visualizations + Clear data = Expert insights that resonate
+Success = Multi-metric visualizations + Vibrant colors + Clear, scannable data
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 `;
 

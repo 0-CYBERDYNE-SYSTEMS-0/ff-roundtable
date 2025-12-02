@@ -3,7 +3,7 @@ import { Artifact } from "@shared/schema";
 import { Copy, Download, Maximize2, Code, Table, BarChart3, FileJson, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from "recharts";
+import { LineChart, Line, BarChart, Bar, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from "recharts";
 import DOMPurify from "isomorphic-dompurify";
 
 interface ArtifactDisplayProps {
@@ -149,10 +149,10 @@ export default function ArtifactDisplay({ artifact }: ArtifactDisplayProps) {
           const chartData = JSON.parse(artifact.content);
           if (chartData.type === "line" && Array.isArray(chartData.data)) {
             return (
-              <ResponsiveContainer width="100%" height={250}>
+              <ResponsiveContainer width="100%" height={300}>
                 <LineChart data={chartData.data}>
                   <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="name" />
+                  <XAxis dataKey={Object.keys(chartData.data[0])[0]} />
                   <YAxis />
                   <Tooltip />
                   <Legend />
@@ -162,18 +162,43 @@ export default function ArtifactDisplay({ artifact }: ArtifactDisplayProps) {
                       type="monotone"
                       dataKey={line.key}
                       stroke={line.color || "#8884d8"}
+                      strokeWidth={2}
                       dot={false}
+                      name={line.name || line.key}
                     />
                   ))}
                 </LineChart>
               </ResponsiveContainer>
             );
+          } else if (chartData.type === "area" && Array.isArray(chartData.data)) {
+            return (
+              <ResponsiveContainer width="100%" height={300}>
+                <AreaChart data={chartData.data}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey={Object.keys(chartData.data[0])[0]} />
+                  <YAxis />
+                  <Tooltip />
+                  <Legend />
+                  {chartData.lines?.map((line: any, i: number) => (
+                    <Area
+                      key={i}
+                      type="monotone"
+                      dataKey={line.key}
+                      stroke={line.color || "#8884d8"}
+                      fill={line.fill || `${line.color}40`}
+                      strokeWidth={2}
+                      name={line.name || line.key}
+                    />
+                  ))}
+                </AreaChart>
+              </ResponsiveContainer>
+            );
           } else if (chartData.type === "bar" && Array.isArray(chartData.data)) {
             return (
-              <ResponsiveContainer width="100%" height={250}>
+              <ResponsiveContainer width="100%" height={300}>
                 <BarChart data={chartData.data}>
                   <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="name" />
+                  <XAxis dataKey={Object.keys(chartData.data[0])[0]} />
                   <YAxis />
                   <Tooltip />
                   <Legend />
@@ -182,6 +207,7 @@ export default function ArtifactDisplay({ artifact }: ArtifactDisplayProps) {
                       key={i}
                       dataKey={bar.key}
                       fill={bar.color || "#8884d8"}
+                      name={bar.name || bar.key}
                     />
                   ))}
                 </BarChart>
