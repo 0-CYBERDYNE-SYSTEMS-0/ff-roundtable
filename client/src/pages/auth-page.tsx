@@ -106,10 +106,10 @@ export default function AuthPage() {
         {/* Left side - Forms */}
         <div className="w-full md:w-1/2 p-6">
           <div className="flex items-center mb-6">
-            <img 
-              src="https://images.unsplash.com/photo-1515150144380-bca9f1650ed9?ixlib=rb-1.2.1&auto=format&fit=crop&w=40&h=40&q=80" 
-              alt="Farm Friend Logo" 
-              className="h-10 w-10 rounded-full mr-3"
+            <img
+              src="/logo.jpeg"
+              alt="Farm Friend Logo"
+              className="h-12 w-12 object-contain bg-white rounded-lg border-2 border-neutral-200 p-1.5 mr-3"
             />
             <h1 className="font-serif text-2xl font-bold text-primary">Farm Friend Roundtable</h1>
           </div>

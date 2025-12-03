@@ -36,9 +36,9 @@ export default function Header() {
     <header className="bg-gradient-to-r from-farm-blue to-farm-dark-green px-6 py-3 text-white flex justify-between items-center shadow-lg z-10">
       <div className="flex items-center gap-3">
         <img
-          src="https://images.unsplash.com/photo-1515150144380-bca9f1650ed9?ixlib=rb-1.2.1&auto=format&fit=crop&w=40&h=40&q=80"
+          src="/logo.jpeg"
           alt="Farm Friend Logo"
-          className="h-10 w-10 rounded-full ring-2 ring-white/30"
+          className="h-12 w-12 object-contain bg-white rounded-lg ring-2 ring-white/30 p-1"
         />
         <h1 className="font-serif text-2xl font-bold tracking-tight">Farm Friend Roundtable</h1>
       </div>
