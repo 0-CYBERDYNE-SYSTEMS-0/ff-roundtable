@@ -5,12 +5,23 @@ export default {
   content: ["./client/index.html", "./client/src/**/*.{js,jsx,ts,tsx}"],
   theme: {
     extend: {
+      fontFamily: {
+        sans: ['Inter', 'system-ui', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'Roboto', 'sans-serif'],
+        serif: ['Georgia', 'Cambria', 'Times New Roman', 'serif'],
+      },
       borderRadius: {
         lg: "var(--radius)",
         md: "calc(var(--radius) - 2px)",
         sm: "calc(var(--radius) - 4px)",
       },
       colors: {
+        // Farm Friend Custom Colors
+        'farm-blue': '#007A99',
+        'farm-green': '#4CAF50',
+        'farm-powder': '#B0E0E6',
+        'farm-tan': '#D2B48C',
+        'farm-dark-green': '#2E7D32',
+        'farm-yellow': '#FFEB3B',
         background: "hsl(var(--background))",
         foreground: "hsl(var(--foreground))",
         card: {

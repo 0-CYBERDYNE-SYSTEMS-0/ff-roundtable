@@ -509,48 +509,51 @@ export default function HomePage() {
                 console.log(`[Render Check] Mode: ${interactionMode}, AutoEnabled: ${isAutonomousEnabled}, EnablePending: ${enableAutoMutation.isPending}, DisablePending: ${disableAutoMutation.isPending}`);
                 return null; // Return null to render nothing
             })()}
-            {/* === Interaction Control Bar (Positioned at the top of this column) === */} 
+            {/* === Interaction Control Bar (Positioned at the top of this column) === */}
             {activeConversation && (
-                 <div className="flex-shrink-0 flex items-center justify-between px-4 py-2 border-b bg-slate-50">
-                     <div className="flex items-center gap-2">
-                         <span className="text-sm font-medium text-slate-600">Status:</span>
+                 <div className="flex-shrink-0 flex items-center justify-between px-6 py-3 border-b border-farm-tan/30 bg-gradient-to-r from-farm-powder/20 to-white shadow-sm">
+                     <div className="flex items-center gap-3">
+                         <span className="text-sm font-semibold text-farm-blue">Status:</span>
                          <Badge variant={interactionMode === 'paused' ? 'secondary' : interactionMode === 'idle' ? 'outline' : 'default'}
-                                className={`${interactionMode === 'autonomous' || interactionMode === 'processing_sequential' ? 'bg-green-100 text-green-800' : ''}
-                                          ${interactionMode === 'paused' ? 'bg-yellow-100 text-yellow-800' : ''}`}>
+                                className={`${interactionMode === 'autonomous' || interactionMode === 'processing_sequential' ? 'bg-farm-green/20 text-farm-dark-green border-farm-green' : ''}
+                                          ${interactionMode === 'paused' ? 'bg-farm-yellow/20 text-yellow-800 border-farm-yellow' : ''}
+                                          font-medium capitalize`}>
                              {interactionMode.replace('_', ' ')}
                          </Badge>
-                          <span className="text-sm font-medium text-slate-600 ml-4">Autonomous:</span>
+                          <span className="text-sm font-semibold text-farm-blue ml-4">Autonomous:</span>
                          <Badge variant={isAutonomousEnabled ? 'default' : 'secondary'}
-                                className={isAutonomousEnabled ? 'bg-blue-100 text-blue-800' : ''}>
+                                className={`${isAutonomousEnabled ? 'bg-farm-blue/20 text-farm-blue border-farm-blue' : 'bg-neutral-200 text-neutral-600'} font-medium`}>
                              {isAutonomousEnabled ? 'Enabled' : 'Disabled'}
                          </Badge>
                      </div>
-                     <div className="flex items-center gap-2">
+                     <div className="flex items-center gap-3">
                           {/* Buttons moved here, removed pause/resume */}
-                          {/* Conditionally Render Disable Button */} 
+                          {/* Conditionally Render Disable Button */}
                          {isAutonomousEnabled && (
-                            <Button 
-                                variant="outline" 
-                                size="sm" 
-                                onClick={handleDisableAutonomous} 
-                                disabled={disableAutoMutation.isPending} 
+                            <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={handleDisableAutonomous}
+                                disabled={disableAutoMutation.isPending}
                                 aria-label="Disable Autonomous Mode"
+                                className="border-farm-blue text-farm-blue hover:bg-farm-blue hover:text-white transition-all duration-200 font-medium"
                                 >
-                                <ZapOffIcon className="h-4 w-4 mr-1" />
+                                <ZapOffIcon className="h-4 w-4 mr-1.5" />
                                 Disable Auto
                             </Button>
                          )}
 
-                         {/* Conditionally Render Enable Button */} 
+                         {/* Conditionally Render Enable Button */}
                          {!isAutonomousEnabled && (
-                             <Button 
-                                 variant="outline" 
-                                 size="sm" 
-                                 onClick={handleEnableAutonomous} 
-                                 disabled={enableAutoMutation.isPending} 
+                             <Button
+                                 variant="outline"
+                                 size="sm"
+                                 onClick={handleEnableAutonomous}
+                                 disabled={enableAutoMutation.isPending}
                                  aria-label="Enable Autonomous Mode"
+                                 className="border-farm-green text-farm-green hover:bg-farm-green hover:text-white transition-all duration-200 font-medium"
                                  >
-                                 <ZapIcon className="h-4 w-4 mr-1" />
+                                 <ZapIcon className="h-4 w-4 mr-1.5" />
                                  Enable Auto
                              </Button>
                          )}
@@ -572,21 +575,21 @@ export default function HomePage() {
                         visualizations={[]}
                     />
                 ) : (
-                    <div className="flex-1 flex items-center justify-center">
-                        <div className="text-center">
-                            <h2 className="text-xl font-semibold text-neutral-800 mb-2">Welcome to Farm Friend Roundtable</h2>
-                            <p className="text-neutral-600 mb-6">Start a new conversation to begin chatting with agricultural experts</p>
-                            <div className="flex gap-3 justify-center">
+                    <div className="flex-1 flex items-center justify-center bg-gradient-to-br from-farm-powder/10 via-white to-farm-tan/10">
+                        <div className="text-center max-w-2xl px-8">
+                            <h2 className="text-3xl font-bold text-farm-blue mb-3 tracking-tight">Welcome to Farm Friend Roundtable</h2>
+                            <p className="text-lg text-neutral-600 mb-8 leading-relaxed">Start a new conversation to begin chatting with agricultural experts who can help with your farming needs</p>
+                            <div className="flex gap-4 justify-center">
                                 <button
                                     onClick={handleStartNewSession}
-                                    className="bg-primary text-white px-4 py-2 rounded-lg hover:bg-primary-dark transition-colors"
+                                    className="bg-farm-green text-white px-6 py-3 rounded-lg hover:bg-farm-dark-green transition-all duration-200 shadow-md hover:shadow-lg font-semibold"
                                 >
                                     Start New Roundtable
                                 </button>
                                 <button
                                     onClick={() => quickSetupMutation.mutate()}
                                     disabled={quickSetupMutation.isPending}
-                                    className="bg-amber-500 text-white px-4 py-2 rounded-lg hover:bg-amber-600 transition-colors disabled:opacity-50 flex items-center gap-2"
+                                    className="bg-farm-yellow text-neutral-800 px-6 py-3 rounded-lg hover:bg-yellow-400 transition-all duration-200 shadow-md hover:shadow-lg disabled:opacity-50 flex items-center gap-2 font-semibold"
                                 >
                                     ⚡ Quick Test
                                 </button>

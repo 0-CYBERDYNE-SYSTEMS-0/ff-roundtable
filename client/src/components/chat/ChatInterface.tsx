@@ -38,17 +38,17 @@ export default function ChatInterface({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Get background color for expert based on ID
+  // Get background color for expert based on ID - using farm theme
   const getExpertBubbleColor = (expertId: number) => {
     const colors = [
-      "bg-blue-100",
-      "bg-green-100",
-      "bg-purple-100",
-      "bg-pink-100",
-      "bg-yellow-100",
-      "bg-cyan-100",
-      "bg-orange-100",
-      "bg-red-100",
+      "bg-farm-powder/40 border-farm-blue/20",
+      "bg-farm-green/20 border-farm-green/30",
+      "bg-purple-100 border-purple-300/30",
+      "bg-pink-100 border-pink-300/30",
+      "bg-farm-yellow/20 border-farm-yellow/40",
+      "bg-cyan-100 border-cyan-300/30",
+      "bg-orange-100 border-orange-300/30",
+      "bg-farm-tan/30 border-farm-tan/50",
     ];
     return colors[expertId % colors.length];
   };
@@ -119,19 +119,19 @@ export default function ChatInterface({
   const renderWelcomeMessage = () => {
     if (messages.length === 0 && experts.length > 0) {
       return (
-        <div className="flex items-start mb-4">
+        <div className="flex items-start mb-6">
           <div className="flex-shrink-0 mr-3">
-            <div className="w-8 h-8 rounded-full bg-primary flex items-center justify-center text-white">
-              <span className="material-icons text-sm">smart_toy</span>
+            <div className="w-10 h-10 rounded-full bg-gradient-to-br from-farm-blue to-farm-green flex items-center justify-center text-white shadow-md">
+              <span className="material-icons text-lg">smart_toy</span>
             </div>
           </div>
-          <div className="bg-neutral-200 rounded-lg p-3 max-w-[85%]">
-            <p className="text-sm font-medium text-neutral-800">Moderator</p>
-            <div className="markdown-content text-sm mt-1">
-              <p>Welcome to Farm Friend Roundtable! Your agricultural experts are ready to assist you. Here's who's at the table:</p>
-              <ul>
+          <div className="bg-gradient-to-br from-farm-powder/30 to-farm-tan/20 border border-farm-tan/30 rounded-xl p-4 max-w-[85%] shadow-sm">
+            <p className="text-base font-semibold text-farm-blue mb-2">Moderator</p>
+            <div className="markdown-content text-sm mt-1 text-neutral-700 leading-relaxed">
+              <p className="mb-2">Welcome to Farm Friend Roundtable! Your agricultural experts are ready to assist you. Here's who's at the table:</p>
+              <ul className="list-disc list-inside space-y-1 mb-2">
                 {experts.map(expert => (
-                  <li key={expert.id}><strong>{expert.name}</strong> - {expert.role}</li>
+                  <li key={expert.id}><strong className="text-farm-blue">{expert.name}</strong> - {expert.role}</li>
                 ))}
               </ul>
               <p>What agricultural topic would you like to discuss today?</p>
@@ -152,21 +152,21 @@ export default function ChatInterface({
         {experts.map((expert, index) => (
           <div key={expert.id} className="flex items-start mb-4 animate-pulse">
             <div className="flex-shrink-0 mr-3">
-              <Avatar className="h-8 w-8">
+              <Avatar className="h-10 w-10 ring-2 ring-farm-green/20">
                 <AvatarImage src={expert.avatarUrl || ""} alt={expert.name} />
-                <AvatarFallback>{expert.name.charAt(0)}</AvatarFallback>
+                <AvatarFallback className="bg-farm-green text-white font-semibold">{expert.name.charAt(0)}</AvatarFallback>
               </Avatar>
             </div>
-            <div className="bg-neutral-100 rounded-lg p-3 max-w-[85%] relative overflow-hidden">
+            <div className="bg-farm-powder/20 border border-farm-tan/30 rounded-xl p-4 max-w-[85%] relative overflow-hidden shadow-sm">
               <div className="flex items-center justify-between mb-2">
-                <p className="text-sm font-medium text-neutral-800">{expert.name} ({expert.role})</p>
+                <p className="text-sm font-semibold text-farm-blue">{expert.name} <span className="text-neutral-600 font-normal">({expert.role})</span></p>
                 <ModelBadge modelId={expert.model} size="sm" />
               </div>
-              <div className="h-4 bg-neutral-200 rounded w-3/4 mb-2"></div>
-              <div className="h-4 bg-neutral-200 rounded w-1/2"></div>
+              <div className="h-4 bg-farm-tan/20 rounded-lg w-3/4 mb-2"></div>
+              <div className="h-4 bg-farm-tan/20 rounded-lg w-1/2"></div>
               <div className="absolute bottom-0 left-0 w-full h-1">
-                <div 
-                  className="h-full bg-primary opacity-25"
+                <div
+                  className="h-full bg-gradient-to-r from-farm-blue to-farm-green opacity-40"
                   style={{
                     width: '100%',
                     animation: 'loading 2s infinite ease-in-out',
@@ -190,8 +190,8 @@ export default function ChatInterface({
           
           {Object.entries(messagesByDate).map(([date, dateMessages]) => (
             <div key={date}>
-              <div className="text-center my-3">
-                <span className="text-xs bg-neutral-200 text-neutral-600 px-2 py-1 rounded-full">
+              <div className="text-center my-4">
+                <span className="text-xs bg-farm-tan/30 text-farm-blue px-3 py-1.5 rounded-full font-medium shadow-sm">
                   {date}
                 </span>
               </div>
@@ -201,15 +201,15 @@ export default function ChatInterface({
                 if (message.userId && !message.expertId) {
                   return (
                     <div key={message.id} className="flex items-start mb-4 justify-end">
-                      <div className="bg-primary text-white dark:bg-primary-dark rounded-lg p-3 max-w-[85%] shadow-sm">
-                        <div className="markdown-content prose-sm prose-invert">
+                      <div className="bg-gradient-to-br from-farm-blue to-farm-dark-green text-white rounded-xl p-4 max-w-[85%] shadow-md">
+                        <div className="markdown-content prose-sm prose-invert leading-relaxed">
                           <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
                         </div>
                       </div>
                       <div className="flex-shrink-0 ml-3">
-                        <Avatar className="h-8 w-8">
+                        <Avatar className="h-10 w-10 ring-2 ring-farm-blue/20">
                           <AvatarImage src="https://images.unsplash.com/photo-1610216705422-caa3fcb6d158?ixlib=rb-1.2.1&auto=format&fit=crop&w=32&h=32&q=80" />
-                          <AvatarFallback>{user?.username.charAt(0).toUpperCase()}</AvatarFallback>
+                          <AvatarFallback className="bg-farm-blue text-white font-semibold">{user?.username.charAt(0).toUpperCase()}</AvatarFallback>
                         </Avatar>
                       </div>
                     </div>
@@ -220,22 +220,22 @@ export default function ChatInterface({
                 if (message.expertId) {
                   const expert = findExpert(message.expertId);
                   if (!expert) return null;
-                  
+
                   return (
                     <div key={message.id} className="flex items-start mb-4">
                       <div className="flex-shrink-0 mr-3">
-                        <Avatar className="h-8 w-8">
+                        <Avatar className="h-10 w-10 ring-2 ring-farm-green/20">
                           <AvatarImage src={expert.avatarUrl || ""} alt={expert.name} />
-                          <AvatarFallback>{expert.name.charAt(0)}</AvatarFallback>
+                          <AvatarFallback className="bg-farm-green text-white font-semibold">{expert.name.charAt(0)}</AvatarFallback>
                         </Avatar>
                       </div>
                       <div className="max-w-[85%] space-y-2">
-                        <div className={`${getExpertBubbleColor(message.expertId)} rounded-lg p-3`}>
-                          <div className="flex items-center justify-between">
-                            <p className="text-sm font-medium text-neutral-800">{expert.name} ({expert.role})</p>
+                        <div className={`${getExpertBubbleColor(message.expertId)} rounded-xl p-4 border shadow-sm`}>
+                          <div className="flex items-center justify-between mb-2">
+                            <p className="text-sm font-semibold text-farm-blue">{expert.name} <span className="text-neutral-600 font-normal">({expert.role})</span></p>
                             <ModelBadge modelId={expert.model} size="sm" />
                           </div>
-                          <div className="markdown-content text-sm mt-1">
+                          <div className="markdown-content text-sm leading-relaxed text-neutral-700">
                             <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
                           </div>
                         </div>
@@ -277,18 +277,18 @@ export default function ChatInterface({
         </ScrollArea>
         
         {/* Input Area */}
-        <div className="border-t border-neutral-300 p-3">
-          <div className="flex items-center">
+        <div className="border-t border-farm-tan/30 bg-gradient-to-r from-white to-farm-powder/10 p-4">
+          <div className="flex items-center gap-3">
             <input
               type="file"
               ref={fileInputRef}
               className="hidden"
               onChange={handleFileInputChange}
             />
-            <Button 
-              variant="ghost" 
-              size="icon" 
-              className="text-neutral-500 hover:text-primary mr-2"
+            <Button
+              variant="ghost"
+              size="icon"
+              className="text-farm-blue hover:text-farm-green hover:bg-farm-powder/30 transition-all duration-200"
               onClick={handleFileUpload}
               title="Upload File"
             >
@@ -300,12 +300,12 @@ export default function ChatInterface({
                 value={messageContent}
                 onChange={(e) => setMessageContent(e.target.value)}
                 onKeyDown={handleKeyDown}
-                className="min-h-[60px] resize-none pr-10"
+                className="min-h-[60px] resize-none pr-10 border-farm-tan/40 focus:border-farm-blue focus:ring-farm-blue/20"
                 disabled={isLoading}
               />
             </div>
-            <Button 
-              className="bg-primary hover:bg-primary-dark text-white rounded-full p-2 ml-2 h-10 w-10 flex items-center justify-center"
+            <Button
+              className="bg-gradient-to-br from-farm-green to-farm-dark-green hover:from-farm-dark-green hover:to-farm-green text-white rounded-full p-2 ml-2 h-11 w-11 flex items-center justify-center shadow-md hover:shadow-lg transition-all duration-200 disabled:opacity-50"
               onClick={handleSendMessage}
               disabled={messageContent.trim() === "" || isLoading}
             >
@@ -318,12 +318,12 @@ export default function ChatInterface({
         {isLoading && (
           <div className="flex items-start mb-4">
             <div className="flex-shrink-0 mr-3">
-              <div className="w-8 h-8 rounded-full bg-neutral-300 flex items-center justify-center">
-                <Loader2 className="h-5 w-5 animate-spin text-neutral-600" />
+              <div className="w-10 h-10 rounded-full bg-gradient-to-br from-farm-blue to-farm-green flex items-center justify-center shadow-md">
+                <Loader2 className="h-5 w-5 animate-spin text-white" />
               </div>
             </div>
-            <div className="bg-neutral-200 rounded-lg p-3">
-              <p className="text-sm text-neutral-600">Experts are thinking...</p>
+            <div className="bg-farm-powder/30 border border-farm-tan/30 rounded-xl p-3 shadow-sm">
+              <p className="text-sm text-farm-blue font-medium">Experts are thinking...</p>
             </div>
           </div>
         )}

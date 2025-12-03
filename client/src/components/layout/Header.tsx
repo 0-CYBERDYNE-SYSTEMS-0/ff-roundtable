@@ -33,46 +33,46 @@ export default function Header() {
   }, [user]);
   
   return (
-    <header className="bg-primary px-4 py-2 text-white flex justify-between items-center shadow-md z-10">
-      <div className="flex items-center">
-        <img 
-          src="https://images.unsplash.com/photo-1515150144380-bca9f1650ed9?ixlib=rb-1.2.1&auto=format&fit=crop&w=40&h=40&q=80" 
+    <header className="bg-gradient-to-r from-farm-blue to-farm-dark-green px-6 py-3 text-white flex justify-between items-center shadow-lg z-10">
+      <div className="flex items-center gap-3">
+        <img
+          src="https://images.unsplash.com/photo-1515150144380-bca9f1650ed9?ixlib=rb-1.2.1&auto=format&fit=crop&w=40&h=40&q=80"
           alt="Farm Friend Logo"
-          className="h-8 w-8 rounded-full mr-2"
+          className="h-10 w-10 rounded-full ring-2 ring-white/30"
         />
-        <h1 className="font-serif text-xl font-bold">Farm Friend Roundtable</h1>
+        <h1 className="font-serif text-2xl font-bold tracking-tight">Farm Friend Roundtable</h1>
       </div>
-      
+
       {user && (
-        <div className="flex items-center space-x-2">
-          <span className={`px-2 py-1 ${subscriptionStatus === 'active' ? 'bg-green-700' : 'bg-yellow-600'} rounded-full text-xs flex items-center`}>
-            <span className={`block w-2 h-2 ${subscriptionStatus === 'active' ? 'bg-green-300' : 'bg-yellow-300'} rounded-full mr-1`}></span>
+        <div className="flex items-center space-x-3">
+          <span className={`px-3 py-1.5 ${subscriptionStatus === 'active' ? 'bg-farm-green' : 'bg-farm-yellow'} rounded-full text-xs font-semibold flex items-center shadow-md ${subscriptionStatus === 'active' ? 'text-white' : 'text-neutral-800'}`}>
+            <span className={`block w-2 h-2 ${subscriptionStatus === 'active' ? 'bg-white' : 'bg-neutral-800'} rounded-full mr-1.5 animate-pulse`}></span>
             {subscriptionStatus === 'active' ? 'Subscribed' : 'Inactive'}
           </span>
-          
+
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button variant="ghost" className="flex items-center space-x-1 hover:bg-primary-dark rounded px-2 py-1 h-auto">
-                <Avatar className="h-8 w-8">
+              <Button variant="ghost" className="flex items-center space-x-2 hover:bg-white/10 rounded-lg px-3 py-2 h-auto transition-all duration-200">
+                <Avatar className="h-9 w-9 ring-2 ring-white/30">
                   <AvatarImage src="https://images.unsplash.com/photo-1610216705422-caa3fcb6d158?ixlib=rb-1.2.1&auto=format&fit=crop&w=32&h=32&q=80" />
-                  <AvatarFallback>{user.username.charAt(0).toUpperCase()}</AvatarFallback>
+                  <AvatarFallback className="bg-farm-powder text-farm-blue font-semibold">{user.username.charAt(0).toUpperCase()}</AvatarFallback>
                 </Avatar>
-                <span>{user.username}</span>
+                <span className="font-medium">{user.username}</span>
                 <ChevronDown className="h-4 w-4" />
               </Button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              <DropdownMenuItem className="flex items-center cursor-pointer">
-                <User className="mr-2 h-4 w-4" />
+            <DropdownMenuContent align="end" className="w-48">
+              <DropdownMenuItem className="flex items-center cursor-pointer hover:bg-farm-powder/20">
+                <User className="mr-2 h-4 w-4 text-farm-blue" />
                 <span>Profile</span>
               </DropdownMenuItem>
-              <DropdownMenuItem className="flex items-center cursor-pointer">
-                <Settings className="mr-2 h-4 w-4" />
+              <DropdownMenuItem className="flex items-center cursor-pointer hover:bg-farm-powder/20">
+                <Settings className="mr-2 h-4 w-4 text-farm-blue" />
                 <span>Settings</span>
               </DropdownMenuItem>
               <DropdownMenuSeparator />
-              <DropdownMenuItem 
-                className="flex items-center cursor-pointer text-red-600"
+              <DropdownMenuItem
+                className="flex items-center cursor-pointer text-red-600 hover:bg-red-50"
                 onClick={() => logoutMutation.mutate()}
               >
                 <LogOut className="mr-2 h-4 w-4" />

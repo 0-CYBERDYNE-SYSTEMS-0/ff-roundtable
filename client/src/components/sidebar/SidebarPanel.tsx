@@ -44,67 +44,67 @@ export default function SidebarPanel({
   };
   
   return (
-    <aside className="w-72 bg-white border-r border-neutral-300 flex flex-col z-10 shadow-md">
+    <aside className="w-72 bg-gradient-to-b from-farm-powder/5 to-white border-r border-farm-tan/30 flex flex-col z-10 shadow-lg">
       <div className="flex flex-col h-full">
         {/* Session Controls */}
-        <div className="p-4 border-b border-neutral-300">
-          <h2 className="font-serif font-bold text-lg mb-3">Current Session</h2>
-          <Button 
-            className="w-full bg-primary hover:bg-primary-dark text-white rounded px-4 py-2 flex items-center justify-center mb-2"
+        <div className="p-4 border-b border-farm-tan/30">
+          <h2 className="font-serif font-bold text-lg mb-3 text-farm-blue">Current Session</h2>
+          <Button
+            className="w-full bg-gradient-to-r from-farm-green to-farm-dark-green hover:from-farm-dark-green hover:to-farm-green text-white rounded-lg px-4 py-2.5 flex items-center justify-center mb-2 shadow-md hover:shadow-lg transition-all duration-200 font-semibold"
             onClick={onStartNewSession}
           >
-            <Plus className="mr-1 h-4 w-4" />
+            <Plus className="mr-2 h-4 w-4" />
             New Roundtable
           </Button>
-          <Button 
+          <Button
             variant="outline"
-            className="w-full border border-neutral-400 hover:bg-neutral-200 rounded px-4 py-2 flex items-center justify-center"
+            className="w-full border-2 border-farm-blue text-farm-blue hover:bg-farm-blue hover:text-white rounded-lg px-4 py-2.5 flex items-center justify-center transition-all duration-200 font-medium"
             onClick={onExportMarkdown}
           >
-            <Download className="mr-1 h-4 w-4" />
+            <Download className="mr-2 h-4 w-4" />
             Export as Markdown
           </Button>
         </div>
 
         {/* Experts Panel Header */}
-        <div className="p-4 border-b border-neutral-300 bg-gradient-to-br from-blue-50 to-indigo-50">
-          <div className="flex items-center gap-2 mb-2">
-            <Users className="h-5 w-5 text-primary" />
-            <h2 className="font-serif font-bold text-sm text-primary">Expert Panel</h2>
+        <div className="p-4 border-b border-farm-tan/30 bg-gradient-to-br from-farm-powder/20 to-farm-tan/10">
+          <div className="flex items-center gap-2 mb-3">
+            <Users className="h-5 w-5 text-farm-blue" />
+            <h2 className="font-serif font-bold text-sm text-farm-blue">Expert Panel</h2>
           </div>
           {experts.length === 0 ? (
-            <div className="text-xs text-neutral-600 py-3 px-2 bg-white rounded border border-neutral-200 text-center">
-              <p className="font-medium mb-1">No experts selected</p>
+            <div className="text-xs text-neutral-600 py-3 px-3 bg-white rounded-lg border border-farm-tan/30 text-center shadow-sm">
+              <p className="font-semibold mb-1 text-farm-blue">No experts selected</p>
               <p>Add experts to begin the roundtable</p>
             </div>
           ) : (
-            <div className="space-y-1">
+            <div className="space-y-2">
               {experts.map((expert) => (
-                <div key={expert.id} className="text-xs bg-white rounded p-2 border border-neutral-200">
-                  <p className="font-medium text-neutral-800">{expert.name}</p>
-                  <p className="text-neutral-500 text-xs">{expert.role}</p>
+                <div key={expert.id} className="text-xs bg-white rounded-lg p-2.5 border border-farm-tan/30 shadow-sm hover:shadow-md transition-shadow">
+                  <p className="font-semibold text-farm-blue">{expert.name}</p>
+                  <p className="text-neutral-600 text-xs mt-0.5">{expert.role}</p>
                 </div>
               ))}
             </div>
           )}
         </div>
-        
+
         {/* Tabs */}
-        <div className="flex border-b border-neutral-300">
+        <div className="flex border-b border-farm-tan/30 bg-white">
           <button
-            className={`flex-1 py-2 text-center font-medium ${activeTab === 'conversations' ? 'text-primary border-b-2 border-primary' : 'text-neutral-600'}`}
+            className={`flex-1 py-3 text-center font-semibold text-sm transition-all duration-200 ${activeTab === 'conversations' ? 'text-farm-blue border-b-2 border-farm-blue bg-farm-powder/10' : 'text-neutral-600 hover:text-farm-blue hover:bg-farm-powder/5'}`}
             onClick={() => setActiveTab('conversations')}
           >
             Conversations
           </button>
           <button
-            className={`flex-1 py-2 text-center font-medium ${activeTab === 'insights' ? 'text-primary border-b-2 border-primary' : 'text-neutral-600'}`}
+            className={`flex-1 py-3 text-center font-semibold text-sm transition-all duration-200 ${activeTab === 'insights' ? 'text-farm-blue border-b-2 border-farm-blue bg-farm-powder/10' : 'text-neutral-600 hover:text-farm-blue hover:bg-farm-powder/5'}`}
             onClick={() => setActiveTab('insights')}
           >
             Insights
           </button>
           <button
-            className={`flex-1 py-2 text-center font-medium ${activeTab === 'files' ? 'text-primary border-b-2 border-primary' : 'text-neutral-600'}`}
+            className={`flex-1 py-3 text-center font-semibold text-sm transition-all duration-200 ${activeTab === 'files' ? 'text-farm-blue border-b-2 border-farm-blue bg-farm-powder/10' : 'text-neutral-600 hover:text-farm-blue hover:bg-farm-powder/5'}`}
             onClick={() => setActiveTab('files')}
           >
             Files
@@ -115,19 +115,19 @@ export default function SidebarPanel({
         <ScrollArea className="flex-1 p-4">
           {activeTab === 'conversations' && (
             <div>
-              <div className="flex justify-between items-center mb-3">
-                <h2 className="font-serif font-bold text-lg">Your Conversations</h2>
+              <div className="flex justify-between items-center mb-4">
+                <h2 className="font-serif font-bold text-lg text-farm-blue">Your Conversations</h2>
               </div>
-              
+
               {conversations.length === 0 ? (
-                <div className="text-center py-12 text-neutral-500 space-y-4">
-                  <div className="bg-neutral-100 rounded-lg p-8">
+                <div className="text-center py-8 text-neutral-500 space-y-4">
+                  <div className="bg-farm-powder/20 rounded-xl p-6 border border-farm-tan/30">
                     <div className="text-4xl mb-3">📋</div>
-                    <p className="font-medium">No conversations yet</p>
-                    <p className="text-sm mt-2">Click "New Roundtable" above to start your first conversation</p>
+                    <p className="font-semibold text-farm-blue">No conversations yet</p>
+                    <p className="text-sm mt-2 text-neutral-600">Click "New Roundtable" above to start your first conversation</p>
                   </div>
-                  <div className="bg-blue-50 rounded-lg p-4 border border-blue-200">
-                    <p className="text-xs text-blue-700">💡 Tip: Each roundtable brings together multiple experts to discuss your agricultural topics.</p>
+                  <div className="bg-farm-green/10 rounded-xl p-4 border border-farm-green/30">
+                    <p className="text-xs text-farm-dark-green leading-relaxed">💡 Tip: Each roundtable brings together multiple experts to discuss your agricultural topics.</p>
                   </div>
                 </div>
               ) : (
@@ -135,11 +135,11 @@ export default function SidebarPanel({
                   {conversations.map(conversation => (
                     <div
                       key={conversation.id}
-                      className={`p-3 rounded-lg cursor-pointer ${activeConversationId === conversation.id ? 'bg-primary bg-opacity-10 border border-primary' : 'bg-neutral-200 hover:bg-neutral-300'}`}
+                      className={`p-3 rounded-lg cursor-pointer transition-all duration-200 ${activeConversationId === conversation.id ? 'bg-farm-powder/30 border-2 border-farm-blue shadow-md' : 'bg-white border border-farm-tan/30 hover:bg-farm-powder/10 hover:border-farm-blue/30'}`}
                       onClick={() => onSelectConversation(conversation.id)}
                     >
-                      <h3 className="font-medium">{conversation.title}</h3>
-                      <p className="text-xs text-neutral-600">
+                      <h3 className="font-semibold text-farm-blue">{conversation.title}</h3>
+                      <p className="text-xs text-neutral-600 mt-1">
                         {conversation.createdAt ? format(new Date(conversation.createdAt), 'MMM d, yyyy • h:mm a') : 'Unknown date'}
                       </p>
                     </div>
@@ -151,12 +151,12 @@ export default function SidebarPanel({
           
           {activeTab === 'insights' && (
             <div>
-              <div className="flex justify-between items-center mb-3">
-                <h2 className="font-serif font-bold text-lg">Key Insights</h2>
-                <Button 
-                  variant="ghost" 
-                  size="icon" 
-                  className="text-primary cursor-pointer h-8 w-8" 
+              <div className="flex justify-between items-center mb-4">
+                <h2 className="font-serif font-bold text-lg text-farm-blue">Key Insights</h2>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="text-farm-blue hover:text-farm-green hover:bg-farm-powder/30 cursor-pointer h-8 w-8 transition-all duration-200"
                   title="Refresh insights"
                   onClick={onRefreshInsights}
                   disabled={isLoadingInsights}
@@ -164,28 +164,28 @@ export default function SidebarPanel({
                   <RefreshCw className={`h-4 w-4 ${isLoadingInsights ? 'animate-spin' : ''}`} />
                 </Button>
               </div>
-              
+
               {insights.length === 0 ? (
-                <div className="text-center py-12 text-neutral-500 space-y-4">
-                  <div className="bg-neutral-100 rounded-lg p-8">
+                <div className="text-center py-8 text-neutral-500 space-y-4">
+                  <div className="bg-farm-powder/20 rounded-xl p-6 border border-farm-tan/30">
                     <div className="text-4xl mb-3">💡</div>
-                    <p className="font-medium">No insights generated yet</p>
-                    <p className="text-sm mt-2">Keep chatting with your experts to unlock valuable insights</p>
+                    <p className="font-semibold text-farm-blue">No insights generated yet</p>
+                    <p className="text-sm mt-2 text-neutral-600">Keep chatting with your experts to unlock valuable insights</p>
                   </div>
-                  <div className="bg-green-50 rounded-lg p-4 border border-green-200">
-                    <p className="text-xs text-green-700">🌱 Insights automatically generate as conversations grow and patterns emerge.</p>
+                  <div className="bg-farm-green/10 rounded-xl p-4 border border-farm-green/30">
+                    <p className="text-xs text-farm-dark-green leading-relaxed">🌱 Insights automatically generate as conversations grow and patterns emerge.</p>
                   </div>
                 </div>
               ) : (
                 <div className="space-y-3">
                   {insights.map(insight => (
-                    <div key={insight.id} className="bg-neutral-200 rounded-lg p-3 mb-3">
-                      <h3 className="font-medium text-primary-dark">{insight.title}</h3>
-                      <ul className="text-sm mt-1">
+                    <div key={insight.id} className="bg-gradient-to-br from-farm-powder/20 to-white rounded-xl p-4 border border-farm-tan/30 shadow-sm hover:shadow-md transition-shadow">
+                      <h3 className="font-semibold text-farm-blue mb-2">{insight.title}</h3>
+                      <ul className="text-sm">
                         {insight.points && insight.points.map((point, index) => (
-                          <li key={index} className="flex items-start mb-1">
-                            <ArrowRight className="text-secondary h-4 w-4 mr-1 mt-0.5 flex-shrink-0" />
-                            <span>{point}</span>
+                          <li key={index} className="flex items-start mb-2">
+                            <ArrowRight className="text-farm-green h-4 w-4 mr-2 mt-0.5 flex-shrink-0" />
+                            <span className="text-neutral-700 leading-relaxed">{point}</span>
                           </li>
                         ))}
                       </ul>
@@ -198,8 +198,8 @@ export default function SidebarPanel({
           
           {activeTab === 'files' && (
             <div>
-              <div className="flex justify-between items-center mb-3">
-                <h2 className="font-serif font-bold text-lg">Attachments</h2>
+              <div className="flex justify-between items-center mb-4">
+                <h2 className="font-serif font-bold text-lg text-farm-blue">Attachments</h2>
                 <div>
                   <input
                     id="file-upload"
@@ -208,10 +208,10 @@ export default function SidebarPanel({
                     onChange={handleFileInputChange}
                   />
                   <label htmlFor="file-upload" className="cursor-pointer">
-                    <Button 
-                      variant="ghost" 
-                      size="icon" 
-                      className="text-primary cursor-pointer h-8 w-8" 
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="text-farm-blue hover:text-farm-green hover:bg-farm-powder/30 cursor-pointer h-8 w-8 transition-all duration-200"
                       title="Upload File"
                     >
                       <Upload className="h-4 w-4" />
@@ -219,34 +219,34 @@ export default function SidebarPanel({
                   </label>
                 </div>
               </div>
-              
+
               {files.length === 0 ? (
-                <div className="text-center py-12 text-neutral-500 space-y-4">
-                  <div className="bg-neutral-100 rounded-lg p-8">
+                <div className="text-center py-8 text-neutral-500 space-y-4">
+                  <div className="bg-farm-powder/20 rounded-xl p-6 border border-farm-tan/30">
                     <div className="text-4xl mb-3">📁</div>
-                    <p className="font-medium">No files uploaded yet</p>
-                    <p className="text-sm mt-2">Click the upload button to add documents or images</p>
+                    <p className="font-semibold text-farm-blue">No files uploaded yet</p>
+                    <p className="text-sm mt-2 text-neutral-600">Click the upload button to add documents or images</p>
                   </div>
-                  <div className="bg-orange-50 rounded-lg p-4 border border-orange-200">
-                    <p className="text-xs text-orange-700">📄 Share files with experts to get tailored advice based on your specific documents.</p>
+                  <div className="bg-farm-yellow/20 rounded-xl p-4 border border-farm-yellow/40">
+                    <p className="text-xs text-neutral-700 leading-relaxed">📄 Share files with experts to get tailored advice based on your specific documents.</p>
                   </div>
                 </div>
               ) : (
-                <div>
+                <div className="space-y-2">
                   {files.map(file => (
-                    <div key={file.id} className="flex justify-between items-center p-2 hover:bg-neutral-200 rounded">
-                      <div className="flex items-center">
+                    <div key={file.id} className="flex justify-between items-center p-3 hover:bg-farm-powder/20 rounded-lg border border-farm-tan/30 bg-white transition-all duration-200">
+                      <div className="flex items-center gap-2">
                         {file.fileType.includes('image') ? (
-                          <Image className="text-neutral-600 h-5 w-5 mr-2" />
+                          <Image className="text-farm-blue h-5 w-5" />
                         ) : (
-                          <FileText className="text-neutral-600 h-5 w-5 mr-2" />
+                          <FileText className="text-farm-blue h-5 w-5" />
                         )}
-                        <span className="text-sm truncate max-w-[160px]">{file.filename}</span>
+                        <span className="text-sm truncate max-w-[160px] font-medium text-neutral-700">{file.filename}</span>
                       </div>
-                      <a 
-                        href={file.fileUrl} 
-                        download 
-                        className="text-neutral-600 hover:text-primary" 
+                      <a
+                        href={file.fileUrl}
+                        download
+                        className="text-farm-blue hover:text-farm-green transition-colors"
                         title="Download File"
                       >
                         <FileDown className="h-4 w-4" />
@@ -260,9 +260,9 @@ export default function SidebarPanel({
         </ScrollArea>
         
         {/* Version Info */}
-        <div className="p-4 text-xs text-neutral-500 mt-auto border-t border-neutral-300">
-          <p>Farm Friend Roundtable v1.0.0</p>
-          <p>© 2023 Farm Friend Technologies</p>
+        <div className="p-4 text-xs text-neutral-600 mt-auto border-t border-farm-tan/30 bg-gradient-to-br from-farm-powder/10 to-farm-tan/10">
+          <p className="font-semibold text-farm-blue">Farm Friend Roundtable v1.0.0</p>
+          <p className="mt-1">© 2023 Farm Friend Technologies</p>
         </div>
       </div>
     </aside>
