@@ -466,18 +466,49 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const conversationId = parseInt(req.params.id);
       const conversation = await storage.getConversation(conversationId);
-      
+
       if (!conversation || conversation.userId !== req.user!.id) {
         return res.status(404).json({ message: "Conversation not found" });
       }
-      
+
       const experts = await storage.getConversationExperts(conversationId);
       res.json(experts);
     } catch (error: any) {
       res.status(500).json({ message: error.message });
     }
   });
-  
+
+  // Update expert settings
+  app.patch("/api/experts/:expertId", async (req, res) => {
+    try {
+      const expertId = parseInt(req.params.expertId);
+      const expert = await storage.getExpertById(expertId);
+
+      if (!expert) {
+        return res.status(404).json({ message: "Expert not found" });
+      }
+
+      // Verify user owns this conversation
+      const conversation = await storage.getConversation(expert.conversationId);
+      if (!conversation || conversation.userId !== req.user!.id) {
+        return res.status(403).json({ message: "Not authorized to update this expert" });
+      }
+
+      const { name, model, customInstructions } = req.body;
+      const updates: Partial<Expert> = {};
+
+      if (name !== undefined) updates.name = name;
+      if (model !== undefined) updates.model = model;
+      if (customInstructions !== undefined) updates.customInstructions = customInstructions;
+
+      const updatedExpert = await storage.updateExpert(expertId, updates);
+      res.json(updatedExpert);
+    } catch (error: any) {
+      console.error("Error updating expert:", error);
+      res.status(500).json({ message: error.message });
+    }
+  });
+
   // Message endpoints
   app.post("/api/protected/conversations/:id/messages", async (req, res) => {
     try {

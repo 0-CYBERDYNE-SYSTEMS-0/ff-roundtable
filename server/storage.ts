@@ -21,6 +21,7 @@ export interface IStorage {
   
   // Expert operations
   createExpert(expert: InsertExpert): Promise<Expert>;
+  getExpertById(expertId: number): Promise<Expert | undefined>;
   getConversationExperts(conversationId: number): Promise<Expert[]>;
   updateExpert(expertId: number, updates: Partial<Expert>): Promise<Expert>;
   
@@ -178,6 +179,10 @@ export class MemStorage implements IStorage {
     return expert;
   }
   
+  async getExpertById(expertId: number): Promise<Expert | undefined> {
+    return this.experts.get(expertId);
+  }
+
   async getConversationExperts(conversationId: number): Promise<Expert[]> {
     return Array.from(this.experts.values())
       .filter(expert => expert.conversationId === conversationId);

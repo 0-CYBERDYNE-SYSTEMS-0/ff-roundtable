@@ -12,6 +12,7 @@ import { formatMessageDate } from "@/lib/file-utils";
 import ModelBadge from "../roundtable/ModelBadge";
 import ConversationSidebar from "../roundtable/ConversationSidebar";
 import ArtifactDisplay from "../artifacts/ArtifactDisplay";
+import ExpertSettingsModal from "../expert/ExpertSettingsModal";
 
 interface ChatInterfaceProps {
   messages: Message[];
@@ -37,6 +38,8 @@ export default function ChatInterface({
   const [messageContent, setMessageContent] = useState("");
   const [expertsCollapsed, setExpertsCollapsed] = useState(false);
   const [rightSidebarWidth, setRightSidebarWidth] = useState(400);
+  const [selectedExpert, setSelectedExpert] = useState<Expert | null>(null);
+  const [isExpertModalOpen, setIsExpertModalOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -89,6 +92,34 @@ export default function ChatInterface({
   const findExpert = (expertId: number | null) => {
     if (!expertId) return null;
     return experts.find(expert => expert.id === expertId);
+  };
+
+  // Handle expert click to open settings modal
+  const handleExpertClick = (expert: Expert) => {
+    setSelectedExpert(expert);
+    setIsExpertModalOpen(true);
+  };
+
+  // Handle expert settings save
+  const handleExpertSave = async (expertId: number, updates: Partial<Expert>) => {
+    try {
+      const response = await fetch(`/api/experts/${expertId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updates),
+        credentials: 'include'
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to update expert');
+      }
+
+      // Refresh the page or update local state
+      window.location.reload();
+    } catch (error) {
+      console.error('Error updating expert:', error);
+      alert('Failed to update expert. Please try again.');
+    }
   };
 
   // Group messages by date for displaying date separators
@@ -204,20 +235,30 @@ export default function ChatInterface({
             <ScrollArea className="flex-1 p-3">
               <div className="space-y-2">
                 {experts.map((expert) => (
-                  <div key={expert.id} className="p-3 bg-white rounded-lg border border-farm-tan/30 shadow-sm hover:shadow-md transition-shadow">
+                  <button
+                    key={expert.id}
+                    onClick={() => handleExpertClick(expert)}
+                    className="w-full p-3 bg-white rounded-lg border border-farm-tan/30 shadow-sm hover:shadow-md hover:border-farm-blue/40 transition-all cursor-pointer text-left group"
+                  >
                     <div className="flex items-start gap-2">
-                      <Avatar className="h-8 w-8 ring-2 ring-farm-green/20 flex-shrink-0">
+                      <Avatar className="h-8 w-8 ring-2 ring-farm-green/20 flex-shrink-0 group-hover:ring-farm-blue/40 transition-all">
                         <AvatarImage src={expert.avatarUrl || ""} alt={expert.name} />
                         <AvatarFallback className="bg-farm-green text-white text-xs font-semibold">
                           {expert.name.charAt(0)}
                         </AvatarFallback>
                       </Avatar>
                       <div className="flex-1 min-w-0">
-                        <p className="text-sm font-semibold text-farm-blue truncate">{expert.name}</p>
+                        <p className="text-sm font-semibold text-farm-blue truncate group-hover:text-farm-dark-green transition-colors">
+                          {expert.name}
+                        </p>
                         <p className="text-xs text-neutral-600 truncate">{expert.role}</p>
                       </div>
+                      <svg className="w-4 h-4 text-neutral-400 group-hover:text-farm-blue transition-colors flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                      </svg>
                     </div>
-                  </div>
+                  </button>
                 ))}
               </div>
             </ScrollArea>
@@ -226,14 +267,19 @@ export default function ChatInterface({
           {expertsCollapsed && (
             <div className="flex-1 p-2 space-y-3 overflow-y-auto">
               {experts.map((expert) => (
-                <div key={expert.id} className="flex justify-center" title={`${expert.name} - ${expert.role}`}>
-                  <Avatar className="h-8 w-8 ring-2 ring-farm-green/20">
+                <button
+                  key={expert.id}
+                  onClick={() => handleExpertClick(expert)}
+                  className="flex justify-center hover:bg-farm-powder/30 rounded-lg p-1 transition-colors w-full"
+                  title={`${expert.name} - ${expert.role}\nClick to edit settings`}
+                >
+                  <Avatar className="h-8 w-8 ring-2 ring-farm-green/20 hover:ring-farm-blue/40 transition-all">
                     <AvatarImage src={expert.avatarUrl || ""} alt={expert.name} />
                     <AvatarFallback className="bg-farm-green text-white text-xs font-semibold">
                       {expert.name.charAt(0)}
                     </AvatarFallback>
                   </Avatar>
-                </div>
+                </button>
               ))}
             </div>
           )}
@@ -401,6 +447,17 @@ export default function ChatInterface({
           currentWidth={rightSidebarWidth}
         />
       </div>
+
+      {/* Expert Settings Modal */}
+      <ExpertSettingsModal
+        expert={selectedExpert}
+        isOpen={isExpertModalOpen}
+        onClose={() => {
+          setIsExpertModalOpen(false);
+          setSelectedExpert(null);
+        }}
+        onSave={handleExpertSave}
+      />
     </div>
   );
 }
