@@ -22,6 +22,7 @@ export interface IStorage {
   // Expert operations
   createExpert(expert: InsertExpert): Promise<Expert>;
   getConversationExperts(conversationId: number): Promise<Expert[]>;
+  updateExpert(expertId: number, updates: Partial<Expert>): Promise<Expert>;
   
   // Message operations
   createMessage(message: InsertMessage): Promise<Message>;
@@ -180,6 +181,21 @@ export class MemStorage implements IStorage {
   async getConversationExperts(conversationId: number): Promise<Expert[]> {
     return Array.from(this.experts.values())
       .filter(expert => expert.conversationId === conversationId);
+  }
+
+  async updateExpert(expertId: number, updates: Partial<Expert>): Promise<Expert> {
+    const expert = this.experts.get(expertId);
+    if (!expert) throw new Error(`Expert with ID ${expertId} not found`);
+
+    const updatedExpert: Expert = {
+      ...expert,
+      ...updates,
+      id: expert.id, // Ensure ID is not changed
+      conversationId: expert.conversationId // Ensure conversationId is not changed
+    };
+
+    this.experts.set(expertId, updatedExpert);
+    return updatedExpert;
   }
   
   // Message operations

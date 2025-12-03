@@ -35,6 +35,8 @@ export default function ChatInterface({
   visualizations
 }: ChatInterfaceProps) {
   const [messageContent, setMessageContent] = useState("");
+  const [expertsCollapsed, setExpertsCollapsed] = useState(false);
+  const [rightSidebarWidth, setRightSidebarWidth] = useState(400);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -181,9 +183,65 @@ export default function ChatInterface({
   };
 
   return (
-    <div className="w-full flex h-full">
+    <div className="w-full flex h-full overflow-hidden">
+      {/* Left Sidebar - Experts List */}
+      <div className={`flex-shrink-0 bg-gradient-to-b from-farm-powder/30 to-white border-r border-neutral-200 transition-all duration-300 ${expertsCollapsed ? 'w-12' : 'w-64'}`}>
+        <div className="h-full flex flex-col">
+          <div className="p-3 border-b border-neutral-200 flex items-center justify-between">
+            {!expertsCollapsed && <h3 className="font-semibold text-farm-blue text-sm">Expert Panel</h3>}
+            <button
+              onClick={() => setExpertsCollapsed(!expertsCollapsed)}
+              className="p-1.5 hover:bg-farm-blue/10 rounded transition-colors"
+              title={expertsCollapsed ? "Expand expert list" : "Collapse expert list"}
+            >
+              <svg className={`w-4 h-4 text-farm-blue transition-transform ${expertsCollapsed ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+              </svg>
+            </button>
+          </div>
+
+          {!expertsCollapsed && (
+            <ScrollArea className="flex-1 p-3">
+              <div className="space-y-2">
+                {experts.map((expert) => (
+                  <div key={expert.id} className="p-3 bg-white rounded-lg border border-farm-tan/30 shadow-sm hover:shadow-md transition-shadow">
+                    <div className="flex items-start gap-2">
+                      <Avatar className="h-8 w-8 ring-2 ring-farm-green/20 flex-shrink-0">
+                        <AvatarImage src={expert.avatarUrl || ""} alt={expert.name} />
+                        <AvatarFallback className="bg-farm-green text-white text-xs font-semibold">
+                          {expert.name.charAt(0)}
+                        </AvatarFallback>
+                      </Avatar>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-semibold text-farm-blue truncate">{expert.name}</p>
+                        <p className="text-xs text-neutral-600 truncate">{expert.role}</p>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </ScrollArea>
+          )}
+
+          {expertsCollapsed && (
+            <div className="flex-1 p-2 space-y-3 overflow-y-auto">
+              {experts.map((expert) => (
+                <div key={expert.id} className="flex justify-center" title={`${expert.name} - ${expert.role}`}>
+                  <Avatar className="h-8 w-8 ring-2 ring-farm-green/20">
+                    <AvatarImage src={expert.avatarUrl || ""} alt={expert.name} />
+                    <AvatarFallback className="bg-farm-green text-white text-xs font-semibold">
+                      {expert.name.charAt(0)}
+                    </AvatarFallback>
+                  </Avatar>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
       {/* Main Chat Area */}
-      <div className="flex-1 flex flex-col h-full bg-white border-r border-neutral-200">
+      <div className="flex-1 flex flex-col h-full bg-white border-r border-neutral-200 min-w-0">
         {/* Chat Messages */}
         <ScrollArea className="flex-1 p-4">
           {renderWelcomeMessage()}
@@ -329,13 +387,18 @@ export default function ChatInterface({
         )}
       </div>
 
-      {/* Dynamic Sidebar */}
-      <div className="w-[400px] flex-shrink-0 bg-white h-full overflow-hidden">
-        <ConversationSidebar 
+      {/* Right Sidebar - Resizable */}
+      <div
+        className="flex-shrink-0 bg-white h-full overflow-hidden"
+        style={{ width: `${rightSidebarWidth}px` }}
+      >
+        <ConversationSidebar
           messages={messages}
           experts={experts}
           insights={insights}
           visualizations={visualizations}
+          onWidthChange={setRightSidebarWidth}
+          currentWidth={rightSidebarWidth}
         />
       </div>
     </div>

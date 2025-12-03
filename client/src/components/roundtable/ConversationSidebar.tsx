@@ -11,6 +11,8 @@ interface ConversationSidebarProps {
   experts: Expert[];
   insights: any[];
   visualizations: any[];
+  onWidthChange: (width: number) => void;
+  currentWidth: number;
 }
 
 interface Visualization {
@@ -24,13 +26,16 @@ export default function ConversationSidebar({
   messages,
   experts,
   insights,
-  visualizations
+  visualizations,
+  onWidthChange,
+  currentWidth
 }: ConversationSidebarProps) {
   const [activeTab, setActiveTab] = useState('insights');
   const [activeVisualizations, setActiveVisualizations] = useState<Visualization[]>([]);
   const [allArtifacts, setAllArtifacts] = useState<Artifact[]>([]);
-  const [sidebarWidth, setSidebarWidth] = useState(320);
   const [isResizing, setIsResizing] = useState(false);
+  const [startX, setStartX] = useState(0);
+  const [startWidth, setStartWidth] = useState(currentWidth);
 
   // Extract artifacts from messages
   useEffect(() => {
@@ -97,21 +102,40 @@ export default function ConversationSidebar({
     setActiveVisualizations(extractedVisualizations);
   }, [messages]);
 
-  const handleMouseDown = () => {
+  const handleMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault();
     setIsResizing(true);
+    setStartX(e.clientX);
+    setStartWidth(currentWidth);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
   };
 
-  const handleMouseUp = () => {
-    setIsResizing(false);
-  };
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!isResizing) return;
+      const diff = startX - e.clientX;
+      const newWidth = Math.max(300, Math.min(800, startWidth + diff));
+      onWidthChange(newWidth);
+    };
 
-  const handleMouseMove = (e: React.MouseEvent) => {
-    if (!isResizing) return;
-    const newWidth = e.clientX;
-    if (newWidth > 250 && newWidth < 600) {
-      setSidebarWidth(newWidth);
+    const handleMouseUp = () => {
+      if (isResizing) {
+        setIsResizing(false);
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+      }
+    };
+
+    if (isResizing) {
+      document.addEventListener('mousemove', handleMouseMove);
+      document.addEventListener('mouseup', handleMouseUp);
+      return () => {
+        document.removeEventListener('mousemove', handleMouseMove);
+        document.removeEventListener('mouseup', handleMouseUp);
+      };
     }
-  };
+  }, [isResizing, startX, startWidth, onWidthChange]);
 
   const renderVisualization = (vis: Visualization) => {
     switch (vis.type) {
@@ -155,13 +179,7 @@ export default function ConversationSidebar({
   };
 
   return (
-    <div 
-      className="h-full flex flex-col relative" 
-      style={{ width: sidebarWidth }}
-      onMouseMove={handleMouseMove}
-      onMouseUp={handleMouseUp}
-      onMouseLeave={handleMouseUp}
-    >
+    <div className="h-full flex flex-col relative w-full">
       <Tabs defaultValue="insights" className="w-full h-full flex flex-col">
         <div className="border-b border-neutral-200 px-4 flex-shrink-0">
           <TabsList className="mb-[-1px]">
@@ -257,17 +275,16 @@ export default function ConversationSidebar({
         </TabsContent>
       </Tabs>
 
-      {/* Resizable handle - visible as UI endpoint */}
+      {/* Resizable handle - LEFT side (drag to resize) */}
       <div
         onMouseDown={handleMouseDown}
-        className={`absolute -right-1.5 top-0 w-3 h-full bg-gradient-to-r from-transparent via-blue-400 to-transparent hover:from-blue-300 hover:via-blue-500 hover:to-blue-300 cursor-col-resize transition-colors ${
-          isResizing ? "from-blue-500 via-blue-600 to-blue-500" : ""
+        className={`absolute -left-1 top-0 w-2 h-full hover:bg-farm-blue/30 cursor-col-resize transition-colors z-10 ${
+          isResizing ? "bg-farm-blue/50" : "bg-transparent"
         }`}
         style={{
-          opacity: isResizing ? 1 : 0.3,
-          transition: isResizing ? 'none' : 'opacity 0.2s'
+          borderLeft: isResizing ? '2px solid rgb(59 130 246)' : '1px solid rgb(229 231 235)'
         }}
-        title="Drag to resize sidebar (250-600px)"
+        title="Drag to resize sidebar (300-800px)"
       />
     </div>
   );

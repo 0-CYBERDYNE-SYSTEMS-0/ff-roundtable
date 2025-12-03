@@ -80,33 +80,71 @@ export async function registerRoutes(app: Express): Promise<Server> {
           if (!userId) {
             return res.status(401).json({ message: "Not authenticated" });
           }
-          
+
           // Create conversation
           const conversation = await storage.createConversation({
             userId,
             title: "Quick Test Roundtable"
           });
-          
+
           // Add all experts from config
+          // In test mode, all experts use deepseek/deepseek-v3.2
+          const testModel = "deepseek/deepseek-v3.2";
           const expertPromises = devConfig.experts.map((expert: any) =>
             storage.createExpert({
               conversationId: conversation.id,
               name: expert.name,
               role: expert.role,
-              model: expert.model,
+              model: testModel, // Force all experts to use test model
               avatarUrl: expert.avatarUrl,
-              systemPrompt: generateSystemPrompt(expert.role)
+              systemPrompt: generateSystemPrompt({ role: expert.role } as Expert, undefined)
             })
           );
-          
+
           await Promise.all(expertPromises);
-          
-          res.json({ 
+
+          res.json({
             conversationId: conversation.id,
-            expertCount: devConfig.experts.length 
+            expertCount: devConfig.experts.length
           });
         } catch (error: any) {
           console.error("Dev quick setup error:", error);
+          res.status(500).json({ message: error.message });
+        }
+      });
+
+      // Endpoint to update all experts in a conversation to use test model
+      app.post("/api/dev/update-models/:conversationId", async (req, res) => {
+        try {
+          const userId = req.user?.id;
+          if (!userId) {
+            return res.status(401).json({ message: "Not authenticated" });
+          }
+
+          const conversationId = parseInt(req.params.conversationId);
+          const conversation = await storage.getConversation(conversationId);
+
+          if (!conversation || conversation.userId !== userId) {
+            return res.status(404).json({ message: "Conversation not found" });
+          }
+
+          const experts = await storage.getConversationExperts(conversationId);
+          const testModel = "deepseek/deepseek-v3.2";
+
+          // Update all experts to use the test model
+          const updatePromises = experts.map((expert) =>
+            storage.updateExpert(expert.id, { model: testModel })
+          );
+
+          await Promise.all(updatePromises);
+
+          res.json({
+            message: "All experts updated to use test model",
+            expertCount: experts.length,
+            model: testModel
+          });
+        } catch (error: any) {
+          console.error("Dev update models error:", error);
           res.status(500).json({ message: error.message });
         }
       });
