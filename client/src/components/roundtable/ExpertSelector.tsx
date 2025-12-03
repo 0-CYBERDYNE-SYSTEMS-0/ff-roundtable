@@ -24,6 +24,7 @@ interface OpenRouterModel {
 
 // --- Define reliable fallback models when OpenRouter API fails ---
 const FALLBACK_MODELS: OpenRouterModel[] = [
+  { id: "deepseek/deepseek-v3.2", name: "⚡ Quick Test", description: "DeepSeek V3.2 - Fast and efficient model" },
   { id: "openai/gpt-3.5-turbo", name: "GPT-3.5 Turbo", description: "OpenAI's GPT-3.5 Turbo model" },
   { id: "openai/gpt-4", name: "GPT-4", description: "OpenAI's GPT-4 model" },
   { id: "anthropic/claude-3-haiku", name: "Claude 3 Haiku", description: "Anthropic's Claude 3 Haiku model" },
