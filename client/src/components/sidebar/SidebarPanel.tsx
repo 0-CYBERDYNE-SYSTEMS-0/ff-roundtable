@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Plus, RefreshCw, Download, Upload, FileDown, FileText, Image, ArrowRight, Users } from "lucide-react";
+import { Plus, RefreshCw, Download, Upload, FileDown, FileText, Image, ArrowRight } from "lucide-react";
 import { Insight, File as FileSchema, Conversation, Expert } from "@shared/schema";
 import { format } from "date-fns";
 
@@ -64,29 +64,6 @@ export default function SidebarPanel({
             <Download className="mr-2 h-4 w-4" />
             Export as Markdown
           </Button>
-        </div>
-
-        {/* Experts Panel Header */}
-        <div className="p-4 border-b border-farm-tan/30 bg-gradient-to-br from-farm-powder/20 to-farm-tan/10">
-          <div className="flex items-center gap-2 mb-3">
-            <Users className="h-5 w-5 text-farm-blue" />
-            <h2 className="font-serif font-bold text-sm text-farm-blue">Expert Panel</h2>
-          </div>
-          {experts.length === 0 ? (
-            <div className="text-xs text-neutral-600 py-3 px-3 bg-white rounded-lg border border-farm-tan/30 text-center shadow-sm">
-              <p className="font-semibold mb-1 text-farm-blue">No experts selected</p>
-              <p>Add experts to begin the roundtable</p>
-            </div>
-          ) : (
-            <div className="space-y-2">
-              {experts.map((expert) => (
-                <div key={expert.id} className="text-xs bg-white rounded-lg p-2.5 border border-farm-tan/30 shadow-sm hover:shadow-md transition-shadow">
-                  <p className="font-semibold text-farm-blue">{expert.name}</p>
-                  <p className="text-neutral-600 text-xs mt-0.5">{expert.role}</p>
-                </div>
-              ))}
-            </div>
-          )}
         </div>
 
         {/* Tabs */}
