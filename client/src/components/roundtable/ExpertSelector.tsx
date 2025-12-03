@@ -45,7 +45,7 @@ const availableExperts = [
   {
     role: "Soil Scientist",
     description: "Specializes in soil health, composition analysis, and fertilization recommendations.",
-    defaultModel: "anthropic/claude-3.5-sonnet",
+    defaultModel: "deepseek/deepseek-v3.2",
     avatarUrl: "https://images.unsplash.com/photo-1560365163-3e8d64e762ef?ixlib=rb-1.2.1&auto=format&fit=crop&w=48&h=48&q=80",
     category: EXPERT_CATEGORIES.AGRICULTURE,
     recommended: true
@@ -53,7 +53,7 @@ const availableExperts = [
   {
     role: "Crop Specialist",
     description: "Expert in crop varieties, rotation strategies, and yield optimization techniques.",
-    defaultModel: "openai/gpt-4o",
+    defaultModel: "deepseek/deepseek-v3.2",
     avatarUrl: "https://images.unsplash.com/photo-1530836369250-ef72a3f5cda8?ixlib=rb-1.2.1&auto=format&fit=crop&w=48&h=48&q=80",
     category: EXPERT_CATEGORIES.AGRICULTURE,
     recommended: true
@@ -61,7 +61,7 @@ const availableExperts = [
   {
     role: "Irrigation Engineer",
     description: "Specializes in water management systems, irrigation scheduling, and water conservation.",
-    defaultModel: "meta-llama/llama-3.1-70b-instruct",
+    defaultModel: "deepseek/deepseek-v3.2",
     avatarUrl: "https://images.unsplash.com/photo-1584824188625-0d6dd2183f9e?ixlib=rb-1.2.1&auto=format&fit=crop&w=48&h=48&q=80",
     category: EXPERT_CATEGORIES.AGRICULTURE
   },
@@ -149,7 +149,7 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
   const [errorLoadingModels, setErrorLoadingModels] = useState<string | null>(null);
   const [currentTab, setCurrentTab] = useState<string>(EXPERT_CATEGORIES.AGRICULTURE);
   const [selectedPreset, setSelectedPreset] = useState<string | null>(null);
-  
+
   // --- Fetch OpenRouter Models ---
   useEffect(() => {
     const fetchModels = async () => {
@@ -179,14 +179,14 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
 
     fetchModels();
   }, []); // Empty dependency array ensures this runs only once on mount
-  
+
   // Check if we already have some experts selected
   const expertRoles = new Set(selectedExperts.map(e => e.role));
-  
+
   // Handle selecting an expert
   const toggleExpert = (index: number) => {
     const existingIndex = localSelectedExperts.findIndex(e => e.expertIndex === index);
-    
+
     if (existingIndex !== -1) {
       // Remove expert
       setLocalSelectedExperts(prev => 
@@ -197,11 +197,11 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
     } else {
       // Add expert with default model (ensure default model exists or handle fallback)
       let defaultModelId = availableExperts[index]?.defaultModel;
-      
+
       // Find the most reliable model based on availability
       if (!defaultModelId || !openRouterModels.some(m => m.id === defaultModelId)) {
         console.warn(`Model ${defaultModelId} not found or not specified for ${availableExperts[index].role}. Using fallback.`);
-        
+
         // Try to find a good match from our available models
         const preferredModels = [
           "anthropic/claude-3-sonnet", 
@@ -209,14 +209,14 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
           "anthropic/claude-3-haiku", 
           "openai/gpt-3.5-turbo"
         ];
-        
+
         for (const modelId of preferredModels) {
           if (openRouterModels.some(m => m.id === modelId)) {
             defaultModelId = modelId;
             break;
           }
         }
-        
+
         // If still no match, use the first available model
         if (!defaultModelId && openRouterModels.length > 0) {
           defaultModelId = openRouterModels[0].id;
@@ -233,27 +233,27 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
           model: defaultModelId
         }
       ]);
-      
+
       // Clear preset selection when manually changing experts
       setSelectedPreset(null);
     }
   };
-  
+
   // Handle selecting a preset
   const applyPreset = (presetName: string) => {
     const preset = EXPERT_PRESETS.find(p => p.name === presetName);
     if (!preset) return;
-    
+
     // Clear existing selections
     setLocalSelectedExperts([]);
-    
+
     // Add all experts in the preset
     const newSelectedExperts: SelectedExpertState[] = [];
-    
+
     preset.experts.forEach(expertRole => {
       const expertIndex = availableExperts.findIndex(e => e.role === expertRole);
       if (expertIndex === -1) return;
-      
+
       let defaultModelId = availableExperts[expertIndex]?.defaultModel;
       // Apply same model fallback logic as toggleExpert
       if (!defaultModelId || !openRouterModels.some(m => m.id === defaultModelId)) {
@@ -263,31 +263,31 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
           "anthropic/claude-3-haiku", 
           "openai/gpt-3.5-turbo"
         ];
-        
+
         for (const modelId of preferredModels) {
           if (openRouterModels.some(m => m.id === modelId)) {
             defaultModelId = modelId;
             break;
           }
         }
-        
+
         if (!defaultModelId && openRouterModels.length > 0) {
           defaultModelId = openRouterModels[0].id;
         } else if (!defaultModelId) {
           defaultModelId = "openai/gpt-3.5-turbo"; 
         }
       }
-      
+
       newSelectedExperts.push({
         expertIndex,
         model: defaultModelId
       });
     });
-    
+
     setLocalSelectedExperts(newSelectedExperts);
     setSelectedPreset(presetName);
   };
-  
+
   // Handle changing model for an expert
   const changeExpertModel = (expertIndex: number, newModel: string) => {
     setLocalSelectedExperts(prev => 
@@ -297,16 +297,16 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
           : expert
       )
     );
-    
+
     // Clear preset selection when manually changing models
     setSelectedPreset(null);
   };
-  
+
   // Handle adding experts to conversation
   const handleAddExperts = () => {
     const selectedExpertData = localSelectedExperts.map(({ expertIndex, model }) => {
       const expert = availableExperts[expertIndex];
-      
+
       // Generate a name based on the role
       let name;
       switch (expert.role) {
@@ -340,7 +340,7 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
         default:
           name = `${expert.role.split(' ')[0]} Expert`;
       }
-      
+
       return {
         name,
         role: expert.role,
@@ -348,25 +348,25 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
         avatarUrl: expert.avatarUrl
       };
     });
-    
+
     onAddExperts(selectedExpertData);
   };
-  
+
   const selectedCount = localSelectedExperts.length;
-  
+
   // Check if an expert is selected
   const isExpertSelected = (index: number) => {
     return localSelectedExperts.some(e => e.expertIndex === index);
   };
-  
+
   // Get currently selected model for an expert
   const getSelectedModel = (expertIndex: number) => {
     const found = localSelectedExperts.find(e => e.expertIndex === expertIndex);
     if (found) return found.model;
-    
+
     // If not in selected experts, determine default model
     let defaultModelId = availableExperts[expertIndex]?.defaultModel;
-    
+
     // Find the most reliable model based on availability
     if (!defaultModelId || !openRouterModels.some(m => m.id === defaultModelId)) {
       // Try to find a good match from our available models
@@ -376,14 +376,14 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
         "anthropic/claude-3-haiku", 
         "openai/gpt-3.5-turbo"
       ];
-      
+
       for (const modelId of preferredModels) {
         if (openRouterModels.some(m => m.id === modelId)) {
           defaultModelId = modelId;
           break;
         }
       }
-      
+
       // If still no match, use the first available model
       if (!defaultModelId && openRouterModels.length > 0) {
         defaultModelId = openRouterModels[0].id;
@@ -392,16 +392,16 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
         defaultModelId = "openai/gpt-3.5-turbo"; 
       }
     }
-    
+
     return defaultModelId;
   };
 
   // Filter experts by the current category tab
   const filteredExperts = availableExperts.filter(expert => expert.category === currentTab);
-  
+
   // Get recommended experts
   const recommendedExperts = availableExperts.filter(expert => expert.recommended);
-  
+
   return (
     <div className="absolute inset-0 bg-white bg-opacity-95 z-10 flex flex-col p-4 md:p-6">
       <div className="flex justify-between items-center mb-2">
@@ -410,7 +410,7 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
           <X className="h-5 w-5" />
         </Button>
       </div>
-      
+
       <div className="flex items-center space-x-2 mb-4">
         <p className="text-sm text-gray-600">Choose AI experts for your agricultural roundtable. Each expert brings specialized knowledge and capabilities.</p>
         <Popover>
@@ -455,7 +455,7 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
           </p>
         )}
       </div>
-      
+
       {/* Loading/Error States */}
       {isLoadingModels && (
         <div className="flex items-center justify-center py-4">
@@ -465,13 +465,13 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
           <span className="text-sm">Loading AI models...</span>
         </div>
       )}
-      
+
       {errorLoadingModels && (
         <div className="bg-red-50 text-red-600 p-3 rounded-md text-sm mb-4">
           Error loading models: {errorLoadingModels}. Using default selection.
         </div>
       )}
-      
+
       {/* Main Expert Selection Area */}
       {(!isLoadingModels || errorLoadingModels) && (
         <Tabs value={currentTab} onValueChange={setCurrentTab} className="flex-1 flex flex-col">
@@ -483,7 +483,7 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
                 </TabsTrigger>
               ))}
             </TabsList>
-            
+
             <div className="flex items-center">
               <span className="text-xs text-gray-500 mr-2">Selected:</span>
               <Badge variant="outline" className="font-medium">
@@ -491,7 +491,7 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
               </Badge>
             </div>
           </div>
-          
+
           <div className="flex-1 overflow-hidden">
             {currentTab === "recommended" ? (
               <ScrollArea className="h-full px-1">
@@ -501,7 +501,7 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
                     const isSelected = isExpertSelected(actualIndex);
                     const isAlreadyAdded = expertRoles.has(expert.role);
                     const selectedModel = getSelectedModel(actualIndex);
-                    
+
                     return (
                       <ExpertCard
                         key={actualIndex}
@@ -526,7 +526,7 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
                     const isSelected = isExpertSelected(actualIndex);
                     const isAlreadyAdded = expertRoles.has(expert.role);
                     const selectedModel = getSelectedModel(actualIndex);
-                    
+
                     return (
                       <ExpertCard
                         key={actualIndex}
@@ -547,7 +547,7 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
           </div>
         </Tabs>
       )}
-      
+
       {/* Footer Controls */}
       <div className="mt-4 pt-4 border-t border-neutral-300 flex flex-col sm:flex-row justify-between items-center gap-3">
         <div className="text-center sm:text-left w-full sm:w-auto">
