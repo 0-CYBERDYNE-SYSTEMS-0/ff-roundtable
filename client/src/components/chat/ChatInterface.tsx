@@ -405,13 +405,13 @@ export default function ChatInterface({
                 onChange={(e) => setMessageContent(e.target.value)}
                 onKeyDown={handleKeyDown}
                 className="min-h-[60px] resize-none pr-10 border-farm-tan/40 focus:border-farm-blue focus:ring-farm-blue/20"
-                disabled={isLoading}
+                disabled={false}
               />
             </div>
             <Button
               className="bg-gradient-to-br from-farm-green to-farm-dark-green hover:from-farm-dark-green hover:to-farm-green text-white rounded-full p-2 ml-2 h-11 w-11 flex items-center justify-center shadow-md hover:shadow-lg transition-all duration-200 disabled:opacity-50"
               onClick={handleSendMessage}
-              disabled={messageContent.trim() === "" || isLoading}
+              disabled={messageContent.trim() === ""}
             >
               <Send className="h-5 w-5" />
             </Button>

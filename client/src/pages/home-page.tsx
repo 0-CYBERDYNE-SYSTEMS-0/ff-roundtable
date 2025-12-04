@@ -34,7 +34,11 @@ export default function HomePage() {
   const [isProcessing, setIsProcessing] = useState<boolean>(false); // Track if experts are currently responding
   // We might also want to store maxAutonomousTurns if we allow setting it from UI
   // const [maxAutonomousTurns, setMaxAutonomousTurns] = useState<number>(0);
-  
+
+  // Message queue state for continuous input
+  const [pendingMessages, setPendingMessages] = useState<string[]>([]);
+  const [isQueueProcessing, setIsQueueProcessing] = useState(false);
+
   // WebSocket connection for real-time updates
   const socket = useWebSocket();
   
@@ -203,7 +207,33 @@ export default function HomePage() {
       // queryClient.invalidateQueries({ queryKey: messagesQueryKey }); 
     },
   });
-  
+
+  // Queue-aware send message handler
+  const handleSendMessage = (content: string) => {
+    if (isProcessing || sendMessageMutation.isPending) {
+      // Queue the message instead of blocking
+      setPendingMessages(prev => [...prev, content]);
+    } else {
+      // Send immediately if idle
+      sendMessageMutation.mutate(content);
+    }
+  };
+
+  // Queue processor - auto-process queued messages when system is idle
+  useEffect(() => {
+    if (!isProcessing &&
+        !sendMessageMutation.isPending &&
+        pendingMessages.length > 0 &&
+        !isQueueProcessing) {
+      setIsQueueProcessing(true);
+      const nextMessage = pendingMessages[0];
+      setPendingMessages(prev => prev.slice(1));
+      sendMessageMutation.mutate(nextMessage, {
+        onSettled: () => setIsQueueProcessing(false)
+      });
+    }
+  }, [isProcessing, sendMessageMutation.isPending, pendingMessages, isQueueProcessing]);
+
   // Upload file mutation
   const uploadFileMutation = useMutation({
     mutationFn: async (formData: FormData) => {
@@ -525,6 +555,11 @@ export default function HomePage() {
                                 className={`${isAutonomousEnabled ? 'bg-farm-blue/20 text-farm-blue border-farm-blue' : 'bg-neutral-200 text-neutral-600'} font-medium`}>
                              {isAutonomousEnabled ? 'Enabled' : 'Disabled'}
                          </Badge>
+                         {pendingMessages.length > 0 && (
+                           <Badge variant="outline" className="ml-2 bg-farm-yellow/20 text-yellow-800 border-farm-yellow font-medium">
+                             {pendingMessages.length} queued
+                           </Badge>
+                         )}
                      </div>
                      <div className="flex items-center gap-3">
                           {/* Buttons moved here, removed pause/resume */}
@@ -567,7 +602,7 @@ export default function HomePage() {
                     <ChatInterface
                         messages={messages || []}
                         experts={experts || []}
-                        onSendMessage={(content) => sendMessageMutation.mutate(content)}
+                        onSendMessage={handleSendMessage}
                         onUploadFile={handleFileUpload}
                         isLoading={sendMessageMutation.isPending || isProcessing}
                         user={user}

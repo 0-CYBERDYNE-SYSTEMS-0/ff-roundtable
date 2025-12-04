@@ -11,6 +11,8 @@ import { randomBytes } from "crypto";
 import Stripe from "stripe";
 import { WebSocketServer } from "ws";
 import { InsertConversation, InsertExpert, InsertMessage, Message } from "@shared/schema";
+import { generateComprehensiveMarkdown } from './export-utils';
+import { format } from 'date-fns';
 
 // Load dev config
 let devConfig: any = null;
@@ -713,40 +715,39 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const conversationId = parseInt(req.params.id);
       const conversation = await storage.getConversation(conversationId);
-      
+
       if (!conversation || conversation.userId !== req.user!.id) {
         return res.status(404).json({ message: "Conversation not found" });
       }
-      
+
+      // Fetch all data
       const messages = await storage.getConversationMessages(conversationId);
       const experts = await storage.getConversationExperts(conversationId);
-      
-      // Build markdown content
-      let markdown = `# Farm Friend Roundtable: ${conversation.title}\n\n`;
-      markdown += `Date: ${conversation.createdAt.toISOString().split("T")[0]}\n\n`;
-      
-      markdown += "## Experts\n\n";
-      for (const expert of experts) {
-        markdown += `- **${expert.name}** (${expert.role})\n`;
-      }
-      
-      markdown += "\n## Conversation\n\n";
-      
-      for (const message of messages) {
-        if (message.userId) {
-          markdown += `### You:\n\n${message.content}\n\n`;
-        } else if (message.expertId) {
-          const expert = experts.find(e => e.id === message.expertId);
-          if (expert) {
-            markdown += `### ${expert.name} (${expert.role}):\n\n${message.content}\n\n`;
-          }
-        }
-      }
-      
-      res.setHeader("Content-Disposition", `attachment; filename="conversation-${conversationId}.md"`);
-      res.setHeader("Content-Type", "text/markdown");
+      const insights = await storage.getConversationInsights(conversationId);
+      const files = await storage.getConversationFiles(conversationId);
+
+      // Generate comprehensive markdown
+      const markdown = generateComprehensiveMarkdown({
+        conversation,
+        messages,
+        experts,
+        insights,
+        files
+      });
+
+      // Generate filename
+      const safeTitle = conversation.title
+        .replace(/[^a-z0-9]/gi, '-')
+        .toLowerCase()
+        .substring(0, 50);
+      const date = format(conversation.createdAt, 'yyyy-MM-dd');
+      const filename = `roundtable-${safeTitle}-${date}.md`;
+
+      res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+      res.setHeader("Content-Type", "text/markdown; charset=utf-8");
       res.send(markdown);
     } catch (error: any) {
+      console.error("Export error:", error);
       res.status(500).json({ message: error.message });
     }
   });
