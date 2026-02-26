@@ -59,12 +59,12 @@ export default function ArtifactDisplay({ artifact }: ArtifactDisplayProps) {
       if (Array.isArray(data) && data.length > 0) {
         const keys = Object.keys(data[0]);
         return (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm border-collapse border border-neutral-200">
+          <div className="overflow-x-auto rounded-lg border border-primary/20 shadow-sm">
+            <table className="w-full text-sm border-collapse">
               <thead>
-                <tr className="bg-neutral-100">
+                <tr className="bg-primary/10 dark:bg-primary/20">
                   {keys.map((key, i) => (
-                    <th key={i} className="p-2 border border-neutral-200 font-semibold text-left">
+                    <th key={i} className="p-3 border-b border-primary/20 font-bold text-left text-primary uppercase tracking-wider text-xs">
                       {String(key)}
                     </th>
                   ))}
@@ -72,12 +72,27 @@ export default function ArtifactDisplay({ artifact }: ArtifactDisplayProps) {
               </thead>
               <tbody>
                 {data.map((row, i) => (
-                  <tr key={i} className={i % 2 === 0 ? "bg-white" : "bg-neutral-50"}>
-                    {keys.map((key, j) => (
-                      <td key={j} className="p-2 border border-neutral-200 text-xs">
-                        {String(row[key] || "")}
-                      </td>
-                    ))}
+                  <tr key={i} className={cn(
+                    "transition-colors hover:bg-primary/5",
+                    i % 2 === 0 ? "bg-white dark:bg-neutral-900" : "bg-neutral-50/50 dark:bg-neutral-800/50"
+                  )}>
+                    {keys.map((key, j) => {
+                      const val = String(row[key] || "");
+                      const isStatus = /optimal|good|success|✓/i.test(val);
+                      const isWarning = /monitor|warning|⚠️/i.test(val);
+                      const isCritical = /error|failed|✗/i.test(val);
+                      
+                      return (
+                        <td key={j} className={cn(
+                          "p-3 border-b border-neutral-100 dark:border-neutral-800 font-medium",
+                          isStatus && "text-emerald-600 dark:text-emerald-400",
+                          isWarning && "text-amber-600 dark:text-amber-400 font-bold",
+                          isCritical && "text-red-600 dark:text-red-400 font-bold"
+                        )}>
+                          {val}
+                        </td>
+                      );
+                    })}
                   </tr>
                 ))}
               </tbody>
@@ -147,67 +162,96 @@ export default function ArtifactDisplay({ artifact }: ArtifactDisplayProps) {
       case "chart":
         try {
           const chartData = JSON.parse(artifact.content);
-          if (chartData.type === "line" && Array.isArray(chartData.data)) {
+          if (!chartData.data || !Array.isArray(chartData.data) || chartData.data.length === 0) {
+            return <div className="text-sm text-neutral-600">No chart data available</div>;
+          }
+          
+          const firstItem = chartData.data[0];
+          const xKey = Object.keys(firstItem).find(k => 
+            ["name", "time", "date", "period", "month", "category", "label", "week", "day", "year"].includes(k.toLowerCase())
+          ) || Object.keys(firstItem)[0];
+
+          if (chartData.type === "line") {
             return (
-              <ResponsiveContainer width="100%" height={300}>
-                <LineChart data={chartData.data}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey={Object.keys(chartData.data[0])[0]} />
-                  <YAxis />
-                  <Tooltip />
-                  <Legend />
+              <ResponsiveContainer width="100%" height={350}>
+                <LineChart data={chartData.data} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e5e5e5" />
+                  <XAxis dataKey={xKey} axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#666' }} />
+                  <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#666' }} />
+                  <Tooltip 
+                    contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.1)' }}
+                  />
+                  <Legend verticalAlign="top" height={36} />
                   {chartData.lines?.map((line: any, i: number) => (
                     <Line
                       key={i}
                       type="monotone"
                       dataKey={line.key}
                       stroke={line.color || "#8884d8"}
-                      strokeWidth={2}
-                      dot={false}
+                      strokeWidth={3}
+                      dot={{ r: 4, strokeWidth: 2, fill: '#fff' }}
+                      activeDot={{ r: 6, strokeWidth: 0 }}
                       name={line.name || line.key}
+                      animationDuration={1500}
                     />
                   ))}
                 </LineChart>
               </ResponsiveContainer>
             );
-          } else if (chartData.type === "area" && Array.isArray(chartData.data)) {
+          } else if (chartData.type === "area") {
             return (
-              <ResponsiveContainer width="100%" height={300}>
-                <AreaChart data={chartData.data}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey={Object.keys(chartData.data[0])[0]} />
-                  <YAxis />
-                  <Tooltip />
-                  <Legend />
+              <ResponsiveContainer width="100%" height={350}>
+                <AreaChart data={chartData.data} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+                  <defs>
+                    {chartData.lines?.map((line: any, i: number) => (
+                      <linearGradient key={`grad-${i}`} id={`color-${line.key}`} x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor={line.color || "#8884d8"} stopOpacity={0.3}/>
+                        <stop offset="95%" stopColor={line.color || "#8884d8"} stopOpacity={0}/>
+                      </linearGradient>
+                    ))}
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e5e5e5" />
+                  <XAxis dataKey={xKey} axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#666' }} />
+                  <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#666' }} />
+                  <Tooltip 
+                    contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.1)' }}
+                  />
+                  <Legend verticalAlign="top" height={36} />
                   {chartData.lines?.map((line: any, i: number) => (
                     <Area
                       key={i}
                       type="monotone"
                       dataKey={line.key}
                       stroke={line.color || "#8884d8"}
-                      fill={line.fill || `${line.color}40`}
-                      strokeWidth={2}
+                      fill={`url(#color-${line.key})`}
+                      strokeWidth={3}
                       name={line.name || line.key}
+                      animationDuration={1500}
                     />
                   ))}
                 </AreaChart>
               </ResponsiveContainer>
             );
-          } else if (chartData.type === "bar" && Array.isArray(chartData.data)) {
+          } else if (chartData.type === "bar") {
             return (
-              <ResponsiveContainer width="100%" height={300}>
-                <BarChart data={chartData.data}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey={Object.keys(chartData.data[0])[0]} />
-                  <YAxis />
-                  <Tooltip />
-                  <Legend />
+              <ResponsiveContainer width="100%" height={350}>
+                <BarChart data={chartData.data} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e5e5e5" />
+                  <XAxis dataKey={xKey} axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#666' }} />
+                  <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#666' }} />
+                  <Tooltip 
+                    cursor={{ fill: 'rgba(0,0,0,0.05)' }}
+                    contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.1)' }}
+                  />
+                  <Legend verticalAlign="top" height={36} />
                   {chartData.bars?.map((bar: any, i: number) => (
                     <Bar
                       key={i}
                       dataKey={bar.key}
                       fill={bar.color || "#8884d8"}
+                      radius={[4, 4, 0, 0]}
                       name={bar.name || bar.key}
+                      animationDuration={1500}
                     />
                   ))}
                 </BarChart>
