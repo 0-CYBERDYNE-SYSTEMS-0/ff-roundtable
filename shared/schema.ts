@@ -61,6 +61,33 @@ export const insights = pgTable("insights", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
+// Farm profile — user's actual agricultural operation
+export const farmProfiles = pgTable("farm_profiles", {
+  id: serial("id").primaryKey(),
+  userId: integer("user_id").notNull().unique().references(() => users.id),
+  farmName: text("farm_name").notNull().default("My Farm"),
+  location: text("location").notNull().default(""),
+  lat: text("lat"),
+  lng: text("lng"),
+  acres: integer("acres").default(0),
+  crops: text("crops").array().default([]),
+  soilType: text("soil_type").default(""),
+  waterSource: text("water_source").default(""),
+  climateZone: text("climate_zone").default(""),
+  hardinessZone: text("hardiness_zone").default(""),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+// Weather cache — cached OpenWeatherMap responses (30-min TTL)
+export const weatherCache = pgTable("weather_cache", {
+  id: serial("id").primaryKey(),
+  lat: text("lat").notNull(),
+  lng: text("lng").notNull(),
+  data: json("data").notNull(),
+  fetchedAt: timestamp("fetched_at").defaultNow(),
+});
+
 // Artifact type definition
 export const artifactSchema = z.object({
   type: z.enum(["html", "json", "table", "chart", "code"]),
@@ -104,6 +131,12 @@ export const insertInsightSchema = createInsertSchema(insights).omit({
   createdAt: true,
 });
 
+export const insertFarmProfileSchema = createInsertSchema(farmProfiles).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
 // Types
 export type InsertUser = z.infer<typeof insertUserSchema>;
 export type User = typeof users.$inferSelect;
@@ -125,3 +158,6 @@ export type File = typeof files.$inferSelect;
 
 export type InsertInsight = z.infer<typeof insertInsightSchema>;
 export type Insight = typeof insights.$inferSelect;
+
+export type InsertFarmProfile = z.infer<typeof insertFarmProfileSchema>;
+export type FarmProfile = typeof farmProfiles.$inferSelect;

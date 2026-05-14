@@ -1,6 +1,6 @@
 import { storage } from "./storage";
 // Import shared DB types
-import type { InsertMessage, Expert, InsertFile, Message, File, Artifact } from "@shared/schema"; 
+import type { InsertMessage, Expert, InsertFile, Message, File, Artifact, FarmProfile } from "@shared/schema"; 
 import { extractArtifacts } from "./artifact-extractor";
 import OpenAI from "openai";
 import path from "path";
@@ -23,14 +23,29 @@ export interface AIModelResponse {
 }
 
 // Generate a system prompt for an expert
-// Pass availableRoles separately
-export function generateSystemPrompt(expert: Expert, availableRoles?: string[]): string {
-  const basePrompt = `You are an AI expert in the role of ${expert.role} participating in a roundtable discussion on agricultural topics.
+// Pass availableRoles separately, plus optional farm context and weather
+export function generateSystemPrompt(
+  expert: Expert, 
+  availableRoles?: string[],
+  farmContext?: string,
+  weatherContext?: string
+): string {
+  let basePrompt = `You are an AI expert in the role of ${expert.role} participating in a roundtable discussion on agricultural topics.
 As a ${expert.role}, your expertise is highly valued, and you should focus on providing insights specific to your domain.
 Always be respectful, helpful, and conversational while maintaining your expert perspective.
 
 You are part of a team of experts: [${availableRoles?.join(', ') || 'various roles'}].
 `;
+
+  // Inject farm profile context if available
+  if (farmContext) {
+    basePrompt += `\n🌾 FARMER CONTEXT — You are advising a REAL farmer with this operation:\n${farmContext}\n\nCRITICAL: Tailor ALL your advice to this specific farm. Reference their crops, acreage, soil type, location, and water situation directly. Do NOT give generic advice that ignores these details.\n`;
+  }
+
+  // Inject weather context if available
+  if (weatherContext) {
+    basePrompt += `\n🌤️ CURRENT WEATHER AT THE FARM:\n${weatherContext}\n\nUse this weather data to inform your recommendations about irrigation, planting, pest pressure, field operations, and harvest timing.\n`;
+  }
 
   const interactionPrompt = `During discussion, actively engage with other experts. Reference their points and ask clarifying questions.
 If you want to direct a comment or question to a specific expert, use '@[Role Name]' (e.g., '@Soil Scientist').
@@ -457,7 +472,32 @@ export async function getExpertResponseStream(
   onToken: (token: string) => void
 ): Promise<InsertMessage> { 
   console.log(`[STREAM] Generating streaming response for expert: ${expert.name} (${expert.role})`);
-  const systemPrompt = generateSystemPrompt(expert, availableRoles); 
+  
+  // Fetch farm profile and weather for context
+  const conversation = await storage.getConversation(expert.conversationId);
+  let farmContext = "";
+  let weatherContext = "";
+  if (conversation) {
+    try {
+      const profile = await storage.getFarmProfile(conversation.userId);
+      if (profile && (profile.location || profile.crops?.length)) {
+        farmContext = `Farm: ${profile.farmName}\nLocation: ${profile.location}\nAcres: ${profile.acres || 'N/A'}\nCrops: ${(profile.crops || []).join(', ') || 'N/A'}\nSoil Type: ${profile.soilType || 'N/A'}\nWater Source: ${profile.waterSource || 'N/A'}\nClimate Zone: ${profile.climateZone || 'N/A'}\nHardiness Zone: ${profile.hardinessZone || 'N/A'}`;
+        
+        // Fetch weather if coords available
+        if (profile.lat && profile.lng) {
+          const { getWeatherForFarm, formatWeatherContext } = await import('./weather');
+          const weather = await getWeatherForFarm(profile.lat, profile.lng);
+          if (weather) {
+            weatherContext = formatWeatherContext(weather);
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('[STREAM] Could not fetch farm/weather context:', (err as Error).message);
+    }
+  }
+  
+  const systemPrompt = generateSystemPrompt(expert, availableRoles, farmContext, weatherContext);
   
   const messages: AIMessage[] = [
     { role: "system", content: systemPrompt }

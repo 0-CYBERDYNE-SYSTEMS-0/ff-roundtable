@@ -12,6 +12,7 @@ import Stripe from "stripe";
 import { WebSocketServer } from "ws";
 import { InsertConversation, InsertExpert, InsertMessage, Message } from "@shared/schema";
 import { generateComprehensiveMarkdown } from './export-utils';
+import { getWeatherForFarm, formatWeatherContext } from './weather';
 import { format } from 'date-fns';
 
 // Load dev config
@@ -537,6 +538,38 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Farm Profile endpoints
+  // GET farm profile for current user
+  app.get("/api/protected/farm-profile", async (req, res) => {
+    try {
+      const userId = req.user!.id;
+      const profile = await storage.getFarmProfile(userId);
+      
+      let weather: string | null = null;
+      if (profile && profile.lat && profile.lng) {
+        const weatherData = await getWeatherForFarm(profile.lat, profile.lng);
+        if (weatherData) {
+          weather = formatWeatherContext(weatherData);
+        }
+      }
+      
+      res.json({ profile: profile || null, weather });
+    } catch (error: any) {
+      res.status(500).json({ message: error.message });
+    }
+  });
+
+  // PUT (upsert) farm profile
+  app.put("/api/protected/farm-profile", async (req, res) => {
+    try {
+      const userId = req.user!.id;
+      const profile = await storage.upsertFarmProfile(userId, req.body);
+      res.json(profile);
+    } catch (error: any) {
+      res.status(500).json({ message: error.message });
+    }
+  });
+
   // Message endpoints
   app.post("/api/protected/conversations/:id/messages", async (req, res) => {
     try {
@@ -936,6 +969,70 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
     });
   }
+
+  // Farm Profile endpoints
+  app.get("/api/protected/farm-profile", async (req, res) => {
+    try {
+      const userId = req.user!.id;
+      const profile = await storage.getFarmProfile(userId);
+      
+      // Try to get weather if profile has coords
+      let weatherSummary: string | null = null;
+      if (profile?.lat && profile?.lng) {
+        try {
+          const { getWeather } = await import("./weather");
+          const weather = await getWeather(profile.lat, profile.lng);
+          if (weather) {
+            const { formatWeatherForPrompt } = await import("./weather");
+            weatherSummary = formatWeatherForPrompt(weather);
+          }
+        } catch {}
+      }
+      
+      res.json({ profile: profile || null, weather: weatherSummary });
+    } catch (error: any) {
+      res.status(500).json({ message: error.message });
+    }
+  });
+
+  app.put("/api/protected/farm-profile", async (req, res) => {
+    try {
+      const userId = req.user!.id;
+      const profile = await storage.upsertFarmProfile(userId, req.body);
+      res.json(profile);
+    } catch (error: any) {
+      console.error("Error saving farm profile:", error);
+      res.status(500).json({ message: error.message });
+    }
+  });
+
+  // Weather endpoint
+  app.get("/api/protected/weather", async (req, res) => {
+    try {
+      const userId = req.user!.id;
+      const profile = await storage.getFarmProfile(userId);
+
+      if (!profile || !profile.lat || !profile.lng) {
+        return res.json({ available: false, message: "Farm location not set. Add your farm profile to get weather data." });
+      }
+
+      const { getWeather, formatWeatherForPrompt } = await import("./weather");
+      const weather = await getWeather(profile.lat, profile.lng);
+
+      if (!weather) {
+        return res.json({ available: false, message: "Weather data unavailable. Check OWM_API_KEY or try again later." });
+      }
+
+      res.json({
+        available: true,
+        summary: formatWeatherForPrompt(weather),
+        data: weather,
+      });
+    } catch (error: any) {
+      console.error("Weather fetch error:", error);
+      res.status(500).json({ message: error.message });
+    }
+  });
 
   return httpServer;
 }

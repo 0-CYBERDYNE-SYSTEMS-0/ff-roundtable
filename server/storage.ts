@@ -1,4 +1,4 @@
-import { users, type User, type InsertUser, conversations, type Conversation, type InsertConversation, experts, type Expert, type InsertExpert, messages, type Message, type InsertMessage, files, type File, type InsertFile, insights, type Insight, type InsertInsight } from "@shared/schema";
+import { users, type User, type InsertUser, conversations, type Conversation, type InsertConversation, experts, type Expert, type InsertExpert, messages, type Message, type InsertMessage, files, type File, type InsertFile, insights, type Insight, type InsertInsight, farmProfiles, type FarmProfile, type InsertFarmProfile, weatherCache } from "@shared/schema";
 import createMemoryStore from "memorystore";
 import session from "express-session";
 import { Pool } from "pg";
@@ -41,7 +41,15 @@ export interface IStorage {
   // Insight operations
   createInsight(insight: InsertInsight): Promise<Insight>;
   getConversationInsights(conversationId: number): Promise<Insight[]>;
-  
+
+  // Farm profile operations
+  getFarmProfile(userId: number): Promise<FarmProfile | undefined>;
+  upsertFarmProfile(userId: number, profile: InsertFarmProfile): Promise<FarmProfile>;
+
+  // Weather cache operations
+  getCachedWeather(lat: string, lng: string): Promise<{ data: any; fetchedAt: Date } | undefined>;
+  cacheWeather(lat: string, lng: string, data: any): Promise<void>;
+
   // Session store
   sessionStore: session.SessionStore;
 }
@@ -254,6 +262,47 @@ export class MemStorage implements IStorage {
       .filter(insight => insight.conversationId === conversationId)
       .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
   }
+
+  // Farm profile operations (MemStorage)
+  private farmProfiles: Map<number, FarmProfile> = new Map();
+
+  async getFarmProfile(userId: number): Promise<FarmProfile | undefined> {
+    return this.farmProfiles.get(userId);
+  }
+
+  async upsertFarmProfile(userId: number, profile: InsertFarmProfile): Promise<FarmProfile> {
+    const existing = this.farmProfiles.get(userId);
+    const now = new Date();
+    const fp: FarmProfile = {
+      id: existing?.id || (this.insightId++),
+      userId,
+      farmName: profile.farmName || "My Farm",
+      location: profile.location || "",
+      lat: profile.lat || null,
+      lng: profile.lng || null,
+      acres: profile.acres ?? 0,
+      crops: profile.crops || [],
+      soilType: profile.soilType || "",
+      waterSource: profile.waterSource || "",
+      climateZone: profile.climateZone || "",
+      hardinessZone: profile.hardinessZone || "",
+      createdAt: existing?.createdAt || now,
+      updatedAt: now,
+    };
+    this.farmProfiles.set(userId, fp);
+    return fp;
+  }
+
+  // Weather cache (MemStorage)
+  private weatherCache: Map<string, { data: any; fetchedAt: Date }> = new Map();
+
+  async getCachedWeather(lat: string, lng: string): Promise<{ data: any; fetchedAt: Date } | undefined> {
+    return this.weatherCache.get(`${lat},${lng}`);
+  }
+
+  async cacheWeather(lat: string, lng: string, data: any): Promise<void> {
+    this.weatherCache.set(`${lat},${lng}`, { data, fetchedAt: new Date() });
+  }
 }
 
 // ─── PostgreSQL Storage (Production) ─────────────────────────────────────────
@@ -270,7 +319,7 @@ export class PostgresStorage implements IStorage {
     });
 
     this.db = drizzle(this.pool, {
-      schema: { users, conversations, experts, messages, files, insights },
+      schema: { users, conversations, experts, messages, files, insights, farmProfiles, weatherCache },
     });
 
     this.sessionStore = new PgSessionStore({
@@ -460,6 +509,86 @@ export class PostgresStorage implements IStorage {
       .from(insights)
       .where(eq(insights.conversationId, conversationId))
       .orderBy(desc(insights.createdAt));
+  }
+
+  // ── Farm profile operations ────────────────────────────────────────────────
+
+  async getFarmProfile(userId: number): Promise<FarmProfile | undefined> {
+    const result = await this.db
+      .select()
+      .from(farmProfiles)
+      .where(eq(farmProfiles.userId, userId))
+      .limit(1);
+    return result[0];
+  }
+
+  async upsertFarmProfile(userId: number, profile: InsertFarmProfile): Promise<FarmProfile> {
+    // Check if a profile already exists for this user
+    const existing = await this.getFarmProfile(userId);
+
+    if (existing) {
+      // Update existing
+      const result = await this.db
+        .update(farmProfiles)
+        .set({
+          ...profile,
+          userId: userId,
+          updatedAt: new Date(),
+        })
+        .where(eq(farmProfiles.userId, userId))
+        .returning();
+      return result[0];
+    } else {
+      // Insert new
+      const result = await this.db
+        .insert(farmProfiles)
+        .values({
+          ...profile,
+          userId: userId,
+          updatedAt: new Date(),
+        })
+        .returning();
+      return result[0];
+    }
+  }
+
+  // ── Weather cache operations ───────────────────────────────────────────────
+
+  async getCachedWeather(lat: string, lng: string): Promise<{ data: any; fetchedAt: Date } | undefined> {
+    const result = await this.db
+      .select()
+      .from(weatherCache)
+      .where(and(eq(weatherCache.lat, lat), eq(weatherCache.lng, lng)))
+      .orderBy(desc(weatherCache.fetchedAt))
+      .limit(1);
+
+    const entry = result[0];
+    if (!entry) return undefined;
+
+    // Check if cache is still fresh (within 30 minutes)
+    const thirtyMinutesAgo = new Date(Date.now() - 30 * 60 * 1000);
+    if (entry.fetchedAt < thirtyMinutesAgo) {
+      return undefined;
+    }
+
+    return { data: entry.data, fetchedAt: entry.fetchedAt };
+  }
+
+  async cacheWeather(lat: string, lng: string, data: any): Promise<void> {
+    // Delete old entries for this lat/lng first
+    await this.db
+      .delete(weatherCache)
+      .where(and(eq(weatherCache.lat, lat), eq(weatherCache.lng, lng)));
+
+    // Insert fresh cache entry
+    await this.db
+      .insert(weatherCache)
+      .values({
+        lat,
+        lng,
+        data,
+        fetchedAt: new Date(),
+      });
   }
 }
 

@@ -8,7 +8,8 @@ import { useQuery, useMutation } from "@tanstack/react-query";
 import { queryClient } from "@/lib/queryClient";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
-import { Expert, Message, Insight, File as FileType, Conversation } from "@shared/schema";
+import { Expert, Message, Insight, File as FileType, Conversation, FarmProfile } from "@shared/schema";
+import FarmProfileModal from "@/components/farm/FarmProfileModal";
 import { useWebSocket } from "@/lib/websocket-utils";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -27,6 +28,8 @@ export default function HomePage() {
   const [activeConversation, setActiveConversation] = useState<number | null>(null);
   const [selectedExperts, setSelectedExperts] = useState<Expert[]>([]);
   const [showExpertSelector, setShowExpertSelector] = useState(false);
+  const [showFarmProfileModal, setShowFarmProfileModal] = useState(false);
+  const [farmProfileModalDismissed, setFarmProfileModalDismissed] = useState(false);
   
   // Add state for interaction control
   const [interactionMode, setInteractionMode] = useState<InteractionMode>("idle");
@@ -51,6 +54,13 @@ export default function HomePage() {
     queryKey: ["/api/protected/conversations"],
     enabled: !!user,
   });
+
+  // Fetch farm profile — auto-open modal on first login when no profile exists
+  const farmProfileQuery = useQuery<{ profile: FarmProfile | null; weather: string | null }>({
+    queryKey: ["/api/protected/farm-profile"],
+    enabled: !!user,
+  });
+  const farmProfile = farmProfileQuery.data?.profile ?? null;
   
   // Create a new conversation
   const createConversationMutation = useMutation({
@@ -386,6 +396,18 @@ export default function HomePage() {
       setActiveConversation(conversations[0].id);
     }
   }, [activeConversation, conversations]);
+
+  // Effect to auto-open farm profile modal when no profile exists
+  useEffect(() => {
+    if (
+      !farmProfileQuery.isLoading &&
+      !farmProfile &&
+      !farmProfileModalDismissed &&
+      user
+    ) {
+      setShowFarmProfileModal(true);
+    }
+  }, [farmProfileQuery.isLoading, farmProfile, farmProfileModalDismissed, user]);
   
   // Effect to update selected experts when experts change
   useEffect(() => {
@@ -701,6 +723,19 @@ export default function HomePage() {
           selectedExperts={selectedExperts}
         />
       )}
+
+      {/* Farm Profile Modal — shown on first login when no profile exists */}
+      <FarmProfileModal
+        isOpen={showFarmProfileModal}
+        onClose={() => {
+          setShowFarmProfileModal(false);
+          setFarmProfileModalDismissed(true);
+        }}
+        onSaved={() => {
+          setShowFarmProfileModal(false);
+          queryClient.invalidateQueries({ queryKey: ["/api/protected/farm-profile"] });
+        }}
+      />
     </div>
   );
 }
