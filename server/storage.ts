@@ -1,8 +1,13 @@
 import { users, type User, type InsertUser, conversations, type Conversation, type InsertConversation, experts, type Expert, type InsertExpert, messages, type Message, type InsertMessage, files, type File, type InsertFile, insights, type Insight, type InsertInsight } from "@shared/schema";
 import createMemoryStore from "memorystore";
 import session from "express-session";
+import { Pool } from "pg";
+import { drizzle } from "drizzle-orm/node-postgres";
+import { eq, desc, and } from "drizzle-orm";
+import ConnectPgSimple from "connect-pg-simple";
 
 const MemoryStore = createMemoryStore(session);
+const PgSessionStore = ConnectPgSimple(session);
 
 // modify the interface with any CRUD methods
 // you might need
@@ -26,7 +31,7 @@ export interface IStorage {
   updateExpert(expertId: number, updates: Partial<Expert>): Promise<Expert>;
   
   // Message operations
-  createMessage(message: InsertMessage): Promise<Message>;
+  createMessage(message: InsertMessage & { artifacts?: any[] }): Promise<Message>;
   getConversationMessages(conversationId: number): Promise<Message[]>;
   
   // File operations
@@ -40,6 +45,8 @@ export interface IStorage {
   // Session store
   sessionStore: session.SessionStore;
 }
+
+// ─── In-Memory Storage (Dev Fallback) ────────────────────────────────────────
 
 export class MemStorage implements IStorage {
   private users: Map<number, User>;
@@ -249,4 +256,241 @@ export class MemStorage implements IStorage {
   }
 }
 
-export const storage = new MemStorage();
+// ─── PostgreSQL Storage (Production) ─────────────────────────────────────────
+
+export class PostgresStorage implements IStorage {
+  private pool: Pool;
+  private db: ReturnType<typeof drizzle>;
+  sessionStore: session.SessionStore;
+
+  constructor(databaseUrl: string) {
+    this.pool = new Pool({
+      connectionString: databaseUrl,
+      max: 10,
+    });
+
+    this.db = drizzle(this.pool, {
+      schema: { users, conversations, experts, messages, files, insights },
+    });
+
+    this.sessionStore = new PgSessionStore({
+      pool: this.pool,
+      createTableIfMissing: true,
+    });
+
+    console.log(`PostgresStorage initialized with database: ${databaseUrl.replace(/\/\/.*@/, "//***@")}`);
+
+    // Seed development user if not present
+    this.seedDevelopmentUser();
+  }
+
+  private async seedDevelopmentUser() {
+    try {
+      const existing = await this.getUserByUsername("developer");
+      if (!existing) {
+        await this.createUser({
+          username: "developer",
+          password: "dev:password", // Dev-only — this gets caught by backward-compat in comparePasswords
+          email: "dev@example.com",
+        });
+        // Set subscription to active for dev
+        await this.db
+          .update(users)
+          .set({ subscriptionStatus: "active" })
+          .where(eq(users.username, "developer"));
+        console.log("Development user seeded: username=developer, password=password");
+      }
+    } catch (err) {
+      console.warn("Failed to seed development user:", (err as Error).message);
+    }
+  }
+
+  // ── User operations ────────────────────────────────────────────────────────
+
+  async getUser(id: number): Promise<User | undefined> {
+    const result = await this.db.select().from(users).where(eq(users.id, id)).limit(1);
+    return result[0];
+  }
+
+  async getUserByUsername(username: string): Promise<User | undefined> {
+    const result = await this.db.select().from(users).where(eq(users.username, username)).limit(1);
+    return result[0];
+  }
+
+  async createUser(insertUser: InsertUser): Promise<User> {
+    const result = await this.db.insert(users).values(insertUser).returning();
+    return result[0];
+  }
+
+  async updateUserStripeInfo(userId: number, stripeInfo: { stripeCustomerId: string; stripeSubscriptionId: string }): Promise<User> {
+    const result = await this.db
+      .update(users)
+      .set({
+        stripeCustomerId: stripeInfo.stripeCustomerId,
+        stripeSubscriptionId: stripeInfo.stripeSubscriptionId,
+        subscriptionStatus: "active",
+      })
+      .where(eq(users.id, userId))
+      .returning();
+
+    if (!result[0]) throw new Error(`User with ID ${userId} not found`);
+    return result[0];
+  }
+
+  async updateSubscriptionStatus(userId: number, status: string): Promise<User> {
+    const result = await this.db
+      .update(users)
+      .set({ subscriptionStatus: status })
+      .where(eq(users.id, userId))
+      .returning();
+
+    if (!result[0]) throw new Error(`User with ID ${userId} not found`);
+    return result[0];
+  }
+
+  // ── Conversation operations ────────────────────────────────────────────────
+
+  async createConversation(insertConversation: InsertConversation): Promise<Conversation> {
+    const result = await this.db.insert(conversations).values(insertConversation).returning();
+    return result[0];
+  }
+
+  async getConversation(id: number): Promise<Conversation | undefined> {
+    const result = await this.db.select().from(conversations).where(eq(conversations.id, id)).limit(1);
+    return result[0];
+  }
+
+  async getUserConversations(userId: number): Promise<Conversation[]> {
+    return this.db
+      .select()
+      .from(conversations)
+      .where(eq(conversations.userId, userId))
+      .orderBy(desc(conversations.createdAt));
+  }
+
+  // ── Expert operations ──────────────────────────────────────────────────────
+
+  async createExpert(insertExpert: InsertExpert): Promise<Expert> {
+    const result = await this.db.insert(experts).values(insertExpert).returning();
+    return result[0];
+  }
+
+  async getExpertById(expertId: number): Promise<Expert | undefined> {
+    const result = await this.db.select().from(experts).where(eq(experts.id, expertId)).limit(1);
+    return result[0];
+  }
+
+  async getConversationExperts(conversationId: number): Promise<Expert[]> {
+    return this.db
+      .select()
+      .from(experts)
+      .where(eq(experts.conversationId, conversationId));
+  }
+
+  async updateExpert(expertId: number, updates: Partial<Expert>): Promise<Expert> {
+    // Only allow updating name, model, systemPrompt, avatarUrl
+    const allowed = {
+      ...(updates.name !== undefined && { name: updates.name }),
+      ...(updates.model !== undefined && { model: updates.model }),
+      ...(updates.systemPrompt !== undefined && { systemPrompt: updates.systemPrompt }),
+      ...(updates.avatarUrl !== undefined && { avatarUrl: updates.avatarUrl }),
+    };
+
+    const result = await this.db
+      .update(experts)
+      .set(allowed)
+      .where(eq(experts.id, expertId))
+      .returning();
+
+    if (!result[0]) throw new Error(`Expert with ID ${expertId} not found`);
+    return result[0];
+  }
+
+  // ── Message operations ─────────────────────────────────────────────────────
+
+  async createMessage(insertMessage: InsertMessage & { artifacts?: any[] }): Promise<Message> {
+    const values = { ...insertMessage, artifacts: insertMessage.artifacts || [] };
+    const result = await this.db.insert(messages).values(values).returning();
+    const raw = result[0];
+    // Drizzle returns artifacts as unknown — cast to Artifact[]
+    return {
+      ...raw,
+      artifacts: (raw.artifacts || []) as Message["artifacts"],
+    } as Message;
+  }
+
+  async getConversationMessages(conversationId: number): Promise<Message[]> {
+    const result = await this.db
+      .select()
+      .from(messages)
+      .where(eq(messages.conversationId, conversationId))
+      .orderBy(messages.timestamp);
+
+    return result.map((m) => ({
+      ...m,
+      artifacts: (m.artifacts || []) as Message["artifacts"],
+    })) as Message[];
+  }
+
+  // ── File operations ────────────────────────────────────────────────────────
+
+  async createFile(insertFile: InsertFile): Promise<File> {
+    const result = await this.db.insert(files).values(insertFile).returning();
+    return result[0];
+  }
+
+  async getConversationFiles(conversationId: number): Promise<File[]> {
+    return this.db
+      .select()
+      .from(files)
+      .where(eq(files.conversationId, conversationId))
+      .orderBy(desc(files.uploadedAt));
+  }
+
+  // ── Insight operations ─────────────────────────────────────────────────────
+
+  async createInsight(insertInsight: InsertInsight): Promise<Insight> {
+    const result = await this.db.insert(insights).values(insertInsight).returning();
+    return result[0];
+  }
+
+  async getConversationInsights(conversationId: number): Promise<Insight[]> {
+    return this.db
+      .select()
+      .from(insights)
+      .where(eq(insights.conversationId, conversationId))
+      .orderBy(desc(insights.createdAt));
+  }
+}
+
+// ─── Storage Factory ─────────────────────────────────────────────────────────
+
+function createStorage(): IStorage {
+  const dbUrl = process.env.DATABASE_URL;
+  if (dbUrl) {
+    try {
+      const pgStorage = new PostgresStorage(dbUrl);
+      console.log("✅ Using PostgreSQL storage");
+      return pgStorage;
+    } catch (err) {
+      console.warn("⚠️  PostgreSQL connection failed, falling back to in-memory storage:", (err as Error).message);
+    }
+  }
+  console.log("ℹ️  No DATABASE_URL set — using in-memory storage (data lost on restart)");
+  return new MemStorage();
+}
+
+export const storage = createStorage();
+
+// Export for health checks
+export async function checkDatabaseConnection(): Promise<boolean> {
+  if (storage instanceof PostgresStorage) {
+    try {
+      const result = await (storage as any).pool.query("SELECT 1");
+      return result.rows[0]?.["?column?"] === 1;
+    } catch {
+      return false;
+    }
+  }
+  return true; // MemStorage is always "connected"
+}

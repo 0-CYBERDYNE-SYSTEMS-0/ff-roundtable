@@ -1,13 +1,15 @@
 import passport from "passport";
 import { Strategy as LocalStrategy } from "passport-local";
-import { Express } from "express";
+import { Express, Request, Response, NextFunction } from "express";
 import session from "express-session";
 import { randomBytes } from "crypto";
 import { storage } from "./storage";
 import { User as SelectUser } from "@shared/schema";
+import bcrypt from "bcryptjs";
+import rateLimit from "express-rate-limit";
 
 // Development flag - set to true for easy authentication during development
-const DEVELOPMENT_MODE = true;
+const DEVELOPMENT_MODE = process.env.NODE_ENV !== "production";
 
 declare global {
   namespace Express {
@@ -15,34 +17,38 @@ declare global {
   }
 }
 
-// Simple password hashing for development
-function hashPassword(password: string): string {
-  // In development mode, use a simple format that's easy to understand and debug
-  if (DEVELOPMENT_MODE) {
-    return `dev:${password}`;
-  }
-  
-  // In production, you would use a proper hashing algorithm here
-  // This is a placeholder that shouldn't be used in production
-  return `simple:${password}`;
+const BCRYPT_ROUNDS = 12;
+
+// Password hashing with bcrypt
+async function hashPassword(password: string): Promise<string> {
+  return bcrypt.hash(password, BCRYPT_ROUNDS);
 }
 
-// Simple password comparison for development
-function comparePasswords(supplied: string, stored: string): boolean {
-  // For development mode users with the special prefix
-  if (stored.startsWith('dev:')) {
-    return supplied === stored.substring(4); // Skip the 'dev:' prefix
+// Password comparison with bcrypt
+async function comparePasswords(supplied: string, stored: string): Promise<boolean> {
+  // Backward compatibility: handle old dev: prefix passwords
+  if (stored.startsWith("dev:")) {
+    return supplied === stored.substring(4);
   }
-  
-  // For simple format
-  if (stored.startsWith('simple:')) {
-    return supplied === stored.substring(7); // Skip the 'simple:' prefix
+  if (stored.startsWith("simple:")) {
+    return supplied === stored.substring(7);
   }
-  
-  // For any other format (shouldn't happen in development)
-  console.warn('Unexpected password format. Using direct comparison.');
-  return supplied === stored;
+
+  // Standard bcrypt comparison
+  return bcrypt.compare(supplied, stored);
 }
+
+// Login rate limiter: 5 attempts per 15 minutes per IP
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: "Too many login attempts. Please try again in 15 minutes." },
+  keyGenerator: (req) => {
+    return req.ip || req.socket.remoteAddress || "unknown";
+  },
+});
 
 export function setupAuth(app: Express) {
   if (!process.env.SESSION_SECRET) {
@@ -90,29 +96,44 @@ export function setupAuth(app: Express) {
     }
   });
 
+  // Registration with bcrypt password hashing
   app.post("/api/register", async (req, res, next) => {
     try {
       const existingUser = await storage.getUserByUsername(req.body.username);
       if (existingUser) {
-        return res.status(400).send("Username already exists");
+        return res.status(400).json({ message: "Username already exists" });
       }
 
+      const hashedPassword = await hashPassword(req.body.password);
       const user = await storage.createUser({
         ...req.body,
-        password: await hashPassword(req.body.password),
+        password: hashedPassword,
       });
 
       req.login(user, (err) => {
         if (err) return next(err);
-        res.status(201).json(user);
+        // Don't return password hash to client
+        const { password, ...safeUser } = user;
+        res.status(201).json({ ...safeUser, password: "***" });
       });
     } catch (error) {
       next(error);
     }
   });
 
-  app.post("/api/login", passport.authenticate("local"), (req, res) => {
-    res.status(200).json(req.user);
+  // Login with rate limiting
+  app.post("/api/login", loginLimiter, (req: Request, res: Response, next: NextFunction) => {
+    passport.authenticate("local", (err: any, user: Express.User | false) => {
+      if (err) return next(err);
+      if (!user) {
+        return res.status(401).json({ message: "Invalid username or password" });
+      }
+      req.logIn(user, (loginErr) => {
+        if (loginErr) return next(loginErr);
+        const { password, ...safeUser } = user;
+        res.status(200).json({ ...safeUser, password: "***" });
+      });
+    })(req, res, next);
   });
 
   app.post("/api/logout", (req, res, next) => {
@@ -124,7 +145,8 @@ export function setupAuth(app: Express) {
 
   app.get("/api/user", (req, res) => {
     if (!req.isAuthenticated()) return res.sendStatus(401);
-    res.json(req.user);
+    const { password, ...safeUser } = req.user!;
+    res.json({ ...safeUser, password: "***" });
   });
   
   // Middleware to check subscription

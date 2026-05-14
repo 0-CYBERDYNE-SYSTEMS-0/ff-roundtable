@@ -1,7 +1,8 @@
 import { defineConfig } from "drizzle-kit";
 
-if (!process.env.DATABASE_URL) {
-  throw new Error("DATABASE_URL, ensure the database is provisioned");
+const dbUrl = process.env.DATABASE_URL;
+if (!dbUrl) {
+  console.warn("⚠️  DATABASE_URL not set — drizzle-kit commands will fail until configured.");
 }
 
 export default defineConfig({
@@ -9,6 +10,6 @@ export default defineConfig({
   schema: "./shared/schema.ts",
   dialect: "postgresql",
   dbCredentials: {
-    url: process.env.DATABASE_URL,
+    url: dbUrl || "postgresql://localhost:5432/farm_roundtable_dev",
   },
 });
