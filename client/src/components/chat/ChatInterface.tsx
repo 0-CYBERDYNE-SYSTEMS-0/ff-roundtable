@@ -23,6 +23,8 @@ interface ChatInterfaceProps {
   user: User | null;
   insights: any[];
   visualizations: any[];
+  streamingMessages?: Map<number, { content: string; expertName: string; expertRole: string }>;
+  typingExpertIds?: Set<number>;
 }
 
 export default function ChatInterface({
@@ -33,7 +35,9 @@ export default function ChatInterface({
   isLoading,
   user,
   insights,
-  visualizations
+  visualizations,
+  streamingMessages = new Map(),
+  typingExpertIds = new Set(),
 }: ChatInterfaceProps) {
   const [messageContent, setMessageContent] = useState("");
   const [expertsCollapsed, setExpertsCollapsed] = useState(false);
@@ -241,12 +245,20 @@ export default function ChatInterface({
                     className="w-full p-3 bg-white rounded-lg border border-farm-tan/30 shadow-sm hover:shadow-md hover:border-farm-blue/40 transition-all cursor-pointer text-left group"
                   >
                     <div className="flex items-start gap-2">
-                      <Avatar className="h-8 w-8 ring-2 ring-farm-green/20 flex-shrink-0 group-hover:ring-farm-blue/40 transition-all">
-                        <AvatarImage src={expert.avatarUrl || ""} alt={expert.name} />
-                        <AvatarFallback className="bg-farm-green text-white text-xs font-semibold">
-                          {expert.name.charAt(0)}
-                        </AvatarFallback>
-                      </Avatar>
+                      <div className="relative">
+                        <Avatar className="h-8 w-8 ring-2 ring-farm-green/20 flex-shrink-0 group-hover:ring-farm-blue/40 transition-all">
+                          <AvatarImage src={expert.avatarUrl || ""} alt={expert.name} />
+                          <AvatarFallback className="bg-farm-green text-white text-xs font-semibold">
+                            {expert.name.charAt(0)}
+                          </AvatarFallback>
+                        </Avatar>
+                        {typingExpertIds.has(expert.id) && (
+                          <span className="absolute -bottom-0.5 -right-0.5 flex h-3 w-3">
+                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-farm-green opacity-75"></span>
+                            <span className="relative inline-flex rounded-full h-3 w-3 bg-farm-green"></span>
+                          </span>
+                        )}
+                      </div>
                       <div className="flex-1 min-w-0">
                         <p className="text-sm font-semibold text-farm-blue truncate group-hover:text-farm-dark-green transition-colors">
                           {expert.name}
@@ -373,6 +385,51 @@ export default function ChatInterface({
               })}
             </div>
           ))}
+          
+          {/* Streaming messages (tokens arriving in real-time) */}
+          {Array.from(streamingMessages.entries()).map(([expertId, stream]) => {
+            const expert = findExpert(expertId);
+            if (!expert) return null;
+            return (
+              <div key={`stream-${expertId}`} className="flex items-start mb-4">
+                <div className="flex-shrink-0 mr-3">
+                  <div className="relative">
+                    <Avatar className="h-10 w-10 ring-2 ring-farm-green/20">
+                      <AvatarImage src={expert.avatarUrl || ""} alt={expert.name} />
+                      <AvatarFallback className="bg-farm-green text-white font-semibold">{expert.name.charAt(0)}</AvatarFallback>
+                    </Avatar>
+                    <span className="absolute -bottom-0.5 -right-0.5 flex h-3 w-3">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-farm-green opacity-75"></span>
+                      <span className="relative inline-flex rounded-full h-3 w-3 bg-farm-green"></span>
+                    </span>
+                  </div>
+                </div>
+                <div className="max-w-[85%] space-y-2">
+                  <div className={`${getExpertBubbleColor(expertId)} rounded-xl p-4 border shadow-sm`}>
+                    <div className="flex items-center justify-between mb-2">
+                      <p className="text-sm font-semibold text-farm-blue">
+                        {stream.expertName} <span className="text-neutral-600 font-normal">({stream.expertRole})</span>
+                      </p>
+                      <ModelBadge modelId={expert.model} size="sm" />
+                    </div>
+                    <div className="markdown-content text-sm leading-relaxed text-neutral-700">
+                      {stream.content ? (
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{stream.content}</ReactMarkdown>
+                      ) : (
+                        <span className="inline-flex items-center gap-0.5">
+                          <span className="animate-bounce [animation-delay:-0.3s]">.</span>
+                          <span className="animate-bounce [animation-delay:-0.15s]">.</span>
+                          <span className="animate-bounce">.</span>
+                        </span>
+                      )}
+                      {/* Blinking cursor */}
+                      <span className="inline-block w-0.5 h-4 bg-farm-blue ml-0.5 animate-pulse align-middle"></span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
           
           {/* Enhanced loading indicators */}
           {renderLoadingIndicator()}

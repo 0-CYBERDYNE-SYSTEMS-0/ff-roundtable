@@ -204,6 +204,32 @@ export async function registerRoutes(app: Express): Promise<Server> {
               maxAutonomousTurns: data.maxAutonomousTurns
             }));
           }
+          // Handle streaming events
+          else if (data.type === "expert_stream_start") {
+            client.send(JSON.stringify({
+              type: "expert_stream_start",
+              conversationId,
+              expertId: data.expertId,
+              expertName: data.expertName,
+              expertRole: data.expertRole,
+            }));
+          }
+          else if (data.type === "expert_stream_token") {
+            client.send(JSON.stringify({
+              type: "expert_stream_token",
+              conversationId,
+              expertId: data.expertId,
+              token: data.token,
+            }));
+          }
+          else if (data.type === "expert_stream_done") {
+            client.send(JSON.stringify({
+              type: "expert_stream_done",
+              conversationId,
+              expertId: data.expertId,
+              message: data.message,
+            }));
+          }
           // Handle insights updates
           else if (data.type === "insights") {
             client.send(JSON.stringify({

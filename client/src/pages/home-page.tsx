@@ -39,6 +39,10 @@ export default function HomePage() {
   const [pendingMessages, setPendingMessages] = useState<string[]>([]);
   const [isQueueProcessing, setIsQueueProcessing] = useState(false);
 
+  // Streaming state
+  const [streamingMessages, setStreamingMessages] = useState<Map<number, { content: string; expertName: string; expertRole: string }>>(new Map());
+  const [typingExpertIds, setTypingExpertIds] = useState<Set<number>>(new Set());
+
   // WebSocket connection for real-time updates
   const socket = useWebSocket();
   
@@ -448,17 +452,68 @@ export default function HomePage() {
               setInteractionMode(parsedData.mode as InteractionMode);
               // Set isProcessing to true when entering processing_sequential or autonomous mode
               setIsProcessing(parsedData.mode === "processing_sequential" || parsedData.mode === "autonomous");
+              // Clear streaming state when returning to idle
+              if (parsedData.mode === "idle") {
+                setStreamingMessages(new Map());
+                setTypingExpertIds(new Set());
+              }
             }
             if (typeof parsedData.isAutonomousEnabled === 'boolean') {
               console.log(`[UI State] Setting isAutonomousEnabled to: ${parsedData.isAutonomousEnabled}`);
               setIsAutonomousEnabled(parsedData.isAutonomousEnabled);
             }
-            // Optionally update maxAutonomousTurns if needed for UI display
-            /*
-            if (typeof parsedData.maxAutonomousTurns === 'number') {
-               // setMaxAutonomousTurns(parsedData.maxAutonomousTurns);
+            break;
+
+          // --- Streaming message handlers ---
+          case "expert_stream_start":
+            console.log(`[Stream] Expert ${parsedData.expertName} started typing`);
+            setTypingExpertIds(prev => new Set(prev).add(parsedData.expertId));
+            setStreamingMessages(prev => {
+              const next = new Map(prev);
+              next.set(parsedData.expertId, {
+                content: "",
+                expertName: parsedData.expertName,
+                expertRole: parsedData.expertRole,
+              });
+              return next;
+            });
+            break;
+
+          case "expert_stream_token":
+            setStreamingMessages(prev => {
+              const next = new Map(prev);
+              const existing = next.get(parsedData.expertId);
+              if (existing) {
+                next.set(parsedData.expertId, {
+                  ...existing,
+                  content: existing.content + parsedData.token,
+                });
+              }
+              return next;
+            });
+            break;
+
+          case "expert_stream_done":
+            console.log(`[Stream] Expert ${parsedData.expertId} done`);
+            setTypingExpertIds(prev => {
+              const next = new Set(prev);
+              next.delete(parsedData.expertId);
+              return next;
+            });
+            setStreamingMessages(prev => {
+              const next = new Map(prev);
+              next.delete(parsedData.expertId);
+              return next;
+            });
+            // Add the completed message to the query cache
+            if (parsedData.message && parsedData.message.id) {
+              const messagesQueryKey = [`/api/protected/conversations/${activeConversation}/messages`];
+              queryClient.setQueryData<Message[]>(messagesQueryKey, (oldData) => {
+                if (!oldData) return [parsedData.message];
+                if (oldData.some(msg => msg.id === parsedData.message.id)) return oldData;
+                return [...oldData, parsedData.message];
+              });
             }
-            */
             break;
 
           case "insights":
@@ -608,6 +663,8 @@ export default function HomePage() {
                         user={user}
                         insights={insights || []}
                         visualizations={[]}
+                        streamingMessages={streamingMessages}
+                        typingExpertIds={typingExpertIds}
                     />
                 ) : (
                     <div className="flex-1 flex items-center justify-center bg-gradient-to-br from-farm-powder/10 via-white to-farm-tan/10">

@@ -256,6 +256,94 @@ export async function callOpenRouterAPI(messages: AIMessage[], model: string): P
   }
 }
 
+// Function to call OpenRouter API with streaming (SSE)
+export async function callOpenRouterAPIStream(
+  messages: AIMessage[], 
+  model: string,
+  onToken: (token: string) => void
+): Promise<AIModelResponse> {
+  console.log(`[STREAM] Starting stream for model: ${model}`);
+  try {
+    const openRouterKey = process.env.OPENROUTER_API_KEY;
+    if (!openRouterKey) {
+      throw new Error("OpenRouter API key not provided");
+    }
+    
+    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${openRouterKey}`,
+        "HTTP-Referer": "https://farm-friend-roundtable.replit.app",
+        "X-Title": "Farm Friend Roundtable"
+      },
+      body: JSON.stringify({
+        model: model,
+        messages: messages,
+        temperature: 0.7,
+        max_tokens: 8192,
+        stream: true,
+      }),
+    });
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`OpenRouter API Error (${response.status}): ${errorText}`);
+    }
+
+    if (!response.body) {
+      throw new Error("No response body for streaming");
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let fullContent = "";
+    let buffer = "";
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith("data: ")) continue;
+          
+          const data = trimmed.slice(6);
+          if (data === "[DONE]") continue;
+
+          try {
+            const parsed = JSON.parse(data);
+            const content = parsed?.choices?.[0]?.delta?.content;
+            if (content) {
+              fullContent += content;
+              onToken(content);
+            }
+          } catch {
+            // Skip unparseable chunks
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+
+    console.log(`[STREAM] Complete for ${model}. ${fullContent.length} chars`);
+    
+    return {
+      message: { role: "assistant", content: fullContent }
+    };
+  } catch (error: unknown) {
+    console.error("[STREAM] Error:", error);
+    if (error instanceof Error) throw error;
+    throw new Error(`Unknown error in callOpenRouterAPIStream: ${String(error)}`);
+  }
+}
+
 // Function to call Perplexity API for web search
 export async function callPerplexityAPI(query: string): Promise<AIModelResponse> {
   try {
@@ -358,7 +446,124 @@ async function readFileContent(file: File, maxLength = 2000): Promise<string | n
     }
 }
 
-// Function to generate response for a single expert
+// Function to generate response for a single expert WITH STREAMING
+// Calls onToken for each token chunk, returns the final InsertMessage
+export async function getExpertResponseStream(
+  expert: Expert, 
+  history: Message[], 
+  referenceMessageContent: string, 
+  files: File[],
+  availableRoles: string[],
+  onToken: (token: string) => void
+): Promise<InsertMessage> { 
+  console.log(`[STREAM] Generating streaming response for expert: ${expert.name} (${expert.role})`);
+  const systemPrompt = generateSystemPrompt(expert, availableRoles); 
+  
+  const messages: AIMessage[] = [
+    { role: "system", content: systemPrompt }
+  ];
+
+  if (files.length > 0) {
+     let fileContextString = "\n\n--- Attached Files Context ---\n";
+     for (const file of files) {
+         const contentSnippet = await readFileContent(file);
+         fileContextString += `\nFile Name: ${file.filename} (${file.fileType})\n`;
+         if (contentSnippet) {
+              fileContextString += `Content Snippet:\n\`\`\`\n${contentSnippet}\n\`\`\`\n`;
+         }
+     }
+     fileContextString += "\n--- End Attached Files Context ---\n";
+     messages.push({ role: "system", content: fileContextString });
+  }
+
+   messages.push(...history.map(msg => ({
+      role: mapDbRoleToApiRole(msg.role),
+      content: msg.content
+   })).slice(-15));
+
+   messages.push({ role: "user", content: referenceMessageContent });
+
+   console.log(`[STREAM] Sending ${messages.length} messages to LLM for ${expert.role}.`);
+
+  try {
+    let response: AIModelResponse;
+    
+    if (expert.role === "Research Analyst") {
+      // Use Perplexity if key is available, otherwise fall back to OpenRouter streaming
+      if (process.env.PERPLEXITY_API_KEY) {
+        response = await callPerplexityAPI(referenceMessageContent);
+        onToken(response.message.content);
+      } else {
+        console.log("[STREAM] No Perplexity key — Research Analyst using OpenRouter streaming");
+        response = await callOpenRouterAPIStream(messages, expert.model, onToken);
+      }
+    } 
+    else if (expert.role === "File Creator") {
+      // File Creator needs full response to parse JSON — use non-streaming
+      response = await callOpenRouterAPI(messages, expert.model);
+      onToken(response.message.content); // Send as single token
+      
+      try {
+        const fileData = JSON.parse(response.message.content);
+        if (!fileData.filename || !fileData.filetype || !fileData.content) {
+          throw new Error("Invalid JSON structure from File Creator");
+        }
+        const uploadsDir = path.join(process.cwd(), "uploads");
+        if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir);
+        const uniqueFilename = `${randomBytes(8).toString("hex")}-${fileData.filename}`;
+        const filePath = path.join(uploadsDir, uniqueFilename);
+        fs.writeFileSync(filePath, fileData.content);
+        const fileUrl = `/uploads/${uniqueFilename}`;
+
+        const newFile: InsertFile = {
+           conversationId: expert.conversationId,
+           filename: fileData.filename,
+           fileUrl: fileUrl,
+           fileType: fileData.filetype,
+           uploadedBy: `Expert: ${expert.name}`,
+        };
+        await storage.createFile(newFile);
+        response.message.content = `Created file: ${fileData.filename}`;
+      } catch (jsonError) {
+        console.error("File Creator error processing JSON:", jsonError);
+        response.message.content = "(File Creator Error: Could not process request to create file.)";
+      }
+    }
+    else {
+      // MAIN PATH: Streaming via OpenRouter
+      response = await callOpenRouterAPIStream(messages, expert.model, onToken);
+    }
+    
+    const { artifacts, cleanContent } = extractArtifacts(response.message.content);
+    
+    return {
+      conversationId: expert.conversationId,
+      expertId: expert.id,
+      userId: null,
+      content: cleanContent,
+      role: "assistant",
+      expertName: expert.name,
+      expertRole: expert.role,
+      artifacts: artifacts
+    };
+
+  } catch (error) {
+    console.error(`[STREAM] Error streaming from expert ${expert.name}:`, error);
+    const errorMsg = `(Error generating response for ${expert.name}: ${error instanceof Error ? error.message : String(error)})`;
+    onToken(errorMsg); // Show error inline
+    return {
+      conversationId: expert.conversationId,
+      expertId: expert.id,
+      userId: null,
+      content: errorMsg,
+      role: "assistant",
+      expertName: expert.name,
+      expertRole: expert.role,
+    };
+  }
+}
+
+// Function to generate response for a single expert (NON-STREAMING — kept for backward compat)
 export async function getExpertResponse(
   expert: Expert, 
   history: Message[], 

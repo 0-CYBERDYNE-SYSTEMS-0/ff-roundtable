@@ -1,5 +1,5 @@
 import { storage } from "./storage";
-import { getExpertResponse, generateInsights, getModeratorNextSpeakerSuggestion } from "./ai";
+import { getExpertResponse, getExpertResponseStream, generateInsights, getModeratorNextSpeakerSuggestion } from "./ai";
 import type { InsertMessage, Expert, Message, File } from "@shared/schema";
 
 // Define interaction modes more formally
@@ -231,18 +231,41 @@ export class InteractionOrchestrator {
             
             console.log(`Orchestrator turn: Expert ${currentExpert.name} (Index: ${nextExpertIndex}, Mode: ${state.mode}, Auto Turn: ${state.totalAutonomousTurnsTaken}/${state.maxAutonomousTurns})`);
 
-            // --- Call Expert --- 
+            // --- Call Expert (STREAMING) --- 
             try {
                 const history = await storage.getConversationMessages(this.conversationId);
                 const files = await storage.getConversationFiles(this.conversationId);
-                const expertResponse: InsertMessage = await getExpertResponse(
-                    currentExpert, history, referenceMessageContent, files, availableRoles 
-                ); 
+                
+                // Broadcast "expert started typing"
+                state.broadcastFn(this.conversationId, {
+                    type: "expert_stream_start",
+                    expertId: currentExpert.id,
+                    expertName: currentExpert.name,
+                    expertRole: currentExpert.role,
+                });
+                
+                const expertResponse: InsertMessage = await getExpertResponseStream(
+                    currentExpert, history, referenceMessageContent, files, availableRoles,
+                    (token) => {
+                        // Stream each token to the client
+                        state.broadcastFn(this.conversationId, {
+                            type: "expert_stream_token",
+                            expertId: currentExpert.id,
+                            token: token,
+                        });
+                    }
+                );
+                
+                // Store and broadcast completed message
                 const storedExpertMessage = await storage.createMessage(expertResponse);
-                state.broadcastFn(this.conversationId, storedExpertMessage);
-                console.log(`Orchestrator broadcasted response from ${currentExpert.name}`);
+                state.broadcastFn(this.conversationId, {
+                    type: "expert_stream_done",
+                    expertId: currentExpert.id,
+                    message: storedExpertMessage,
+                });
+                console.log(`Orchestrator broadcasted streamed response from ${currentExpert.name}`);
             } catch (error) {
-                 console.error(`Orchestrator: Error processing expert ${currentExpert.name}:`, error);
+                 console.error(`Orchestrator: Error streaming expert ${currentExpert.name}:`, error);
                  state.broadcastFn(this.conversationId, {
                     type: "message_error", expertId: currentExpert.id,
                     expertName: currentExpert.name, message: `Error getting response from ${currentExpert.name}.`
