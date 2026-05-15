@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Plus, RefreshCw, Download, Upload, FileDown, FileText, Image, ArrowRight } from "lucide-react";
@@ -33,6 +33,11 @@ export default function SidebarPanel({
   experts = []
 }: SidebarPanelProps) {
   const [activeTab, setActiveTab] = useState<'conversations' | 'insights' | 'files'>('insights');
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleFileUploadClick = () => {
+    fileInputRef.current?.click();
+  };
   
   // Handle file upload
   const handleFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -179,21 +184,21 @@ export default function SidebarPanel({
                 <h2 className="font-serif font-bold text-lg text-farm-blue">Attachments</h2>
                 <div>
                   <input
-                    id="file-upload"
                     type="file"
+                    ref={fileInputRef}
                     className="hidden"
                     onChange={handleFileInputChange}
                   />
-                  <label htmlFor="file-upload" className="cursor-pointer">
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="text-farm-blue hover:text-farm-green hover:bg-farm-powder/30 cursor-pointer h-8 w-8 transition-all duration-200"
-                      title="Upload File"
-                    >
-                      <Upload className="h-4 w-4" />
-                    </Button>
-                  </label>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="text-farm-blue hover:text-farm-green hover:bg-farm-powder/30 cursor-pointer h-8 w-8 transition-all duration-200"
+                    title="Upload File"
+                    onClick={handleFileUploadClick}
+                  >
+                    <Upload className="h-4 w-4" />
+                  </Button>
                 </div>
               </div>
 
