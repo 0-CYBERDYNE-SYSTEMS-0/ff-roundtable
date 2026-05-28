@@ -45,15 +45,15 @@ const availableExperts = [
   {
     role: "Soil Scientist",
     description: "Specializes in soil health, composition analysis, and fertilization recommendations.",
-    defaultModel: "deepseek/deepseek-v3.2",
-    avatarUrl: "https://images.unsplash.com/photo-1560365163-3e8d64e762ef?ixlib=rb-1.2.1&auto=format&fit=crop&w=48&h=48&q=80",
+    defaultModel: "deepseek/deepseek-v4-flash:free",
+    avatarUrl: "https://images.unsplash.com/photo-1530836369250-ef72a3f5cda8?ixlib=rb-1.2.1&auto=format&fit=crop&w=48&h=48&q=80",
     category: EXPERT_CATEGORIES.AGRICULTURE,
     recommended: true
   },
   {
     role: "Crop Specialist",
     description: "Expert in crop varieties, rotation strategies, and yield optimization techniques.",
-    defaultModel: "deepseek/deepseek-v3.2",
+    defaultModel: "z-ai/glm-4.5-air:free",
     avatarUrl: "https://images.unsplash.com/photo-1530836369250-ef72a3f5cda8?ixlib=rb-1.2.1&auto=format&fit=crop&w=48&h=48&q=80",
     category: EXPERT_CATEGORIES.AGRICULTURE,
     recommended: true
@@ -61,7 +61,7 @@ const availableExperts = [
   {
     role: "Irrigation Engineer",
     description: "Specializes in water management systems, irrigation scheduling, and water conservation.",
-    defaultModel: "deepseek/deepseek-v3.2",
+    defaultModel: "deepseek/deepseek-v4-flash:free",
     avatarUrl: "https://images.unsplash.com/photo-1584824188625-0d6dd2183f9e?ixlib=rb-1.2.1&auto=format&fit=crop&w=48&h=48&q=80",
     category: EXPERT_CATEGORIES.AGRICULTURE
   },
@@ -90,7 +90,7 @@ const availableExperts = [
   {
     role: "Research Analyst",
     description: "Conducts literature reviews, analyzes trends, and provides evidence-based recommendations.",
-    defaultModel: "anthropic/claude-3.5-sonnet",
+    defaultModel: "z-ai/glm-4.5-air:free",
     avatarUrl: "https://images.unsplash.com/photo-1551836022-d5d88e9218df?ixlib=rb-1.2.1&auto=format&fit=crop&w=48&h=48&q=80",
     category: EXPERT_CATEGORIES.RESEARCH
   },

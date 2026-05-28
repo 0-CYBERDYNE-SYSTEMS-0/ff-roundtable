@@ -529,8 +529,8 @@ export async function getExpertResponseStream(
     let response: AIModelResponse;
     
     if (expert.role === "Research Analyst") {
-      // Use Perplexity if key is available, otherwise fall back to OpenRouter streaming
-      if (process.env.PERPLEXITY_API_KEY) {
+      // Use OpenRouter streaming for Research Analyst (Perplexity optional)
+      if (process.env.PERPLEXITY_API_KEY && process.env.PERPLEXITY_API_KEY.length > 10) {
         response = await callPerplexityAPI(referenceMessageContent);
         onToken(response.message.content);
       } else {

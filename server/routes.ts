@@ -90,15 +90,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
             title: "Quick Test Roundtable"
           });
 
-          // Add all experts from config
-          // In test mode, all experts use deepseek/deepseek-v3.2
-          const testModel = "deepseek/deepseek-v3.2";
+          // Add all experts from config — each with their assigned model
           const expertPromises = devConfig.experts.map((expert: any) =>
             storage.createExpert({
               conversationId: conversation.id,
               name: expert.name,
               role: expert.role,
-              model: testModel, // Force all experts to use test model
+              model: expert.model, // Use each expert's specific model from dev-config
               avatarUrl: expert.avatarUrl,
               systemPrompt: generateSystemPrompt({ role: expert.role } as Expert, undefined)
             })
@@ -132,7 +130,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           }
 
           const experts = await storage.getConversationExperts(conversationId);
-          const testModel = "deepseek/deepseek-v3.2";
+          const testModel = devConfig.experts[0]?.model || "deepseek/deepseek-v4-flash:free";
 
           // Update all experts to use the test model
           const updatePromises = experts.map((expert) =>
