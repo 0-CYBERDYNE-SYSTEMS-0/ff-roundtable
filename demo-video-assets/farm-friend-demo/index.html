@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1920, height=1080" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800&display=swap');
+      
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body {
+        margin: 0; width: 1920px; height: 1080px;
+        overflow: hidden; background: #0a0f0a;
+        font-family: 'Inter', sans-serif;
+      }
+      
+      /* SCENE 1: Problem (0-12s) */
+      .scene-problem {
+        position: absolute; inset: 0;
+        background: linear-gradient(180deg, #1a2f1a 0%, #0a0f0a 100%);
+      }
+      .problem-text {
+        position: absolute; left: 120px; top: 50%;
+        transform: translateY(-50%);
+        color: #e8f5e9; max-width: 700px;
+      }
+      .problem-text h1 {
+        font-size: 72px; font-weight: 800; line-height: 1.1;
+        margin-bottom: 32px; letter-spacing: -2px;
+      }
+      .problem-text h1 span { color: #4caf50; }
+      .problem-text p {
+        font-size: 28px; font-weight: 300; line-height: 1.5;
+        color: #a5d6a7; opacity: 0.9;
+      }
+      .problem-visual {
+        position: absolute; right: 80px; top: 50%;
+        transform: translateY(-50%);
+        width: 800px; height: 700px;
+        border-radius: 24px; overflow: hidden;
+        box-shadow: 0 40px 80px rgba(0,0,0,0.5);
+      }
+      .problem-visual img {
+        width: 100%; height: 100%; object-fit: cover;
+      }
+      
+      /* SCENE 2: Solution Reveal (12-28s) */
+      .scene-solution {
+        position: absolute; inset: 0;
+        background: linear-gradient(135deg, #0a0f0a 0%, #1b3a1b 50%, #0a0f0a 100%);
+        display: flex; align-items: center; justify-content: center;
+      }
+      .solution-center {
+        text-align: center; color: #e8f5e9;
+      }
+      .solution-center .logo-mark {
+        width: 120px; height: 120px;
+        background: linear-gradient(135deg, #4caf50, #2e7d32);
+        border-radius: 28px; margin: 0 auto 40px;
+        display: flex; align-items: center; justify-content: center;
+        font-size: 60px; box-shadow: 0 20px 60px rgba(76,175,80,0.3);
+      }
+      .solution-center h2 {
+        font-size: 64px; font-weight: 800; margin-bottom: 20px;
+        letter-spacing: -1px;
+      }
+      .solution-center h2 span { color: #4caf50; }
+      .solution-center p {
+        font-size: 24px; font-weight: 300;
+        color: #a5d6a7; max-width: 600px; margin: 0 auto;
+      }
+      
+      /* SCENE 3: Experts (28-50s) */
+      .scene-experts {
+        position: absolute; inset: 0;
+        background: #0a0f0a;
+        display: flex; flex-direction: column;
+        align-items: center; justify-content: center;
+        padding: 80px;
+      }
+      .experts-header {
+        text-align: center; color: #e8f5e9; margin-bottom: 60px;
+      }
+      .experts-header h3 {
+        font-size: 48px; font-weight: 700; margin-bottom: 16px;
+      }
+      .experts-header p {
+        font-size: 22px; color: #81c784; font-weight: 300;
+      }
+      .expert-cards {
+        display: flex; gap: 32px;
+        justify-content: center;
+      }
+      .expert-card {
+        width: 280px; background: linear-gradient(180deg, #1a2f1a, #0f1f0f);
+        border: 1px solid #2e7d32; border-radius: 20px;
+        padding: 32px 24px; text-align: center;
+        color: #e8f5e9;
+        box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+      }
+      .expert-card .avatar {
+        width: 80px; height: 80px; border-radius: 50%;
+        background: linear-gradient(135deg, #4caf50, #2e7d32);
+        margin: 0 auto 20px; display: flex;
+        align-items: center; justify-content: center;
+        font-size: 36px;
+      }
+      .expert-card h4 {
+        font-size: 22px; font-weight: 600; margin-bottom: 8px;
+      }
+      .expert-card .role {
+        font-size: 14px; color: #81c784;
+        text-transform: uppercase; letter-spacing: 1px;
+        margin-bottom: 16px;
+      }
+      .expert-card .model {
+        font-size: 12px; color: #66bb6a;
+        background: rgba(76,175,80,0.15);
+        padding: 6px 12px; border-radius: 20px;
+        display: inline-block;
+      }
+      
+      /* SCENE 4: Chat Demo (50-70s) */
+      .scene-chat {
+        position: absolute; inset: 0;
+        background: linear-gradient(180deg, #0a0f0a, #1a2f1a);
+        display: flex; align-items: center; justify-content: center;
+        padding: 60px;
+      }
+      .chat-mockup {
+        width: 1400px; height: 900px;
+        background: #111; border-radius: 24px;
+        border: 1px solid #2e7d32;
+        box-shadow: 0 40px 80px rgba(0,0,0,0.5);
+        overflow: hidden; display: flex;
+      }
+      .chat-sidebar {
+        width: 280px; background: #0a0f0a;
+        border-right: 1px solid #1a2f1a;
+        padding: 24px;
+      }
+      .chat-sidebar h4 {
+        color: #4caf50; font-size: 14px;
+        text-transform: uppercase; letter-spacing: 1px;
+        margin-bottom: 20px;
+      }
+      .chat-expert-item {
+        display: flex; align-items: center; gap: 12px;
+        padding: 12px; border-radius: 12px;
+        margin-bottom: 8px; color: #e8f5e9;
+        background: rgba(76,175,80,0.1);
+      }
+      .chat-expert-item .dot {
+        width: 8px; height: 8px; border-radius: 50%;
+        background: #4caf50; animation: pulse 2s infinite;
+      }
+      @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.4; }
+      }
+      .chat-main {
+        flex: 1; padding: 32px;
+        display: flex; flex-direction: column;
+      }
+      .chat-message {
+        background: linear-gradient(90deg, #1a2f1a, #0f1f0f);
+        border-left: 3px solid #4caf50;
+        padding: 20px 24px; border-radius: 0 16px 16px 0;
+        margin-bottom: 16px; color: #e8f5e9;
+      }
+      .chat-message .author {
+        font-size: 14px; font-weight: 600;
+        color: #4caf50; margin-bottom: 8px;
+      }
+      .chat-message .text {
+        font-size: 15px; line-height: 1.6;
+        color: #c8e6c9;
+      }
+      
+      /* SCENE 5: CTA (70-90s) */
+      .scene-cta {
+        position: absolute; inset: 0;
+        background: linear-gradient(135deg, #0a0f0a, #1b3a1b, #0a0f0a);
+        display: flex; flex-direction: column;
+        align-items: center; justify-content: center;
+        color: #e8f5e9; text-align: center;
+      }
+      .cta-logo {
+        width: 100px; height: 100px;
+        background: linear-gradient(135deg, #4caf50, #2e7d32);
+        border-radius: 24px; margin-bottom: 40px;
+        display: flex; align-items: center; justify-content: center;
+        font-size: 48px; box-shadow: 0 20px 60px rgba(76,175,80,0.3);
+      }
+      .scene-cta h2 {
+        font-size: 56px; font-weight: 800;
+        margin-bottom: 20px; letter-spacing: -1px;
+      }
+      .scene-cta p {
+        font-size: 24px; font-weight: 300;
+        color: #a5d6a7; margin-bottom: 48px;
+        max-width: 700px;
+      }
+      .cta-button {
+        background: linear-gradient(135deg, #4caf50, #2e7d32);
+        color: white; font-size: 20px; font-weight: 600;
+        padding: 20px 48px; border-radius: 16px;
+        border: none; cursor: pointer;
+        box-shadow: 0 12px 40px rgba(76,175,80,0.4);
+        letter-spacing: 0.5px;
+      }
+      .cta-tagline {
+        margin-top: 40px; font-size: 16px;
+        color: #81c784; letter-spacing: 2px;
+        text-transform: uppercase;
+      }
+      
+      /* Utility */
+      .clip {
+        position: absolute;
+      }
+    </style>
+  </head>
+  <body>
+    <div
+      id="root"
+      data-composition-id="main"
+      data-start="0"
+      data-duration="90"
+      data-width="1920"
+      data-height="1080"
+    >
+      
+      <!-- SCENE 1: Problem (0-12s) -->
+      <div class="clip scene-problem" data-start="0" data-duration="12" data-track-index="1">
+        <div class="problem-text" id="problem-text">
+          <h1>Every season,<br><span>impossible decisions.</span></h1>
+          <p>Is it a nutrient deficiency? A disease? A pest you can't see yet? Getting expert advice used to take days.</p>
+        </div>
+        <div class="problem-visual" id="problem-visual">
+          <img src="../app-dashboard-clean.png" alt="Farm Friend Interface" />
+        </div>
+      </div>
+      
+      <!-- SCENE 2: Solution (12-28s) -->
+      <div class="clip scene-solution" data-start="12" data-duration="16" data-track-index="1">
+        <div class="solution-center" id="solution-center">
+          <div class="logo-mark">🌾</div>
+          <h2>Meet <span>Farm Friend</span><br>Roundtable</h2>
+          <p>Assemble your team of AI agricultural experts in seconds. Each one focused on your specific problem.</p>
+        </div>
+      </div>
+      
+      <!-- SCENE 3: Experts (28-50s) -->
+      <div class="clip scene-experts" data-start="28" data-duration="22" data-track-index="1">
+        <div class="experts-header" id="experts-header">
+          <h3>Your AI Expert Team</h3>
+          <p>Powered by cutting-edge models. Focused on your farm.</p>
+        </div>
+        <div class="expert-cards" id="expert-cards">
+          <div class="expert-card">
+            <div class="avatar">🧪</div>
+            <h4>Dr. Soil</h4>
+            <div class="role">Soil Scientist</div>
+            <div class="model">DeepSeek V4 Flash</div>
+          </div>
+          <div class="expert-card">
+            <div class="avatar">🌱</div>
+            <h4>Crop Master</h4>
+            <div class="role">Crop Specialist</div>
+            <div class="model">Gemma 4 31B</div>
+          </div>
+          <div class="expert-card">
+            <div class="avatar">🛰️</div>
+            <h4>Vision Artist</h4>
+            <div class="role">Imagery Specialist</div>
+            <div class="model">Gemma 4 31B</div>
+          </div>
+          <div class="expert-card">
+            <div class="avatar">🔬</div>
+            <h4>Research Scout</h4>
+            <div class="role">Research Analyst</div>
+            <div class="model">Ring 2.6-1T</div>
+          </div>
+        </div>
+      </div>
+      
+      <!-- SCENE 4: Chat Demo (50-70s) -->
+      <div class="clip scene-chat" data-start="50" data-duration="20" data-track-index="1">
+        <div class="chat-mockup" id="chat-mockup">
+          <div class="chat-sidebar">
+            <h4>Expert Panel</h4>
+            <div class="chat-expert-item"><div class="dot"></div>Dr. Soil</div>
+            <div class="chat-expert-item"><div class="dot"></div>Crop Master</div>
+            <div class="chat-expert-item"><div class="dot"></div>Vision Artist</div>
+            <div class="chat-expert-item"><div class="dot"></div>Research Scout</div>
+          </div>
+          <div class="chat-main">
+            <div class="chat-message" id="msg1">
+              <div class="author">Vision Artist (Imagery Specialist)</div>
+              <div class="text">Based on your description of yellowing leaves with brown spots, I recommend NDVI analysis to identify stress zones and prioritize field visits.</div>
+            </div>
+            <div class="chat-message" id="msg2">
+              <div class="author">Crop Master (Crop Specialist)</div>
+              <div class="text">This pattern suggests Northern Corn Leaf Blight or Gray Leaf Spot. Let's verify with tissue sampling and check hybrid resistance ratings.</div>
+            </div>
+            <div class="chat-message" id="msg3">
+              <div class="author">Dr. Soil (Soil Scientist)</div>
+              <div class="text">Your clay loam may be holding excess moisture. I recommend testing for nitrogen deficiency and checking drainage in low-lying areas.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      
+      <!-- SCENE 5: CTA (70-90s) -->
+      <div class="clip scene-cta" data-start="70" data-duration="20" data-track-index="1">
+        <div class="cta-logo" id="cta-logo">🌾</div>
+        <h2 id="cta-headline">Your Farm's AI Brain Trust</h2>
+        <p id="cta-sub">Four experts. One clear answer. Zero guesswork. Twenty-four seven.</p>
+        <div class="cta-button" id="cta-button">Start Your Free Roundtable</div>
+        <div class="cta-tagline" id="cta-tagline">Farm Friend Roundtable — Expert Advice at Your Fingertips</div>
+      </div>
+      
+    </div>
+
+    <script>
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true });
+      
+      // SCENE 1: Problem (0-12s)
+      tl.from("#problem-text h1", { opacity: 0, y: 60, duration: 1.2, ease: "power3.out" }, 0.5);
+      tl.from("#problem-text p", { opacity: 0, y: 40, duration: 1, ease: "power3.out" }, 1.2);
+      tl.from("#problem-visual", { opacity: 0, x: 100, scale: 0.9, duration: 1.4, ease: "power3.out" }, 0.8);
+      tl.to("#problem-text", { opacity: 0, y: -30, duration: 0.6 }, 10.5);
+      tl.to("#problem-visual", { opacity: 0, x: 50, duration: 0.6 }, 10.5);
+      
+      // SCENE 2: Solution (12-28s)
+      tl.from("#solution-center .logo-mark", { opacity: 0, scale: 0, rotation: -20, duration: 1, ease: "back.out(1.7)" }, 12.2);
+      tl.from("#solution-center h2", { opacity: 0, y: 50, duration: 1, ease: "power3.out" }, 13);
+      tl.from("#solution-center p", { opacity: 0, y: 30, duration: 0.8, ease: "power3.out" }, 13.8);
+      tl.to("#solution-center", { opacity: 0, scale: 0.95, duration: 0.6 }, 26.5);
+      
+      // SCENE 3: Experts (28-50s)
+      tl.from("#experts-header", { opacity: 0, y: 40, duration: 0.8, ease: "power3.out" }, 28.2);
+      tl.from("#expert-cards .expert-card", { 
+        opacity: 0, y: 80, scale: 0.8, duration: 0.8, 
+        stagger: 0.15, ease: "back.out(1.4)" 
+      }, 29);
+      tl.to("#expert-cards .expert-card", { 
+        opacity: 0, y: -40, scale: 0.9, duration: 0.5, stagger: 0.08 
+      }, 48);
+      tl.to("#experts-header", { opacity: 0, duration: 0.4 }, 48.5);
+      
+      // SCENE 4: Chat Demo (50-70s)
+      tl.from("#chat-mockup", { opacity: 0, scale: 0.85, y: 60, duration: 1.2, ease: "power3.out" }, 50.2);
+      tl.from("#msg1", { opacity: 0, x: -60, duration: 0.8, ease: "power3.out" }, 52);
+      tl.from("#msg2", { opacity: 0, x: -60, duration: 0.8, ease: "power3.out" }, 54);
+      tl.from("#msg3", { opacity: 0, x: -60, duration: 0.8, ease: "power3.out" }, 56);
+      tl.to("#chat-mockup", { opacity: 0, scale: 0.95, duration: 0.6 }, 68);
+      
+      // SCENE 5: CTA (70-90s)
+      tl.from("#cta-logo", { opacity: 0, scale: 0, rotation: -15, duration: 1, ease: "back.out(1.7)" }, 70.2);
+      tl.from("#cta-headline", { opacity: 0, y: 50, duration: 1, ease: "power3.out" }, 71);
+      tl.from("#cta-sub", { opacity: 0, y: 30, duration: 0.8, ease: "power3.out" }, 71.8);
+      tl.from("#cta-button", { opacity: 0, y: 40, scale: 0.9, duration: 0.8, ease: "back.out(1.4)" }, 73);
+      tl.from("#cta-tagline", { opacity: 0, duration: 0.8 }, 75);
+      
+      // Subtle pulse on CTA button
+      tl.to("#cta-button", { 
+        scale: 1.03, duration: 0.6, yoyo: true, repeat: 3, ease: "sine.inOut" 
+      }, 76);
+      
+      window.__timelines["main"] = tl;
+    </script>
+  </body>
+</html>
