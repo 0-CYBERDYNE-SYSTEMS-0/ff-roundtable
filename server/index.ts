@@ -2,10 +2,33 @@ import "dotenv/config";
 import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { setupVite, serveStatic, log } from "./vite";
+import helmet from "helmet";
+import cors from "cors";
+import rateLimit from "express-rate-limit";
 
 const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
+
+// Security headers
+app.use(helmet());
+
+// CORS - allow only the configured origin
+app.use(cors({
+  origin: process.env.ALLOWED_ORIGIN || "http://localhost:5173",
+  credentials: true,
+}));
+
+// Rate limiting for auth endpoints
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 10, // 10 requests per window
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: "Too many requests. Please try again later." },
+});
+app.use("/api/login", authLimiter);
+app.use("/api/register", authLimiter);
 
 app.use((req, res, next) => {
   const start = Date.now();

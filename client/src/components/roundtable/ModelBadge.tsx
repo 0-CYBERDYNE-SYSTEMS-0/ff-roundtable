@@ -14,7 +14,7 @@ interface ModelBadgeProps {
 function formatModelId(id: string): string {
   // Simple formatting: remove common prefixes and replace slashes/dashes
   return id
-    .replace(/^(anthropic|openai|google|meta-llama|mistralai)\//, '') // Remove common provider prefixes
+    .replace(/^(anthropic|openai|google|meta-llama|mistralai|local)\//, '') // Remove common provider prefixes
     .replace(/[-_]/g, ' ') // Replace separators with spaces
     .split(' ')
     .map(word => word.charAt(0).toUpperCase() + word.slice(1)) // Capitalize words
@@ -30,6 +30,7 @@ function getProviderLogo(modelId: string): string {
   if (id.startsWith('google') || id.includes('gemini')) return '🔴'; // Google
   if (id.startsWith('mistral')) return '🟡'; // Mistral
   if (id.startsWith('cohere')) return '🟣'; // Cohere
+  if (id.startsWith('local')) return '🖥️'; // Local
   return '⚪'; // Default
 }
 
@@ -88,6 +89,10 @@ export default function ModelBadge({
      bgColor = "bg-purple-50";
      textColor = "text-purple-800";
      borderColor = "border-purple-200";
+  } else if (modelId.startsWith("local/")) {
+    bgColor = "bg-purple-50";
+    textColor = "text-purple-800";
+    borderColor = "border-purple-200";
   }
 
   const sizeClasses = size === "sm" 

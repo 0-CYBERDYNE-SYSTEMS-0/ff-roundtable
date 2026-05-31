@@ -111,6 +111,13 @@ export default function ConversationSidebar({
     document.body.style.userSelect = 'none';
   };
 
+  const handleTouchStart = (e: React.TouchEvent) => {
+    e.preventDefault();
+    setIsResizing(true);
+    setStartX(e.touches[0].clientX);
+    setStartWidth(currentWidth);
+  };
+
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
       if (!isResizing) return;
@@ -127,12 +134,31 @@ export default function ConversationSidebar({
       }
     };
 
+    const handleTouchMove = (e: TouchEvent) => {
+      if (!isResizing) return;
+      const diff = startX - e.touches[0].clientX;
+      const newWidth = Math.max(300, Math.min(800, startWidth + diff));
+      onWidthChange(newWidth);
+    };
+
+    const handleTouchEnd = () => {
+      if (isResizing) {
+        setIsResizing(false);
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+      }
+    };
+
     if (isResizing) {
       document.addEventListener('mousemove', handleMouseMove);
       document.addEventListener('mouseup', handleMouseUp);
+      document.addEventListener('touchmove', handleTouchMove, { passive: false });
+      document.addEventListener('touchend', handleTouchEnd);
       return () => {
         document.removeEventListener('mousemove', handleMouseMove);
         document.removeEventListener('mouseup', handleMouseUp);
+        document.removeEventListener('touchmove', handleTouchMove);
+        document.removeEventListener('touchend', handleTouchEnd);
       };
     }
   }, [isResizing, startX, startWidth, onWidthChange]);
@@ -278,6 +304,7 @@ export default function ConversationSidebar({
       {/* Resizable handle - LEFT side (drag to resize) */}
       <div
         onMouseDown={handleMouseDown}
+        onTouchStart={handleTouchStart}
         className={`absolute -left-1 top-0 w-2 h-full hover:bg-farm-blue/30 cursor-col-resize transition-colors z-10 ${
           isResizing ? "bg-farm-blue/50" : "bg-transparent"
         }`}

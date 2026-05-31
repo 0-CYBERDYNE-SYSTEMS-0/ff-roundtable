@@ -244,7 +244,7 @@ export default function SidebarPanel({
         {/* Version Info */}
         <div className="p-4 text-xs text-neutral-600 mt-auto border-t border-farm-tan/30 bg-gradient-to-br from-farm-powder/10 to-farm-tan/10">
           <p className="font-semibold text-farm-blue">Farm Friend Roundtable v1.0.0</p>
-          <p className="mt-1">© 2023 Farm Friend Technologies</p>
+          <p className="mt-1">© 2026 Farm Friend Technologies</p>
         </div>
       </div>
     </aside>

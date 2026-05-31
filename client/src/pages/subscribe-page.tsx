@@ -11,8 +11,8 @@ import { Redirect } from 'wouter';
 import Header from "@/components/layout/Header";
 import { queryClient } from '@/lib/queryClient';
 
-// Development mode flag - set to true to bypass payment checks
-const DEVELOPMENT_MODE = true;
+// Development mode flag - uses Vite's env to determine dev vs production
+const DEVELOPMENT_MODE = import.meta.env.DEV;
 
 // Check for Stripe public key
 const stripeKey = import.meta.env.VITE_STRIPE_PUBLIC_KEY;

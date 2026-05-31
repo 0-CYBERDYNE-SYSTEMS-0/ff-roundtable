@@ -44,8 +44,8 @@ if (process.env.STRIPE_SECRET_KEY) {
   console.warn("No STRIPE_SECRET_KEY provided. Stripe functionality will be unavailable.");
 }
 
-// Development mode flag - set to true for easier authentication
-const DEVELOPMENT_MODE = true;
+// Development mode flag - uses NODE_ENV to determine dev vs production
+const DEVELOPMENT_MODE = process.env.NODE_ENV !== "production";
 
 export async function registerRoutes(app: Express): Promise<Server> {
   // Setup authentication routes
@@ -54,6 +54,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Special development login endpoint
   if (DEVELOPMENT_MODE) {
     app.post("/api/dev-login", async (req, res) => {
+      // Hard gate: never allow dev endpoints in production
+      if (process.env.NODE_ENV === "production") {
+        return res.status(404).json({ message: "Not found" });
+      }
       try {
         // Try to get the development user
         const devUser = await storage.getUserByUsername("developer");
@@ -78,6 +82,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
     // Quick setup endpoint for testing
     if (devConfig && devConfig.enabled) {
       app.post("/api/dev/quick-setup", async (req, res) => {
+        // Hard gate: never allow dev endpoints in production
+        if (process.env.NODE_ENV === "production") {
+          return res.status(404).json({ message: "Not found" });
+        }
         try {
           const userId = req.user?.id;
           if (!userId) {
@@ -90,15 +98,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
             title: "Quick Test Roundtable"
           });
 
-          // Add all experts from config
-          // In test mode, all experts use deepseek/deepseek-v3.2
-          const testModel = "deepseek/deepseek-v3.2";
+          // Add all experts from config — each with their assigned model
           const expertPromises = devConfig.experts.map((expert: any) =>
             storage.createExpert({
               conversationId: conversation.id,
               name: expert.name,
               role: expert.role,
-              model: testModel, // Force all experts to use test model
+              model: expert.model, // Use each expert's specific model from dev-config
               avatarUrl: expert.avatarUrl,
               systemPrompt: generateSystemPrompt({ role: expert.role } as Expert, undefined)
             })
@@ -118,6 +124,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       // Endpoint to update all experts in a conversation to use test model
       app.post("/api/dev/update-models/:conversationId", async (req, res) => {
+        // Hard gate: never allow dev endpoints in production
+        if (process.env.NODE_ENV === "production") {
+          return res.status(404).json({ message: "Not found" });
+        }
         try {
           const userId = req.user?.id;
           if (!userId) {
@@ -132,7 +142,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           }
 
           const experts = await storage.getConversationExperts(conversationId);
-          const testModel = "deepseek/deepseek-v3.2";
+          const testModel = devConfig.experts[0]?.model || "deepseek/deepseek-v4-flash:free";
 
           // Update all experts to use the test model
           const updatePromises = experts.map((expert) =>
@@ -892,6 +902,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // TEST ENDPOINT - Development only
   if (DEVELOPMENT_MODE) {
     app.post("/api/dev/test-artifacts/:conversationId", async (req, res) => {
+      // Hard gate: never allow dev endpoints in production
+      if (process.env.NODE_ENV === "production") {
+        return res.status(404).json({ message: "Not found" });
+      }
       try {
         const conversationId = parseInt(req.params.conversationId);
         

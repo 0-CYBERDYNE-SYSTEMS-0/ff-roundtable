@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { useAuth } from "@/hooks/use-auth";
+import { useIsMobile } from "@/hooks/use-mobile";
 import Header from "@/components/layout/Header";
 import SidebarPanel from "@/components/sidebar/SidebarPanel";
 import ChatInterface from "@/components/chat/ChatInterface";
@@ -13,7 +14,7 @@ import FarmProfileModal from "@/components/farm/FarmProfileModal";
 import { useWebSocket } from "@/lib/websocket-utils";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { PlayIcon, PauseIcon, SettingsIcon, ZapIcon, ZapOffIcon, Zap } from "lucide-react";
+import { PlayIcon, PauseIcon, SettingsIcon, ZapIcon, ZapOffIcon, Zap, Menu } from "lucide-react";
 
 // Define the type for interaction modes matching the backend
 type InteractionMode = 
@@ -25,11 +26,13 @@ type InteractionMode =
 export default function HomePage() {
   const { user } = useAuth();
   const { toast } = useToast();
+  const isMobile = useIsMobile();
   const [activeConversation, setActiveConversation] = useState<number | null>(null);
   const [selectedExperts, setSelectedExperts] = useState<Expert[]>([]);
   const [showExpertSelector, setShowExpertSelector] = useState(false);
   const [showFarmProfileModal, setShowFarmProfileModal] = useState(false);
   const [farmProfileModalDismissed, setFarmProfileModalDismissed] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   
   // Add state for interaction control
   const [interactionMode, setInteractionMode] = useState<InteractionMode>("idle");
@@ -593,21 +596,31 @@ export default function HomePage() {
     <div className="flex flex-col h-screen">
       <Header />
       
-      <div className="flex-1 flex overflow-hidden">
-        {/* Left Sidebar */}
-        <SidebarPanel
-          conversations={conversations || []}
-          insights={insights || []}
-          files={files || []}
-          onStartNewSession={handleStartNewSession}
-          onExportMarkdown={exportMarkdown}
-          onFileUpload={handleFileUpload}
-          onSelectConversation={setActiveConversation}
-          activeConversationId={activeConversation}
-          onRefreshInsights={() => generateInsightsMutation.mutate()}
-          isLoadingInsights={generateInsightsMutation.isPending}
-          experts={experts || []}
-        />
+      <div className="flex-1 flex overflow-hidden relative">
+        {/* Left Sidebar - hidden on mobile unless toggled */}
+        <div className={`${isMobile ? 'absolute inset-y-0 left-0 z-30 transition-transform duration-300' : ''} ${isMobile && !sidebarOpen ? '-translate-x-full' : ''}`}>
+          <SidebarPanel
+            conversations={conversations || []}
+            insights={insights || []}
+            files={files || []}
+            onStartNewSession={handleStartNewSession}
+            onExportMarkdown={exportMarkdown}
+            onFileUpload={handleFileUpload}
+            onSelectConversation={setActiveConversation}
+            activeConversationId={activeConversation}
+            onRefreshInsights={() => generateInsightsMutation.mutate()}
+            isLoadingInsights={generateInsightsMutation.isPending}
+            experts={experts || []}
+          />
+        </div>
+
+        {/* Mobile sidebar overlay */}
+        {isMobile && sidebarOpen && (
+          <div 
+            className="absolute inset-0 bg-black/50 z-20"
+            onClick={() => setSidebarOpen(false)}
+          />
+        )}
         
         {/* Main Content Area */}
         <div className="flex-1 flex flex-col overflow-hidden min-h-0">
@@ -620,6 +633,17 @@ export default function HomePage() {
             {activeConversation && (
                  <div className="flex-shrink-0 flex items-center justify-between px-6 py-3 border-b border-farm-tan/30 bg-gradient-to-r from-farm-powder/20 to-white shadow-sm">
                      <div className="flex items-center gap-3">
+                         {isMobile && (
+                           <Button
+                             variant="ghost" 
+                             size="icon"
+                             className="md:hidden"
+                             onClick={() => setSidebarOpen(!sidebarOpen)}
+                             aria-label="Toggle sidebar"
+                           >
+                             <Menu className="h-5 w-5" />
+                           </Button>
+                         )}
                          <span className="text-sm font-semibold text-farm-blue">Status:</span>
                          <Badge variant={interactionMode === 'paused' ? 'secondary' : interactionMode === 'idle' ? 'outline' : 'default'}
                                 className={`${interactionMode === 'autonomous' || interactionMode === 'processing_sequential' ? 'bg-farm-green/20 text-farm-dark-green border-farm-green' : ''}

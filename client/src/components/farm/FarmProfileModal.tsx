@@ -79,6 +79,10 @@ export default function FarmProfileModal({ isOpen, onClose, onSaved }: FarmProfi
   };
 
   const handleSave = async () => {
+    if (!form.farmName.trim()) {
+      setError("Farm name is required.");
+      return;
+    }
     setSaving(true);
     setError("");
 
@@ -140,6 +144,7 @@ export default function FarmProfileModal({ isOpen, onClose, onSaved }: FarmProfi
             <Input
               id="farmName"
               placeholder="Green Acres Farm"
+              required
               value={form.farmName}
               onChange={(e) => handleChange("farmName", e.target.value)}
             />
@@ -161,6 +166,8 @@ export default function FarmProfileModal({ isOpen, onClose, onSaved }: FarmProfi
             <Label htmlFor="lat">Latitude (optional)</Label>
             <Input
               id="lat"
+              type="number"
+              step="any"
               placeholder="43.6150"
               value={form.lat}
               onChange={(e) => handleChange("lat", e.target.value)}
@@ -170,6 +177,8 @@ export default function FarmProfileModal({ isOpen, onClose, onSaved }: FarmProfi
             <Label htmlFor="lng">Longitude (optional)</Label>
             <Input
               id="lng"
+              type="number"
+              step="any"
               placeholder="-116.2023"
               value={form.lng}
               onChange={(e) => handleChange("lng", e.target.value)}
@@ -181,6 +190,7 @@ export default function FarmProfileModal({ isOpen, onClose, onSaved }: FarmProfi
             <Input
               id="acres"
               type="number"
+              min="0"
               placeholder="200"
               value={form.acres || ""}
               onChange={(e) => handleChange("acres", parseInt(e.target.value) || 0)}

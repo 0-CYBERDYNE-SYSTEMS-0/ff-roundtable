@@ -4,25 +4,25 @@
     {
       "name": "Dr. Sarah Chen",
       "role": "Soil Scientist",
-      "model": "deepseek/deepseek-v3.2",
+      "model": "nvidia/nemotron-3-super-120b-a12b:free",
       "avatarUrl": "https://images.unsplash.com/photo-1494790108377-be9c29b29330?ixlib=rb-1.2.1&auto=format&fit=facearea&facepad=2&w=256&h=256&q=80"
     },
     {
       "name": "James Patterson",
       "role": "Crop Specialist",
-      "model": "deepseek/deepseek-v3.2",
+      "model": "z-ai/glm-4.5-air:free",
       "avatarUrl": "https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?ixlib=rb-1.2.1&auto=format&fit=facearea&facepad=2&w=256&h=256&q=80"
     },
     {
       "name": "Dr. Maria Rodriguez",
       "role": "Irrigation Engineer",
-      "model": "deepseek/deepseek-v3.2",
+      "model": "minimax/minimax-m2.5:free",
       "avatarUrl": "https://images.unsplash.com/photo-1438761681033-6461ffad8d80?ixlib=rb-1.2.1&auto=format&fit=facearea&facepad=2&w=256&h=256&q=80"
     },
     {
       "name": "Research Scout",
       "role": "Research Analyst",
-      "model": "deepseek/deepseek-v3.2",
+      "model": "inclusionai/ring-2.6-1t:free",
       "avatarUrl": "https://images.unsplash.com/photo-1551836022-d5d88e9218df?ixlib=rb-1.2.1&auto=format&fit=facearea&facepad=2&w=256&h=256&q=80"
     }
   ]

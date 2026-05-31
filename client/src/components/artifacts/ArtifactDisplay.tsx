@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { LineChart, Line, BarChart, Bar, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from "recharts";
 import DOMPurify from "isomorphic-dompurify";
+import { cn } from "@/lib/utils";
 
 interface ArtifactDisplayProps {
   artifact: Artifact;
