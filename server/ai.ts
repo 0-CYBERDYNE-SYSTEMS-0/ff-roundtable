@@ -7,6 +7,7 @@ import path from "path";
 import fs from "fs";
 import axios from "axios";
 import { randomBytes } from "crypto";
+import { getProvider } from "./ai-providers";
 
 // Define the structure for messages sent to AI APIs
 export interface AIMessage {
@@ -206,157 +207,20 @@ When appropriate, explain how weather conditions impact farming decisions and ri
   return basePrompt + interactionPrompt + roleInstructions;
 }
 
-// Function to call OpenRouter API
+// Function to call AI API (routes through provider abstraction)
 export async function callOpenRouterAPI(messages: AIMessage[], model: string): Promise<AIModelResponse> {
-  console.log(`[DEBUG] Entering callOpenRouterAPI for model: ${model}`);
-  try {
-    const openRouterKey = process.env.OPENROUTER_API_KEY;
-    if (!openRouterKey) {
-      console.error("[DEBUG] OpenRouter API key not provided");
-      throw new Error("OpenRouter API key not provided");
-    }
-    
-    console.log(`[DEBUG] Calling OpenRouter fetch: https://openrouter.ai/api/v1/chat/completions, Model: ${model}`);
-    
-    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${openRouterKey}`,
-        "HTTP-Referer": "https://farm-friend-roundtable.replit.app",
-        "X-Title": "Farm Friend Roundtable"
-      },
-      body: JSON.stringify({
-        model: model,
-        messages: messages,
-        temperature: 0.7,
-        max_tokens: 8192,
-      }),
-    });
-    
-    console.log(`[DEBUG] OpenRouter fetch completed. Status: ${response.status}`);
-    
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error(`[DEBUG] OpenRouter API Error Response Text: ${errorText}`);
-      throw new Error(`OpenRouter API Error (${response.status}): ${errorText}`);
-    }
-    
-    console.log("[DEBUG] OpenRouter response OK. Parsing JSON...");
-    const data = await response.json();
-    console.log("[DEBUG] OpenRouter JSON parsed successfully.");
-    
-    if (data && data.error) {
-        console.error(`[DEBUG] OpenRouter returned error object despite 200 OK:`, JSON.stringify(data.error));
-        const errorMsg = data.error.message || JSON.stringify(data.error);
-        throw new Error(`OpenRouter Provider Error: ${errorMsg}`);
-    }
-
-    if (!data || !data.choices || !Array.isArray(data.choices) || data.choices.length === 0 || !data.choices[0] || !data.choices[0].message) {
-      console.error("[DEBUG] Invalid/Incomplete response structure from OpenRouter API:", JSON.stringify(data));
-      throw new Error("Invalid response format from OpenRouter API");
-    }
-    
-    console.log("[DEBUG] OpenRouter response structure validated. Returning message.");
-    return {
-      message: data.choices[0].message
-    };
-  } catch (error: unknown) {
-    console.error("[DEBUG] Error caught within callOpenRouterAPI:", error);
-    if (error instanceof Error) {
-      throw error;
-    } else {
-      throw new Error(`Unknown error in callOpenRouterAPI: ${String(error)}`);
-    }
-  }
+  const provider = getProvider(model);
+  return provider.chat(messages, model);
 }
 
-// Function to call OpenRouter API with streaming (SSE)
+// Function to call AI API with streaming (SSE) — routes through provider abstraction
 export async function callOpenRouterAPIStream(
   messages: AIMessage[], 
   model: string,
   onToken: (token: string) => void
 ): Promise<AIModelResponse> {
-  console.log(`[STREAM] Starting stream for model: ${model}`);
-  try {
-    const openRouterKey = process.env.OPENROUTER_API_KEY;
-    if (!openRouterKey) {
-      throw new Error("OpenRouter API key not provided");
-    }
-    
-    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${openRouterKey}`,
-        "HTTP-Referer": "https://farm-friend-roundtable.replit.app",
-        "X-Title": "Farm Friend Roundtable"
-      },
-      body: JSON.stringify({
-        model: model,
-        messages: messages,
-        temperature: 0.7,
-        max_tokens: 8192,
-        stream: true,
-      }),
-    });
-    
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`OpenRouter API Error (${response.status}): ${errorText}`);
-    }
-
-    if (!response.body) {
-      throw new Error("No response body for streaming");
-    }
-
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let fullContent = "";
-    let buffer = "";
-
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed || !trimmed.startsWith("data: ")) continue;
-          
-          const data = trimmed.slice(6);
-          if (data === "[DONE]") continue;
-
-          try {
-            const parsed = JSON.parse(data);
-            const content = parsed?.choices?.[0]?.delta?.content;
-            if (content) {
-              fullContent += content;
-              onToken(content);
-            }
-          } catch {
-            // Skip unparseable chunks
-          }
-        }
-      }
-    } finally {
-      reader.releaseLock();
-    }
-
-    console.log(`[STREAM] Complete for ${model}. ${fullContent.length} chars`);
-    
-    return {
-      message: { role: "assistant", content: fullContent }
-    };
-  } catch (error: unknown) {
-    console.error("[STREAM] Error:", error);
-    if (error instanceof Error) throw error;
-    throw new Error(`Unknown error in callOpenRouterAPIStream: ${String(error)}`);
-  }
+  const provider = getProvider(model);
+  return provider.chatStream(messages, model, onToken);
 }
 
 // Function to call Perplexity API for web search

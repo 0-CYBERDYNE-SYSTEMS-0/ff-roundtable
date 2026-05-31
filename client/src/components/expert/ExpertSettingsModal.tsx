@@ -22,7 +22,7 @@ export default function ExpertSettingsModal({
   onClose,
   onSave
 }: ExpertSettingsModalProps) {
-  const [customInstructions, setCustomInstructions] = useState(expert?.customInstructions || "");
+  const [customInstructions, setCustomInstructions] = useState("");
   const [name, setName] = useState(expert?.name || "");
   const [model, setModel] = useState(expert?.model || "");
 
@@ -32,7 +32,6 @@ export default function ExpertSettingsModal({
     onSave(expert.id, {
       name,
       model,
-      customInstructions: customInstructions.trim() || undefined
     });
     onClose();
   };
@@ -133,7 +132,6 @@ export default function ExpertSettingsModal({
                 <div className="space-y-1 text-xs text-neutral-600">
                   <p><strong>Conversation ID:</strong> {expert.conversationId}</p>
                   <p><strong>Expert ID:</strong> {expert.id}</p>
-                  <p><strong>Created:</strong> {expert.createdAt ? new Date(expert.createdAt).toLocaleDateString() : 'N/A'}</p>
                 </div>
               </div>
             </div>

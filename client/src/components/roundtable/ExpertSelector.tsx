@@ -12,6 +12,10 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { Separator } from "@/components/ui/separator";
+import {
+  Dialog,
+  DialogContent,
+} from "@/components/ui/dialog";
 
 // --- Define type for OpenRouter Model ---
 interface OpenRouterModel {
@@ -31,6 +35,8 @@ const FALLBACK_MODELS: OpenRouterModel[] = [
   { id: "anthropic/claude-3-sonnet", name: "Claude 3 Sonnet", description: "Anthropic's Claude 3 Sonnet model" },
   { id: "meta-llama/llama-3-8b-instruct", name: "Llama 3 8B", description: "Meta's Llama 3 8B model" },
   { id: "google/gemini-pro", name: "Gemini Pro", description: "Google's Gemini Pro model" },
+  { id: "local/llama3", name: "Llama 3 (Local)", description: "Local Llama 3 via ollama/LM Studio/llama.cpp" },
+  { id: "local/codestral", name: "Codestral (Local)", description: "Local Codestral via ollama/LM Studio/llama.cpp" },
 ];
 
 // Expert categories for better organization
@@ -403,7 +409,8 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
   const recommendedExperts = availableExperts.filter(expert => expert.recommended);
 
   return (
-    <div className="absolute inset-0 bg-white bg-opacity-95 z-10 flex flex-col p-4 md:p-6">
+    <Dialog open={true} onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto p-4 md:p-6">
       <div className="flex justify-between items-center mb-2">
         <h2 className="font-serif font-bold text-xl md:text-2xl">Select Your Expert Team</h2>
         <Button variant="ghost" size="icon" onClick={onClose}>
@@ -567,6 +574,7 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
           Add {selectedCount > 0 ? `${selectedCount} ` : ''}Expert{selectedCount !== 1 ? 's' : ''} to Roundtable
         </Button>
       </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }

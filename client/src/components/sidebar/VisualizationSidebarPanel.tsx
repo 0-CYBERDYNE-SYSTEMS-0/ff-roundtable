@@ -1,6 +1,5 @@
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { BarChartIcon, TableIcon, AlertTriangleIcon, LineChartIcon, PieChartIcon, FileTextIcon } from "lucide-react";
-import { Visualization } from "@shared/schema";
 import {
   ResponsiveContainer,
   BarChart,
@@ -23,7 +22,15 @@ import { RefreshCwIcon } from "lucide-react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
-import { useParams } from "react-router-dom";
+import { useParams } from "wouter";
+
+interface Visualization {
+  id: number;
+  type: 'bar' | 'line' | 'pie' | 'table' | 'text';
+  title: string;
+  description?: string | null;
+  data: any;
+}
 
 interface VisualizationSidebarPanelProps {
   visualizations: Visualization[]; // Use the imported type
@@ -38,8 +45,8 @@ export default function VisualizationSidebarPanel({
   className
 }: VisualizationSidebarPanelProps) {
   const { toast } = useToast();
-  const params = useParams<{ conversationId?: string }>();
-  const conversationId = params.conversationId ? parseInt(params.conversationId, 10) : null;
+  const params = useParams();
+  const conversationId = params.conversationId ? parseInt(params.conversationId as string, 10) : null;
 
   const generateVisualizationsMutation = useMutation({
     mutationFn: async () => {
@@ -131,7 +138,7 @@ export default function VisualizationSidebarPanel({
                    );
                  }}
               >
-                {chartData.map((entry, index) => (
+                {chartData.map((entry: any, index: number) => (
                   <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
                 ))}
               </Pie>
@@ -153,7 +160,7 @@ export default function VisualizationSidebarPanel({
               </TableRow>
             </TableHeader>
             <TableBody>
-              {viz.data.map((row, rowIndex) => (
+              {viz.data.map((row: Record<string, any>, rowIndex: number) => (
                 <TableRow key={rowIndex}>
                   {headers.map(header => <TableCell key={header}>{String(row[header])}</TableCell>)}
                 </TableRow>

@@ -3,7 +3,7 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { Paperclip, Send, Loader2 } from "lucide-react";
+import { Paperclip, Send, Loader2, Users } from "lucide-react";
 import { Message, Expert, User } from "@shared/schema";
 import { format } from "date-fns";
 import ReactMarkdown from "react-markdown";
@@ -13,6 +13,8 @@ import ModelBadge from "../roundtable/ModelBadge";
 import ConversationSidebar from "../roundtable/ConversationSidebar";
 import ArtifactDisplay from "../artifacts/ArtifactDisplay";
 import ExpertSettingsModal from "../expert/ExpertSettingsModal";
+import { useIsMobile } from "@/hooks/use-mobile";
+import { useQueryClient } from "@tanstack/react-query";
 
 interface ChatInterfaceProps {
   messages: Message[];
@@ -39,6 +41,7 @@ export default function ChatInterface({
   streamingMessages = new Map(),
   typingExpertIds = new Set(),
 }: ChatInterfaceProps) {
+  const queryClient = useQueryClient();
   const [messageContent, setMessageContent] = useState("");
   const [expertsCollapsed, setExpertsCollapsed] = useState(false);
   const [rightSidebarWidth, setRightSidebarWidth] = useState(400);
@@ -46,6 +49,8 @@ export default function ChatInterface({
   const [isExpertModalOpen, setIsExpertModalOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const isMobile = useIsMobile();
+  const [showMobileExpertPanel, setShowMobileExpertPanel] = useState(false);
 
   // Get background color for expert based on ID - using farm theme
   const getExpertBubbleColor = (expertId: number) => {
@@ -118,8 +123,12 @@ export default function ChatInterface({
         throw new Error('Failed to update expert');
       }
 
-      // Refresh the page or update local state
-      window.location.reload();
+      // Invalidate relevant queries to refresh data
+      const expert = experts.find(e => e.id === expertId);
+      if (expert) {
+        queryClient.invalidateQueries({ queryKey: ['conversation', expert.conversationId] });
+        queryClient.invalidateQueries({ queryKey: ['experts', expert.conversationId] });
+      }
     } catch (error) {
       console.error('Error updating expert:', error);
       alert('Failed to update expert. Please try again.');
@@ -220,7 +229,7 @@ export default function ChatInterface({
   return (
     <div className="w-full flex h-full overflow-hidden">
       {/* Left Sidebar - Experts List */}
-      <div className={`flex-shrink-0 bg-gradient-to-b from-farm-powder/30 to-white border-r border-neutral-200 transition-all duration-300 ${expertsCollapsed ? 'w-12' : 'w-64'}`}>
+      <div className={`flex-shrink-0 bg-gradient-to-b from-farm-powder/30 to-white border-r border-neutral-200 transition-all duration-300 md:flex ${isMobile && !showMobileExpertPanel ? 'hidden' : ''} ${expertsCollapsed ? 'w-12' : 'w-64'}`}>
         <div className="h-full flex flex-col">
           <div className="p-3 border-b border-neutral-200 flex items-center justify-between">
             {!expertsCollapsed && <h3 className="font-semibold text-farm-blue text-sm">Expert Panel</h3>}
@@ -490,9 +499,21 @@ export default function ChatInterface({
         )}
       </div>
 
+      {/* Floating button to toggle expert panel on mobile */}
+      {isMobile && (
+        <Button
+          className="fixed bottom-20 right-4 z-20 rounded-full w-12 h-12 shadow-lg bg-farm-blue hover:bg-farm-dark-green text-white"
+          size="icon"
+          onClick={() => setShowMobileExpertPanel(!showMobileExpertPanel)}
+          title={showMobileExpertPanel ? "Hide experts" : "Show experts"}
+        >
+          <Users className="h-5 w-5" />
+        </Button>
+      )}
+
       {/* Right Sidebar - Resizable */}
       <div
-        className="flex-shrink-0 bg-white h-full overflow-hidden"
+        className="flex-shrink-0 bg-white h-full overflow-hidden hidden md:block"
         style={{ width: `${rightSidebarWidth}px` }}
       >
         <ConversationSidebar

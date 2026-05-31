@@ -30,8 +30,8 @@ const registerSchema = insertUserSchema.extend({
 type LoginFormValues = z.infer<typeof loginSchema>;
 type RegisterFormValues = z.infer<typeof registerSchema>;
 
-// Development mode flag - set to true to enable quick login for dev
-const DEVELOPMENT_MODE = true;
+// Development mode flag - uses Vite's env to determine dev vs production
+const DEVELOPMENT_MODE = import.meta.env.DEV;
 
 export default function AuthPage() {
   const { user, isLoading, loginMutation, registerMutation } = useAuth();

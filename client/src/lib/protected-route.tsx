@@ -4,8 +4,8 @@ import { Redirect, Route } from "wouter";
 import { useEffect, useState } from "react";
 import { useToast } from "@/hooks/use-toast";
 
-// Set to true to bypass subscription checks during development
-const DEVELOPMENT_MODE = true;
+// Uses Vite's env to bypass subscription checks during development
+const DEVELOPMENT_MODE = import.meta.env.DEV;
 
 export function ProtectedRoute({
   path,

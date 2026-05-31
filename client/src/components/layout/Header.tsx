@@ -7,7 +7,7 @@ import {
   DropdownMenuSeparator, 
   DropdownMenuTrigger 
 } from "@/components/ui/dropdown-menu";
-import { ChevronDown, LogOut, Settings, User } from "lucide-react";
+import { ChevronDown, LogOut } from "lucide-react";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { useState, useEffect } from "react";
 
@@ -62,14 +62,6 @@ export default function Header() {
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-48">
-              <DropdownMenuItem className="flex items-center cursor-pointer hover:bg-farm-powder/20">
-                <User className="mr-2 h-4 w-4 text-farm-blue" />
-                <span>Profile</span>
-              </DropdownMenuItem>
-              <DropdownMenuItem className="flex items-center cursor-pointer hover:bg-farm-powder/20">
-                <Settings className="mr-2 h-4 w-4 text-farm-blue" />
-                <span>Settings</span>
-              </DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuItem
                 className="flex items-center cursor-pointer text-red-600 hover:bg-red-50"
