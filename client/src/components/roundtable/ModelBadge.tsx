@@ -4,10 +4,11 @@ import { cn } from "@/lib/utils";
 // Expanded props to include optional name and showId flag
 interface ModelBadgeProps {
   modelId: string;
-  modelName?: string; // Optional: Display name for the model
+  modelName?: string;
   size?: "sm" | "default";
-  showId?: boolean; // Optional: Force showing the ID even if name exists (defaults to false)
+  showId?: boolean;
   className?: string;
+  userTier?: string;
 }
 
 // Helper to format model ID for display if name isn't available
@@ -57,7 +58,8 @@ export default function ModelBadge({
   modelName,
   size = "default", 
   showId = false,
-  className 
+  className,
+  userTier,
 }: ModelBadgeProps) {
   
   let bgColor = "bg-neutral-100";
@@ -113,21 +115,31 @@ export default function ModelBadge({
     ? `${modelName} (${formatModelId(modelId)})` 
     : displayName;
 
+  const isPaid = !modelId.endsWith(":free") && !modelId.startsWith("local/");
+
   return (
-    <Badge 
-      className={cn(
-        bgColor, 
-        textColor,
-        borderColor,
-        sizeClasses,
-        "font-medium border whitespace-nowrap flex items-center gap-1", 
-        className
+    <div className="flex items-center gap-1.5">
+      <Badge 
+        className={cn(
+          bgColor, 
+          textColor,
+          borderColor,
+          sizeClasses,
+          "font-medium border whitespace-nowrap flex items-center gap-1", 
+          className
+        )}
+        title={modelId}
+      >
+        <span>{providerLogo}</span>
+        <span>{fullText}</span>
+        {modelDetails && <span className="bg-white bg-opacity-50 rounded px-1 text-[0.65rem] font-medium">{modelDetails}</span>}
+      </Badge>
+      {userTier === "free" && isPaid && (
+        <Badge variant="secondary" className="text-[10px] px-1 py-0">PRO</Badge>
       )}
-      title={modelId} // Show full ID on hover
-    >
-      <span>{providerLogo}</span>
-      <span>{fullText}</span>
-      {modelDetails && <span className="bg-white bg-opacity-50 rounded px-1 text-[0.65rem] font-medium">{modelDetails}</span>}
-    </Badge>
+      {userTier === "free" && isPaid && (
+        <span className="text-[10px] text-muted-foreground">Upgrade to use</span>
+      )}
+    </div>
   );
 }

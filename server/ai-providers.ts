@@ -1,28 +1,49 @@
 import type { AIMessage, AIModelResponse } from './ai';
 
+const AI_REQUEST_TIMEOUT_MS = 120_000;
+
 // ─── Provider Interface ───────────────────────────────────────────────────────
 
 export interface AIProvider {
-  chat(messages: AIMessage[], model: string): Promise<AIModelResponse>;
+  chat(messages: AIMessage[], model: string, userId?: number): Promise<AIModelResponse>;
   chatStream(
     messages: AIMessage[],
     model: string,
-    onToken: (token: string) => void
+    onToken: (token: string) => void,
+    userId?: number
   ): Promise<AIModelResponse>;
 }
 
 // ─── OpenRouter Provider ───────────────────────────────────────────────────────
 
 export class OpenRouterProvider implements AIProvider {
-  async chat(messages: AIMessage[], model: string): Promise<AIModelResponse> {
+  private async getApiKey(userId?: number): Promise<string> {
+    // If a userId is provided, try to use their stored BYOK key first
+    if (userId) {
+      try {
+        const { storage } = await import("./storage");
+        const userKey = await storage.getUserApiKey(userId);
+        if (userKey) {
+          console.log(`[BYOK] Using user-provided API key for user ${userId}`);
+          return userKey;
+        }
+      } catch (err) {
+        console.warn("[BYOK] Failed to retrieve user API key:", (err as Error).message);
+      }
+    }
+
+    // Fall back to platform key
+    const platformKey = process.env.OPENROUTER_API_KEY;
+    if (!platformKey) {
+      throw new Error("OpenRouter API key not provided");
+    }
+    return platformKey;
+  }
+
+  async chat(messages: AIMessage[], model: string, userId?: number): Promise<AIModelResponse> {
     console.log(`[DEBUG] Entering OpenRouterProvider.chat for model: ${model}`);
     try {
-      const openRouterKey = process.env.OPENROUTER_API_KEY;
-      if (!openRouterKey) {
-        console.error("[DEBUG] OpenRouter API key not provided");
-        throw new Error("OpenRouter API key not provided");
-      }
-
+      const openRouterKey = await this.getApiKey(userId);
       console.log(`[DEBUG] Calling OpenRouter fetch: https://openrouter.ai/api/v1/chat/completions, Model: ${model}`);
 
       const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
@@ -39,6 +60,7 @@ export class OpenRouterProvider implements AIProvider {
           temperature: 0.7,
           max_tokens: 8192,
         }),
+        signal: AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS),
       });
 
       console.log(`[DEBUG] OpenRouter fetch completed. Status: ${response.status}`);
@@ -81,14 +103,12 @@ export class OpenRouterProvider implements AIProvider {
   async chatStream(
     messages: AIMessage[],
     model: string,
-    onToken: (token: string) => void
+    onToken: (token: string) => void,
+    userId?: number
   ): Promise<AIModelResponse> {
     console.log(`[STREAM] Starting OpenRouter stream for model: ${model}`);
     try {
-      const openRouterKey = process.env.OPENROUTER_API_KEY;
-      if (!openRouterKey) {
-        throw new Error("OpenRouter API key not provided");
-      }
+      const openRouterKey = await this.getApiKey(userId);
 
       const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
         method: "POST",
@@ -105,6 +125,7 @@ export class OpenRouterProvider implements AIProvider {
           max_tokens: 8192,
           stream: true,
         }),
+        signal: AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS),
       });
 
       if (!response.ok) {
@@ -192,7 +213,7 @@ export class LocalOpenAIProvider implements AIProvider {
     return headers;
   }
 
-  async chat(messages: AIMessage[], model: string): Promise<AIModelResponse> {
+  async chat(messages: AIMessage[], model: string, _userId?: number): Promise<AIModelResponse> {
     const baseUrl = this.getBaseUrl();
     const actualModel = this.getActualModel(model);
 
@@ -208,6 +229,7 @@ export class LocalOpenAIProvider implements AIProvider {
           max_tokens: 8192,
           stream: false,
         }),
+        signal: AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS),
       });
 
       console.log(`[DEBUG] Local AI fetch completed. Status: ${response.status}`);
@@ -250,7 +272,8 @@ export class LocalOpenAIProvider implements AIProvider {
   async chatStream(
     messages: AIMessage[],
     model: string,
-    onToken: (token: string) => void
+    onToken: (token: string) => void,
+    _userId?: number
   ): Promise<AIModelResponse> {
     const baseUrl = this.getBaseUrl();
     const actualModel = this.getActualModel(model);
@@ -267,6 +290,7 @@ export class LocalOpenAIProvider implements AIProvider {
           max_tokens: 8192,
           stream: true,
         }),
+        signal: AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS),
       });
 
       if (!response.ok) {

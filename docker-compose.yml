@@ -1,0 +1,82 @@
+# FarmFriend Roundtable PRO — Docker Compose
+# Self-hosting stack: app + PostgreSQL + optional Ollama
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: farmfriend-app
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "5001:5001"
+    env_file:
+      - .env.production
+    environment:
+      # Override DATABASE_URL to use the internal Docker network hostname
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-farm_roundtable_prod}
+    volumes:
+      - ./uploads:/app/uploads
+    networks:
+      - farmfriend-net
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:5001/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  db:
+    image: postgres:16-alpine
+    container_name: farmfriend-db
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-farm_roundtable_prod}
+      POSTGRES_USER: ${POSTGRES_USER:-farmuser}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-farmpass}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - farmfriend-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-farmuser} -d ${POSTGRES_DB:-farm_roundtable_prod}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: farmfriend-ollama
+    restart: unless-stopped
+    profiles:
+      - ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - farmfriend-net
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    # GPU support is optional; Ollama falls back to CPU if no GPU available.
+
+volumes:
+  pgdata:
+    driver: local
+  ollama_data:
+    driver: local
+
+networks:
+  farmfriend-net:
+    driver: bridge

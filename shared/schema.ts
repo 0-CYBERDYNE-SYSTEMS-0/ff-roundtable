@@ -7,9 +7,11 @@ export const users = pgTable("users", {
   username: text("username").notNull().unique(),
   password: text("password").notNull(),
   email: text("email").notNull(),
+  tier: text("tier").default("free"),
   stripeCustomerId: text("stripe_customer_id"),
   stripeSubscriptionId: text("stripe_subscription_id"),
   subscriptionStatus: text("subscription_status").default("inactive"),
+  openRouterKey: text("open_router_key"),
   createdAt: timestamp("created_at").defaultNow(),
 });
 
@@ -27,6 +29,7 @@ export const experts = pgTable("experts", {
   role: text("role").notNull(),
   model: text("model").notNull(),
   systemPrompt: text("system_prompt").notNull(),
+  customInstructions: text("custom_instructions"),
   avatarUrl: text("avatar_url"),
 });
 
@@ -99,11 +102,14 @@ export const artifactSchema = z.object({
 export type Artifact = z.infer<typeof artifactSchema>;
 
 // Schemas
-export const insertUserSchema = createInsertSchema(users).omit({
+export const insertUserSchema = createInsertSchema(users, {
+  tier: z.enum(["free", "pro", "enterprise"]).optional(),
+}).omit({
   id: true,
   stripeCustomerId: true,
   stripeSubscriptionId: true,
   subscriptionStatus: true,
+  openRouterKey: true,
   createdAt: true,
 });
 

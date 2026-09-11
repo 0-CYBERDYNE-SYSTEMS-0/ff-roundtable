@@ -14,7 +14,7 @@ import FarmProfileModal from "@/components/farm/FarmProfileModal";
 import { useWebSocket } from "@/lib/websocket-utils";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { PlayIcon, PauseIcon, SettingsIcon, ZapIcon, ZapOffIcon, Zap, Menu } from "lucide-react";
+import { ZapIcon, ZapOffIcon, Menu } from "lucide-react";
 
 // Define the type for interaction modes matching the backend
 type InteractionMode = 
@@ -50,10 +50,14 @@ export default function HomePage() {
   const [typingExpertIds, setTypingExpertIds] = useState<Set<number>>(new Set());
 
   // WebSocket connection for real-time updates
-  const socket = useWebSocket();
+  const { socket, status: socketStatus, reconnectAttempts } = useWebSocket();
   
   // Fetch user's conversations
-  const { data: conversations, isLoading: isLoadingConversations } = useQuery<Conversation[]>({
+  const {
+    data: conversations,
+    isLoading: isLoadingConversations,
+    isError: conversationsError,
+  } = useQuery<Conversation[]>({
     queryKey: ["/api/protected/conversations"],
     enabled: !!user,
   });
@@ -130,25 +134,41 @@ export default function HomePage() {
   });
   
   // Fetch experts for active conversation
-  const { data: experts, isLoading: isLoadingExperts } = useQuery<Expert[]>({
+  const {
+    data: experts,
+    isLoading: isLoadingExperts,
+    isError: expertsError,
+  } = useQuery<Expert[]>({
     queryKey: [`/api/protected/conversations/${activeConversation}/experts`],
     enabled: !!activeConversation,
   });
   
   // Fetch messages for active conversation
-  const { data: messages, isLoading: isLoadingMessages } = useQuery<Message[]>({
+  const {
+    data: messages,
+    isLoading: isLoadingMessages,
+    isError: messagesError,
+  } = useQuery<Message[]>({
     queryKey: [`/api/protected/conversations/${activeConversation}/messages`],
     enabled: !!activeConversation,
   });
   
   // Fetch insights for active conversation
-  const { data: insights, isLoading: isLoadingInsights } = useQuery<Insight[]>({
+  const {
+    data: insights,
+    isLoading: isLoadingInsights,
+    isError: insightsError,
+  } = useQuery<Insight[]>({
     queryKey: [`/api/protected/conversations/${activeConversation}/insights`],
     enabled: !!activeConversation,
   });
   
   // Fetch files for active conversation
-  const { data: files, isLoading: isLoadingFiles } = useQuery<FileType[]>({
+  const {
+    data: files,
+    isLoading: isLoadingFiles,
+    isError: filesError,
+  } = useQuery<FileType[]>({
     queryKey: [`/api/protected/conversations/${activeConversation}/files`],
     enabled: !!activeConversation,
   });
@@ -158,38 +178,40 @@ export default function HomePage() {
     Message,
     Error,
     string,
-    { previousMessages?: Message[] }
+    { previousMessages?: Message[]; tempId?: number; conversationId?: number }
   >({
     mutationFn: async (content: string) => {
       if (!activeConversation) throw new Error("No active conversation");
       if (!user) throw new Error("User not authenticated");
 
-      const res = await apiRequest("POST", `/api/protected/conversations/${activeConversation}/messages`, { 
-        content, 
+      const res = await apiRequest("POST", `/api/protected/conversations/${activeConversation}/messages`, {
+        content,
         userId: user.id
       });
-      
+
       if (!res.ok) {
         const errorData = await res.json();
         throw new Error(errorData.message || 'Failed to send message');
       }
-      
+
       return await res.json();
     },
     onMutate: async (newMessageContent: string) => {
-      if (!activeConversation || !user) return;
+      if (!activeConversation || !user) return {};
 
-      const messagesQueryKey = [`/api/protected/conversations/${activeConversation}/messages`];
+      const conversationId = activeConversation;
+      const messagesQueryKey = [`/api/protected/conversations/${conversationId}/messages`];
 
       await queryClient.cancelQueries({ queryKey: messagesQueryKey });
 
       const previousMessages = queryClient.getQueryData<Message[]>(messagesQueryKey);
+      const tempId = Date.now();
 
       queryClient.setQueryData<Message[]>(messagesQueryKey, (old = []) => [
         ...old,
         {
-          id: Date.now(),
-          conversationId: activeConversation,
+          id: tempId,
+          conversationId,
           userId: user.id,
           expertId: null,
           content: newMessageContent,
@@ -200,28 +222,38 @@ export default function HomePage() {
         },
       ]);
 
-      return { previousMessages };
+      // Capture the conversation id — the settle-time callbacks must touch the
+      // cache this message belongs to, even if the user switches conversations
+      // while the POST is in flight.
+      return { previousMessages, tempId, conversationId };
     },
-    onError: (err, newMessageContent, context) => {
-      if (!activeConversation) return;
-      const messagesQueryKey = [`/api/protected/conversations/${activeConversation}/messages`];
-      
-      if (context?.previousMessages) {
+    onSuccess: (storedMessage, _content, context) => {
+      // Swap the optimistic temp message for the stored one. The WebSocket
+      // copy may have landed first, so tolerate both orderings.
+      if (!context?.conversationId || !context?.tempId) return;
+      const messagesQueryKey = [`/api/protected/conversations/${context.conversationId}/messages`];
+      queryClient.setQueryData<Message[]>(messagesQueryKey, (old = []) => {
+        const withoutTemp = old.filter(m => m.id !== context.tempId);
+        if (withoutTemp.some(m => m.id === storedMessage.id)) return withoutTemp;
+        return [...withoutTemp, storedMessage];
+      });
+    },
+    onError: (err, _newMessageContent, context) => {
+      if (!context?.conversationId) return;
+      const messagesQueryKey = [`/api/protected/conversations/${context.conversationId}/messages`];
+
+      if (context.previousMessages) {
         queryClient.setQueryData(messagesQueryKey, context.previousMessages);
+      } else if (context.tempId) {
+        queryClient.setQueryData<Message[]>(messagesQueryKey, (old = []) =>
+          old.filter(m => m.id !== context.tempId)
+        );
       }
       toast({
         title: "Failed to send message",
         description: err.message,
         variant: "destructive",
       });
-    },
-    onSettled: () => {
-      if (!activeConversation) return;
-      // const messagesQueryKey = [`/api/protected/conversations/${activeConversation}/messages`];
-      
-      console.log("Message mutation settled. Update will come via WebSocket.");
-      // Remove the invalidation call here
-      // queryClient.invalidateQueries({ queryKey: messagesQueryKey }); 
     },
   });
 
@@ -268,6 +300,9 @@ export default function HomePage() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: [`/api/protected/conversations/${activeConversation}/files`] });
+      // The server stores an "[Uploaded file: …]" chat message — refresh the
+      // transcript so it appears without waiting for a conversation switch.
+      queryClient.invalidateQueries({ queryKey: [`/api/protected/conversations/${activeConversation}/messages`] });
       toast({
         title: "File uploaded successfully",
       });
@@ -368,10 +403,16 @@ export default function HomePage() {
     window.open(`/api/protected/conversations/${activeConversation}/export`, "_blank");
   };
   
-  // Handle starting a new roundtable session
-  const handleStartNewSession = () => {
-    createConversationMutation.mutate();
-    setShowExpertSelector(true);
+  // Create the conversation before opening the selector so experts are added
+  // to the new conversation rather than the previously active one.
+  const handleStartNewSession = async () => {
+    if (createConversationMutation.isPending) return;
+    try {
+      await createConversationMutation.mutateAsync();
+      setShowExpertSelector(true);
+    } catch {
+      // The mutation owns the user-facing error toast.
+    }
   };
   
   // Handle adding experts to conversation
@@ -386,11 +427,33 @@ export default function HomePage() {
   // Handle uploading a file
   const handleFileUpload = (file: File) => {
     if (!file) return;
-    
+
+    // Match the server's multer limit so users get a friendly message instead
+    // of a raw JSON error after a full 10MB+ upload.
+    if (file.size > 10 * 1024 * 1024) {
+      toast({
+        title: "File too large",
+        description: `"${file.name}" is larger than the 10 MB limit.`,
+        variant: "destructive",
+      });
+      return;
+    }
+
     const formData = new FormData();
     formData.append("file", file);
-    
+
     uploadFileMutation.mutate(formData);
+  };
+
+  const handleSelectConversation = (conversationId: number) => {
+    setActiveConversation(conversationId);
+    setPendingMessages([]);
+    setIsQueueProcessing(false);
+    setStreamingMessages(new Map());
+    setTypingExpertIds(new Set());
+    setInteractionMode("idle");
+    setIsProcessing(false);
+    setSidebarOpen(false);
   };
   
   // Effect to set active conversation if none is selected but conversations exist
@@ -418,10 +481,30 @@ export default function HomePage() {
       setSelectedExperts(experts);
     }
   }, [experts]);
+
+  // A dropped socket cannot deliver a completed stream. Clear transient UI
+  // immediately, then refresh persisted data once the socket is back.
+  useEffect(() => {
+    if (!activeConversation) return;
+
+    if (socketStatus === "connected") {
+      queryClient.invalidateQueries({ queryKey: [`/api/protected/conversations/${activeConversation}/messages`] });
+      queryClient.invalidateQueries({ queryKey: [`/api/protected/conversations/${activeConversation}/experts`] });
+      queryClient.invalidateQueries({ queryKey: [`/api/protected/conversations/${activeConversation}/insights`] });
+      queryClient.invalidateQueries({ queryKey: [`/api/protected/conversations/${activeConversation}/files`] });
+      return;
+    }
+
+    setStreamingMessages(new Map());
+    setTypingExpertIds(new Set());
+    setIsProcessing(false);
+    setInteractionMode("idle");
+  }, [socketStatus, activeConversation]);
   
   // === WebSocket Message Handling ===
   useEffect(() => {
     if (!socket || !activeConversation) return;
+    const activeSocket = socket;
 
     const handleWebSocketMessage = (event: MessageEvent) => {
       try {
@@ -437,20 +520,26 @@ export default function HomePage() {
         // Handle different message types
         switch (parsedData.type) {
           case "messages_updated":
-          case "message_error": // Handle errors similarly to new messages for display
+          case "message_error":
+            if (parsedData.type === "message_error") {
+              setTypingExpertIds(prev => {
+                const next = new Set(prev);
+                if (typeof parsedData.expertId === "number") next.delete(parsedData.expertId);
+                else next.clear();
+                return next;
+              });
+              setStreamingMessages(prev => {
+                if (typeof parsedData.expertId !== "number") return new Map();
+                const next = new Map(prev);
+                next.delete(parsedData.expertId);
+                return next;
+              });
+            }
             // Check if the message data exists in the payload
             if (parsedData.message && parsedData.message.id) {
               const newMessage: Message = parsedData.message;
               const messagesQueryKey = [`/api/protected/conversations/${activeConversation}/messages`];
-              
-              // DEBUG: Check if artifacts are in the message
-              console.log("WebSocket message received:", {
-                id: newMessage.id,
-                hasArtifacts: !!newMessage.artifacts,
-                artifactsLength: newMessage.artifacts?.length || 0,
-                artifacts: newMessage.artifacts
-              });
-              
+
               // Update the query cache directly
               queryClient.setQueryData<Message[]>(messagesQueryKey, (oldData) => {
                 if (!oldData) return [newMessage]; // If cache is empty, start with new message
@@ -460,7 +549,6 @@ export default function HomePage() {
                 }
                 return [...oldData, newMessage];
               });
-              console.log("WebSocket: Added/updated message in cache.", newMessage.id);
               // DON'T set isProcessing to false here - let state_update control it
               // The spinner should keep showing until mode changes to "idle"
             } else {
@@ -546,6 +634,21 @@ export default function HomePage() {
              queryClient.invalidateQueries({ queryKey: [`/api/protected/conversations/${activeConversation}/insights`] });
              break;
 
+          case "error":
+            // Pipeline-level failure: tell the user and unstick the UI,
+            // otherwise isProcessing stays true and skeletons never clear.
+            console.error("WebSocket: Pipeline error:", parsedData.message);
+            toast({
+              title: "Something went wrong",
+              description: parsedData.message || "The experts couldn't process that. Please try again.",
+              variant: "destructive",
+            });
+            setStreamingMessages(new Map());
+            setTypingExpertIds(new Set());
+            setIsProcessing(false);
+            setInteractionMode("idle");
+            break;
+
           // Handle other types like connection confirmation, file updates etc. if needed
           case "connection":
             console.log("WebSocket: Connection confirmed.");
@@ -559,11 +662,11 @@ export default function HomePage() {
       }
     };
 
-    socket.addEventListener("message", handleWebSocketMessage);
+    activeSocket.addEventListener("message", handleWebSocketMessage);
 
     // Cleanup function
     return () => {
-      socket.removeEventListener("message", handleWebSocketMessage);
+      activeSocket.removeEventListener("message", handleWebSocketMessage);
     };
   }, [socket, activeConversation]); // Re-run effect if socket or active conversation changes
   
@@ -606,10 +709,18 @@ export default function HomePage() {
             onStartNewSession={handleStartNewSession}
             onExportMarkdown={exportMarkdown}
             onFileUpload={handleFileUpload}
-            onSelectConversation={setActiveConversation}
+            onSelectConversation={handleSelectConversation}
             activeConversationId={activeConversation}
             onRefreshInsights={() => generateInsightsMutation.mutate()}
             isLoadingInsights={generateInsightsMutation.isPending}
+            isLoadingConversations={isLoadingConversations}
+            conversationsError={conversationsError}
+            isLoadingInsightsData={isLoadingInsights}
+            insightsError={insightsError}
+            isLoadingFiles={isLoadingFiles}
+            filesError={filesError}
+            isStartingNewSession={createConversationMutation.isPending}
+            isUploading={uploadFileMutation.isPending}
             experts={experts || []}
           />
         </div>
@@ -624,11 +735,16 @@ export default function HomePage() {
         
         {/* Main Content Area */}
         <div className="flex-1 flex flex-col overflow-hidden min-h-0">
-            {/* Log state values just before rendering controls - Corrected JSX */} 
-            {activeConversation && (() => { 
-                console.log(`[Render Check] Mode: ${interactionMode}, AutoEnabled: ${isAutonomousEnabled}, EnablePending: ${enableAutoMutation.isPending}, DisablePending: ${disableAutoMutation.isPending}`);
-                return null; // Return null to render nothing
-            })()}
+            {socketStatus !== "connected" && (
+              <div
+                role="status"
+                aria-live="polite"
+                className="flex flex-wrap items-center gap-2 px-4 py-2 text-sm bg-farm-yellow/20 text-yellow-900 border-b border-farm-yellow/40"
+              >
+                <span>{socketStatus === "reconnecting" ? "Connection interrupted. Reconnecting…" : "Connecting to the roundtable…"}</span>
+                {reconnectAttempts > 0 && <span className="text-xs">Attempt {reconnectAttempts}</span>}
+              </div>
+            )}
             {/* === Interaction Control Bar (Positioned at the top of this column) === */}
             {activeConversation && (
                  <div className="flex-shrink-0 flex items-center justify-between px-6 py-3 border-b border-farm-tan/30 bg-gradient-to-r from-farm-powder/20 to-white shadow-sm">
@@ -705,7 +821,10 @@ export default function HomePage() {
                         experts={experts || []}
                         onSendMessage={handleSendMessage}
                         onUploadFile={handleFileUpload}
+                        isUploading={uploadFileMutation.isPending}
                         isLoading={sendMessageMutation.isPending || isProcessing}
+                        isLoadingMessages={isLoadingMessages}
+                        messagesError={messagesError}
                         user={user}
                         insights={insights || []}
                         visualizations={[]}
@@ -720,6 +839,7 @@ export default function HomePage() {
                             <div className="flex gap-4 justify-center">
                                 <button
                                     onClick={handleStartNewSession}
+                                    disabled={createConversationMutation.isPending}
                                     className="bg-farm-green text-white px-6 py-3 rounded-lg hover:bg-farm-dark-green transition-all duration-200 shadow-md hover:shadow-lg font-semibold"
                                 >
                                     Start New Roundtable

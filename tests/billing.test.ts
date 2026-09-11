@@ -59,10 +59,13 @@ vi.mock("stripe", () => {
   return { default: MockStripe };
 });
 
-import { registerRoutes } from "../server/routes";
+// NOTE: `server/routes` reads STRIPE_* env vars at module-import time, so it
+// MUST be imported lazily (below, inside createTestApp) — a static import
+// would be hoisted above the process.env setup and evaluate with no key.
 
 // ── Test app factory (fresh app per test group for isolation) ──
 async function createTestApp(): Promise<Express> {
+  const { registerRoutes } = await import("../server/routes");
   const app = express();
   app.use(express.json());
   app.use(express.urlencoded({ extended: false }));
@@ -576,7 +579,7 @@ describe("Billing System E2E", () => {
       expect(res.status).toBe(200);
     });
 
-    it("subscription status reflects changes after creation", async () => {
+    it("subscription activates only after invoice.payment_succeeded webhook", async () => {
       const agent = request.agent(app);
       await registerAndLogin(agent, "statuschg", "pass123");
 
@@ -584,7 +587,7 @@ describe("Billing System E2E", () => {
       const initial = await agent.get("/api/subscription-status");
       expect(initial.body.status).toBe("inactive");
 
-      // Create subscription
+      // Create subscription — must NOT unlock protected features yet
       mockStripeCustomerCreate.mockResolvedValue({
         id: "cus_statuschg",
       });
@@ -597,6 +600,26 @@ describe("Billing System E2E", () => {
 
       const createRes = await agent.post("/api/create-subscription");
       expect(createRes.status).toBe(200);
+
+      // Still inactive — creation alone is not payment
+      const afterCreate = await agent.get("/api/subscription-status");
+      expect(afterCreate.body.status).toBe("inactive");
+      expect(afterCreate.body.subscribed).toBe(false);
+
+      // The payment webhook is what activates the subscription
+      mockConstructEvent.mockReturnValue({
+        type: "invoice.payment_succeeded",
+        data: {
+          object: {
+            subscription: "sub_statuschg",
+          },
+        },
+      });
+      const webhookRes = await request(app)
+        .post("/api/webhook")
+        .set("stripe-signature", "valid_sig")
+        .send(JSON.stringify({ type: "invoice.payment_succeeded" }));
+      expect(webhookRes.status).toBe(200);
 
       // Now active
       const after = await agent.get("/api/subscription-status");

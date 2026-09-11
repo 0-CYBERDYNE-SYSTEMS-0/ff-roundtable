@@ -7,3 +7,4 @@ vite.config.ts.*
 .local/
 uploads/*
 .env
+cookies.txt

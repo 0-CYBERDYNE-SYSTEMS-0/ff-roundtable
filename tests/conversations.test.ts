@@ -26,6 +26,9 @@ import type { Express } from "express";
 process.env.DATABASE_URL = "";
 process.env.SESSION_SECRET = "vitest-conversation-secret";
 process.env.NODE_ENV = "test";
+// This suite performs many logins against one app; raise the per-app
+// login cap so the (correct) rate limiter doesn't cascade 429s.
+process.env.LOGIN_RATELIMIT_MAX = "1000";
 
 // ── Mock orchestrator (to avoid AI API calls when sending messages) ──
 const { mockProcessMessageTurnBased } = vi.hoisted(() => ({
@@ -354,7 +357,7 @@ describe("Conversations & Expert Flows", () => {
         .send({
           name: "Dr. Maria Soilson",
           role: "Soil Scientist",
-          model: "openai/gpt-4o",
+          model: "openai/gpt-4o:free",
           avatarUrl: "https://example.com/avatar1.png",
         });
 
@@ -362,7 +365,7 @@ describe("Conversations & Expert Flows", () => {
       expect(res.body).toHaveProperty("id");
       expect(res.body.name).toBe("Dr. Maria Soilson");
       expect(res.body.role).toBe("Soil Scientist");
-      expect(res.body.model).toBe("openai/gpt-4o");
+      expect(res.body.model).toBe("openai/gpt-4o:free");
       expect(res.body.avatarUrl).toBe("https://example.com/avatar1.png");
       expect(res.body.conversationId).toBe(convo.id);
       // System prompt should be generated
@@ -444,7 +447,7 @@ describe("Conversations & Expert Flows", () => {
       await addExpert(agent, convo.id, {
         name: "Expert Alpha",
         role: "Role A",
-        model: "model-a",
+        model: "model-a:free",
       });
       await addExpert(agent, convo.id, {
         name: "Expert Beta",
@@ -500,7 +503,7 @@ describe("Conversations & Expert Flows", () => {
       const expert = await addExpert(agentA, convo.id, {
         name: "Dr. A Expert",
         role: "Role A",
-        model: "model-a",
+        model: "model-a:free",
       });
 
       // User B tries to update it
@@ -764,12 +767,12 @@ describe("Conversations & Expert Flows", () => {
       const soilExpert = await addExpert(agent, convo.id, {
         name: "Dr. Terra",
         role: "Soil Scientist",
-        model: "openai/gpt-4o",
+        model: "openai/gpt-4o:free",
       });
       const weatherExpert = await addExpert(agent, convo.id, {
         name: "Sky Walker",
         role: "Meteorologist",
-        model: "anthropic/claude-3",
+        model: "anthropic/claude-3:free",
       });
 
       expect(soilExpert.name).toBe("Dr. Terra");

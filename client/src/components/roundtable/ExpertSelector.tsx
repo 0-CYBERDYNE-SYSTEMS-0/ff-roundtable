@@ -21,22 +21,30 @@ import {
 interface OpenRouterModel {
   id: string;
   name: string;
-  description: string; 
-  context_length?: number; 
-  // Add other relevant fields if needed from OpenRouter API response
+  description: string;
+  context_length?: number;
+  isFree?: boolean;
+  provider?: string;
+  pricing?: { prompt?: string; completion?: string };
 }
+
+// Keep in sync with isPaidModel() in server/tiers.ts: free models are exactly
+// the ones whose id ends with ":free" (the OpenRouter API has no isFree field).
+const isFreeModelId = (model: OpenRouterModel) =>
+  model.id.endsWith(":free") ||
+  (model.pricing?.prompt === "0" && model.pricing?.completion === "0");
 
 // --- Define reliable fallback models when OpenRouter API fails ---
 const FALLBACK_MODELS: OpenRouterModel[] = [
-  { id: "deepseek/deepseek-v3.2", name: "⚡ Quick Test", description: "DeepSeek V3.2 - Fast and efficient model" },
-  { id: "openai/gpt-3.5-turbo", name: "GPT-3.5 Turbo", description: "OpenAI's GPT-3.5 Turbo model" },
-  { id: "openai/gpt-4", name: "GPT-4", description: "OpenAI's GPT-4 model" },
-  { id: "anthropic/claude-3-haiku", name: "Claude 3 Haiku", description: "Anthropic's Claude 3 Haiku model" },
-  { id: "anthropic/claude-3-sonnet", name: "Claude 3 Sonnet", description: "Anthropic's Claude 3 Sonnet model" },
-  { id: "meta-llama/llama-3-8b-instruct", name: "Llama 3 8B", description: "Meta's Llama 3 8B model" },
-  { id: "google/gemini-pro", name: "Gemini Pro", description: "Google's Gemini Pro model" },
-  { id: "local/llama3", name: "Llama 3 (Local)", description: "Local Llama 3 via ollama/LM Studio/llama.cpp" },
-  { id: "local/codestral", name: "Codestral (Local)", description: "Local Codestral via ollama/LM Studio/llama.cpp" },
+  { id: "deepseek/deepseek-v3.2:free", name: "Quick Test", description: "DeepSeek V3.2 - Fast and efficient model", isFree: true },
+  { id: "openai/gpt-3.5-turbo", name: "GPT-3.5 Turbo", description: "OpenAI's GPT-3.5 Turbo model", isFree: false },
+  { id: "openai/gpt-4", name: "GPT-4", description: "OpenAI's GPT-4 model", isFree: false },
+  { id: "anthropic/claude-3-haiku:free", name: "Claude 3 Haiku", description: "Anthropic's Claude 3 Haiku model", isFree: true },
+  { id: "anthropic/claude-3-sonnet", name: "Claude 3 Sonnet", description: "Anthropic's Claude 3 Sonnet model", isFree: false },
+  { id: "meta-llama/llama-3-8b-instruct:free", name: "Llama 3 8B", description: "Meta's Llama 3 8B model", isFree: true },
+  { id: "google/gemini-pro:free", name: "Gemini Pro", description: "Google's Gemini Pro model", isFree: true },
+  { id: "local/llama3", name: "Llama 3 (Local)", description: "Local Llama 3 via ollama/LM Studio/llama.cpp", isFree: true },
+  { id: "local/codestral", name: "Codestral (Local)", description: "Local Codestral via ollama/LM Studio/llama.cpp", isFree: true },
 ];
 
 // Expert categories for better organization
@@ -155,6 +163,8 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
   const [errorLoadingModels, setErrorLoadingModels] = useState<string | null>(null);
   const [currentTab, setCurrentTab] = useState<string>(EXPERT_CATEGORIES.AGRICULTURE);
   const [selectedPreset, setSelectedPreset] = useState<string | null>(null);
+  const [userTier, setUserTier] = useState<string>("free");
+  const [maxExperts, setMaxExperts] = useState<number>(8);
 
   // --- Fetch OpenRouter Models ---
   useEffect(() => {
@@ -167,7 +177,6 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
           throw new Error(`HTTP error! status: ${response.status}`);
         }
         const data = await response.json();
-        // Assuming the data structure is { data: OpenRouterModel[] }
         if (data && Array.isArray(data.data)) {
            setOpenRouterModels(data.data);
         } else {
@@ -176,7 +185,6 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
       } catch (error) {
         console.error("Failed to fetch OpenRouter models:", error);
         setErrorLoadingModels(error instanceof Error ? error.message : "An unknown error occurred");
-        // Use fallback models instead of empty array
         setOpenRouterModels(FALLBACK_MODELS);
       } finally {
         setIsLoadingModels(false);
@@ -184,10 +192,70 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
     };
 
     fetchModels();
-  }, []); // Empty dependency array ensures this runs only once on mount
+  }, []);
+
+  // --- Fetch user tier ---
+  useEffect(() => {
+    const fetchTier = async () => {
+      try {
+        const res = await fetch("/api/user/tier");
+        if (res.ok) {
+          const data = await res.json();
+          setUserTier(data.tier || "free");
+          if (typeof data.limits?.maxExperts === "number") {
+            setMaxExperts(data.limits.maxExperts);
+          }
+        }
+      } catch (error) {
+        console.error("Failed to fetch user tier:", error);
+      }
+    };
+    fetchTier();
+  }, []);
 
   // Check if we already have some experts selected
   const expertRoles = new Set(selectedExperts.map(e => e.role));
+
+  const modelExists = (modelId: string | undefined) =>
+    !!modelId && openRouterModels.some(m => m.id === modelId);
+
+  // Resolve the model for a newly added expert. Falls back to tier-appropriate
+  // preferences so free users don't get a paid model the server will reject.
+  const resolveDefaultModel = (expertIndex: number): string => {
+    const preferredPaid = [
+      "anthropic/claude-3-sonnet",
+      "openai/gpt-4",
+      "anthropic/claude-3-haiku",
+      "openai/gpt-3.5-turbo"
+    ];
+    const preferredFree = [
+      "deepseek/deepseek-v3.2:free",
+      "anthropic/claude-3-haiku:free",
+      "meta-llama/llama-3-8b-instruct:free",
+      "google/gemini-pro:free"
+    ];
+
+    let defaultModelId = availableExperts[expertIndex]?.defaultModel;
+
+    if (!modelExists(defaultModelId)) {
+      const preferred = userTier === "free" ? preferredFree : preferredPaid;
+      for (const modelId of preferred) {
+        if (modelExists(modelId)) {
+          defaultModelId = modelId;
+          break;
+        }
+      }
+
+      if (!modelExists(defaultModelId)) {
+        const fallbackPool = userTier === "free"
+          ? openRouterModels.filter(isFreeModelId)
+          : openRouterModels;
+        defaultModelId = fallbackPool[0]?.id || openRouterModels[0]?.id || "openai/gpt-3.5-turbo";
+      }
+    }
+
+    return defaultModelId!;
+  };
 
   // Handle selecting an expert
   const toggleExpert = (index: number) => {
@@ -195,48 +263,19 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
 
     if (existingIndex !== -1) {
       // Remove expert
-      setLocalSelectedExperts(prev => 
+      setLocalSelectedExperts(prev =>
         prev.filter(item => item.expertIndex !== index)
       );
       // Clear preset selection when manually changing experts
       setSelectedPreset(null);
     } else {
-      // Add expert with default model (ensure default model exists or handle fallback)
-      let defaultModelId = availableExperts[index]?.defaultModel;
-
-      // Find the most reliable model based on availability
-      if (!defaultModelId || !openRouterModels.some(m => m.id === defaultModelId)) {
-        console.warn(`Model ${defaultModelId} not found or not specified for ${availableExperts[index].role}. Using fallback.`);
-
-        // Try to find a good match from our available models
-        const preferredModels = [
-          "anthropic/claude-3-sonnet", 
-          "openai/gpt-4", 
-          "anthropic/claude-3-haiku", 
-          "openai/gpt-3.5-turbo"
-        ];
-
-        for (const modelId of preferredModels) {
-          if (openRouterModels.some(m => m.id === modelId)) {
-            defaultModelId = modelId;
-            break;
-          }
-        }
-
-        // If still no match, use the first available model
-        if (!defaultModelId && openRouterModels.length > 0) {
-          defaultModelId = openRouterModels[0].id;
-        } else if (!defaultModelId) {
-          // Last resort fallback
-          defaultModelId = "openai/gpt-3.5-turbo"; 
-        }
-      }
+      if (localSelectedExperts.length >= maxExperts) return;
 
       setLocalSelectedExperts(prev => [
-        ...prev, 
-        { 
-          expertIndex: index, 
-          model: defaultModelId
+        ...prev,
+        {
+          expertIndex: index,
+          model: resolveDefaultModel(index)
         }
       ]);
 
@@ -259,34 +298,11 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
     preset.experts.forEach(expertRole => {
       const expertIndex = availableExperts.findIndex(e => e.role === expertRole);
       if (expertIndex === -1) return;
-
-      let defaultModelId = availableExperts[expertIndex]?.defaultModel;
-      // Apply same model fallback logic as toggleExpert
-      if (!defaultModelId || !openRouterModels.some(m => m.id === defaultModelId)) {
-        const preferredModels = [
-          "anthropic/claude-3-sonnet", 
-          "openai/gpt-4", 
-          "anthropic/claude-3-haiku", 
-          "openai/gpt-3.5-turbo"
-        ];
-
-        for (const modelId of preferredModels) {
-          if (openRouterModels.some(m => m.id === modelId)) {
-            defaultModelId = modelId;
-            break;
-          }
-        }
-
-        if (!defaultModelId && openRouterModels.length > 0) {
-          defaultModelId = openRouterModels[0].id;
-        } else if (!defaultModelId) {
-          defaultModelId = "openai/gpt-3.5-turbo"; 
-        }
-      }
+      if (newSelectedExperts.length >= maxExperts) return;
 
       newSelectedExperts.push({
         expertIndex,
-        model: defaultModelId
+        model: resolveDefaultModel(expertIndex)
       });
     });
 
@@ -371,42 +387,16 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
     if (found) return found.model;
 
     // If not in selected experts, determine default model
-    let defaultModelId = availableExperts[expertIndex]?.defaultModel;
-
-    // Find the most reliable model based on availability
-    if (!defaultModelId || !openRouterModels.some(m => m.id === defaultModelId)) {
-      // Try to find a good match from our available models
-      const preferredModels = [
-        "anthropic/claude-3-sonnet", 
-        "openai/gpt-4", 
-        "anthropic/claude-3-haiku", 
-        "openai/gpt-3.5-turbo"
-      ];
-
-      for (const modelId of preferredModels) {
-        if (openRouterModels.some(m => m.id === modelId)) {
-          defaultModelId = modelId;
-          break;
-        }
-      }
-
-      // If still no match, use the first available model
-      if (!defaultModelId && openRouterModels.length > 0) {
-        defaultModelId = openRouterModels[0].id;
-      } else if (!defaultModelId) {
-        // Last resort fallback
-        defaultModelId = "openai/gpt-3.5-turbo"; 
-      }
-    }
-
-    return defaultModelId;
+    return resolveDefaultModel(expertIndex);
   };
 
   // Filter experts by the current category tab
   const filteredExperts = availableExperts.filter(expert => expert.category === currentTab);
 
-  // Get recommended experts
-  const recommendedExperts = availableExperts.filter(expert => expert.recommended);
+  // Filter models by tier — free users only see models the server will accept
+  const visibleModels = userTier === "free"
+    ? openRouterModels.filter(isFreeModelId)
+    : openRouterModels;
 
   return (
     <Dialog open={true} onOpenChange={(open) => !open && onClose()}>
@@ -494,63 +484,37 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
             <div className="flex items-center">
               <span className="text-xs text-gray-500 mr-2">Selected:</span>
               <Badge variant="outline" className="font-medium">
-                {selectedCount}/8
+                {selectedCount}/{maxExperts}
               </Badge>
             </div>
           </div>
 
           <div className="flex-1 overflow-hidden">
-            {currentTab === "recommended" ? (
-              <ScrollArea className="h-full px-1">
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pb-1">
-                  {recommendedExperts.map((expert, expertIndex) => {
-                    const actualIndex = availableExperts.findIndex(e => e.role === expert.role);
-                    const isSelected = isExpertSelected(actualIndex);
-                    const isAlreadyAdded = expertRoles.has(expert.role);
-                    const selectedModel = getSelectedModel(actualIndex);
+            <ScrollArea className="h-full px-1">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pb-1">
+                {filteredExperts.map((expert) => {
+                  const actualIndex = availableExperts.findIndex(e => e.role === expert.role);
+                  const isSelected = isExpertSelected(actualIndex);
+                  const isAlreadyAdded = expertRoles.has(expert.role);
+                  const selectedModel = getSelectedModel(actualIndex);
 
-                    return (
-                      <ExpertCard
-                        key={actualIndex}
-                        expertData={expert}
-                        isSelected={isSelected}
-                        isAlreadyAdded={isAlreadyAdded}
-                        selectedModel={selectedModel}
-                        availableModels={openRouterModels}
-                        isLoadingModels={isLoadingModels}
-                        onToggle={() => toggleExpert(actualIndex)}
-                        onChangeModel={(newModel) => changeExpertModel(actualIndex, newModel)}
-                      />
-                    );
-                  })}
-                </div>
-              </ScrollArea>
-            ) : (
-              <ScrollArea className="h-full px-1">
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pb-1">
-                  {filteredExperts.map((expert, index) => {
-                    const actualIndex = availableExperts.findIndex(e => e.role === expert.role);
-                    const isSelected = isExpertSelected(actualIndex);
-                    const isAlreadyAdded = expertRoles.has(expert.role);
-                    const selectedModel = getSelectedModel(actualIndex);
-
-                    return (
-                      <ExpertCard
-                        key={actualIndex}
-                        expertData={expert}
-                        isSelected={isSelected}
-                        isAlreadyAdded={isAlreadyAdded}
-                        selectedModel={selectedModel}
-                        availableModels={openRouterModels}
-                        isLoadingModels={isLoadingModels}
-                        onToggle={() => toggleExpert(actualIndex)}
-                        onChangeModel={(newModel) => changeExpertModel(actualIndex, newModel)}
-                      />
-                    );
-                  })}
-                </div>
-              </ScrollArea>
-            )}
+                  return (
+                    <ExpertCard
+                      key={actualIndex}
+                      expertData={expert}
+                      isSelected={isSelected}
+                      isAlreadyAdded={isAlreadyAdded}
+                      selectedModel={selectedModel}
+                      availableModels={visibleModels}
+                      isLoadingModels={isLoadingModels}
+                      onToggle={() => toggleExpert(actualIndex)}
+                      onChangeModel={(newModel) => changeExpertModel(actualIndex, newModel)}
+                      userTier={userTier}
+                    />
+                  );
+                })}
+              </div>
+            </ScrollArea>
           </div>
         </Tabs>
       )}
@@ -560,16 +524,16 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
         <div className="text-center sm:text-left w-full sm:w-auto">
           {selectedCount === 0 ? (
             <p className="text-sm text-amber-600">Please select at least one expert</p>
-          ) : selectedCount > 8 ? (
-            <p className="text-sm text-red-600">Maximum 8 experts allowed</p>
+          ) : selectedCount > maxExperts ? (
+            <p className="text-sm text-red-600">Maximum {maxExperts} experts allowed on your plan</p>
           ) : (
             <p className="text-sm text-green-600">Your team is ready to join the conversation</p>
           )}
         </div>
-        <Button 
+        <Button
           onClick={handleAddExperts}
-          disabled={selectedCount < 1 || selectedCount > 8 || isLoadingModels}
-          className="bg-primary hover:bg-primary-dark px-6 w-full sm:w-auto"
+          disabled={selectedCount < 1 || selectedCount > maxExperts || isLoadingModels}
+          className="bg-primary hover:bg-primary/90 px-6 w-full sm:w-auto"
         >
           Add {selectedCount > 0 ? `${selectedCount} ` : ''}Expert{selectedCount !== 1 ? 's' : ''} to Roundtable
         </Button>

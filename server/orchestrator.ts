@@ -2,6 +2,13 @@ import { storage } from "./storage";
 import { getExpertResponse, getExpertResponseStream, generateInsights, getModeratorNextSpeakerSuggestion } from "./ai";
 import type { InsertMessage, Expert, Message, File } from "@shared/schema";
 
+// Verbose per-turn tracing is opt-in (ORCH_DEBUG=1). The default flood slows
+// test teardown and leaks conversation content into production logs.
+const ORCH_DEBUG = process.env.ORCH_DEBUG === "1";
+const debugLog = (...args: unknown[]) => {
+    if (ORCH_DEBUG) console.log(...args);
+};
+
 // Define interaction modes more formally
 type InteractionMode = 
     | "idle"          // Not processing anything
@@ -22,11 +29,28 @@ interface ConversationState {
     totalAutonomousTurnsTaken: number; // Counter for turns within the current autonomous session
     // Add a flag to indicate if the current sequence was interrupted by the user
     wasInterrupted: boolean;
+    // Preserve the active phase while a sequence is paused.
+    pausedFromMode: Exclude<InteractionMode, "idle" | "paused"> | null;
+    // In-memory recovery guard for a loop that died between turns.
+    lastProgressAt: number;
     // We might add turn limits, autonomous rounds etc. later
 }
 
 // Placeholder - In-memory state management 
 const conversationStates: Map<number, ConversationState> = new Map();
+const STALE_PROCESSING_MS = 5 * 60 * 1000;
+
+function isUsableConversationState(state: ConversationState | undefined): state is ConversationState {
+    return Boolean(
+        state &&
+        typeof state.broadcastFn === "function" &&
+        Array.isArray(state.activeExperts) &&
+        state.activeExperts.length > 0 &&
+        Number.isInteger(state.currentExpertIndex) &&
+        ["idle", "processing_sequential", "paused", "autonomous"].includes(state.mode) &&
+        typeof state.lastProgressAt === "number"
+    );
+}
 
 // Export this helper function
 export function getConversationState(conversationId: number): ConversationState | undefined {
@@ -44,9 +68,9 @@ function updateConversationState(
     }
 
     const previousState = { ...existingState }; // Shallow copy for comparison
-    const newState = { ...existingState, ...updates };
+    const newState = { ...existingState, ...updates, lastProgressAt: Date.now() };
     conversationStates.set(conversationId, newState);
-    console.log(`State updated for ${conversationId}: mode=${newState.mode}, expertIndex=${newState.currentExpertIndex}, autoTurns=${newState.totalAutonomousTurnsTaken}/${newState.maxAutonomousTurns}, interrupted=${newState.wasInterrupted}`);
+    debugLog(`State updated for ${conversationId}: mode=${newState.mode}, expertIndex=${newState.currentExpertIndex}, autoTurns=${newState.totalAutonomousTurnsTaken}/${newState.maxAutonomousTurns}, interrupted=${newState.wasInterrupted}`);
 
     // Broadcast relevant state changes
     if (newState.mode !== previousState.mode || newState.isAutonomousEnabled !== previousState.isAutonomousEnabled) {
@@ -56,7 +80,7 @@ function updateConversationState(
             isAutonomousEnabled: newState.isAutonomousEnabled,
             maxAutonomousTurns: newState.maxAutonomousTurns
         });
-        console.log(`Broadcasted state update for ${conversationId}: mode=${newState.mode}, autoEnabled=${newState.isAutonomousEnabled}`);
+        debugLog(`Broadcasted state update for ${conversationId}: mode=${newState.mode}, autoEnabled=${newState.isAutonomousEnabled}`);
     }
 
     return newState;
@@ -76,10 +100,12 @@ function initializeConversationState(conversationId: number, experts: Expert[], 
         isAutonomousEnabled: true, // Autonomous is ON by default
         maxAutonomousTurns: defaultMaxAutonomousTurns, 
         totalAutonomousTurnsTaken: 0,
-        wasInterrupted: false // Initialize interrupted flag
+        wasInterrupted: false, // Initialize interrupted flag
+        pausedFromMode: null,
+        lastProgressAt: Date.now()
     };
     conversationStates.set(conversationId, initialState);
-    console.log(`Initialized state for ${conversationId}, Auto ON (max ${defaultMaxAutonomousTurns} turns)`);
+    debugLog(`Initialized state for ${conversationId}, Auto ON (max ${defaultMaxAutonomousTurns} turns)`);
     // Broadcast initial state including autonomous info
     broadcastFn(conversationId, { 
         type: "state_update", 
@@ -88,6 +114,20 @@ function initializeConversationState(conversationId: number, experts: Expert[], 
         maxAutonomousTurns: initialState.maxAutonomousTurns
     });
     return initialState;
+}
+
+function scheduleInterruptedMessage(state: ConversationState, pendingMessage: Message): void {
+    const userId = pendingMessage.userId ?? 0;
+    setImmediate(() => {
+        processMessageTurnBased(userId, state.conversationId, pendingMessage, state.broadcastFn)
+            .catch(error => {
+                console.error(`Orchestrator: Failed to resume interrupted message for ${state.conversationId}:`, error);
+                state.broadcastFn(state.conversationId, {
+                    type: "error",
+                    message: "Failed to resume the interrupted message."
+                });
+            });
+    });
 }
 
 // This class now manages the stateful turn-based flow
@@ -113,10 +153,11 @@ export class InteractionOrchestrator {
             mode: "processing_sequential",
             currentExpertIndex: -1, 
             totalAutonomousTurnsTaken: 0, // Reset counter when new sequence starts
-            wasInterrupted: false // Reset interrupted flag
+            wasInterrupted: false, // Reset interrupted flag
+            pausedFromMode: null
         });
 
-        console.log(`Orchestrator starting processing sequence for conv ${this.conversationId}`);
+        debugLog(`Orchestrator starting processing sequence for conv ${this.conversationId}`);
         // Use setImmediate to avoid blocking the initial request and handle potential immediate pause
         setImmediate(() => {
             this.processNextTurn().catch(err => {
@@ -132,15 +173,26 @@ export class InteractionOrchestrator {
         // Initial checks for stopping conditions
         if (!state || state.mode === "paused" || state.wasInterrupted) {
             const reason = !state ? "state missing" : state.mode === "paused" ? "paused" : "interrupted";
-            console.log(`Orchestrator stopping for ${this.conversationId}. Reason: ${reason}.`);
+            debugLog(`Orchestrator stopping for ${this.conversationId}. Reason: ${reason}.`);
              if (state && state.wasInterrupted) {
-                 // If interrupted, ensure state becomes idle and clear the flag before stopping
-                 updateConversationState(this.conversationId, { mode: "idle", wasInterrupted: false, currentExpertIndex: -1, totalAutonomousTurnsTaken: 0 });
+                 // If interrupted, reset first, then immediately process the newest queued message.
+                 const pendingMessage = state.lastUserMessage;
+                 updateConversationState(this.conversationId, {
+                     mode: "idle",
+                     wasInterrupted: false,
+                     currentExpertIndex: -1,
+                     totalAutonomousTurnsTaken: 0,
+                     pausedFromMode: null,
+                     lastUserMessage: null
+                 });
+                 if (pendingMessage) {
+                     scheduleInterruptedMessage(state, pendingMessage);
+                 }
              }
             return; 
         }
         if (state.mode !== "processing_sequential" && state.mode !== "autonomous") {
-            console.log(`Orchestrator stopping for ${this.conversationId}. Unexpected Mode: ${state.mode}`);
+            debugLog(`Orchestrator stopping for ${this.conversationId}. Unexpected Mode: ${state.mode}`);
             return;
         }
 
@@ -178,11 +230,11 @@ export class InteractionOrchestrator {
         // 2. Check if processing should stop based on index or limits
         let endOfProcessing = false;
         if (state.mode === "processing_sequential" && nextExpertIndex >= state.activeExperts.length) {
-            console.log("End of sequential round detected.");
+            debugLog("End of sequential round detected.");
             endOfProcessing = true; // Will decide transition/stop later
             nextExpertIndex = -1; // Signal end of round
         } else if (state.mode === "autonomous" && state.totalAutonomousTurnsTaken >= state.maxAutonomousTurns) {
-            console.log(`Reached max autonomous turns (${state.maxAutonomousTurns}).`);
+            debugLog(`Reached max autonomous turns (${state.maxAutonomousTurns}).`);
             endOfProcessing = true;
             nextExpertIndex = -1; // Signal stop
         }
@@ -199,6 +251,8 @@ export class InteractionOrchestrator {
                 currentExpertIndex: nextExpertIndex, 
                 ...turnsTakenUpdate 
             });
+            if (!state) return;
+            const broadcastFn = state.broadcastFn;
             
             // --- Determine Reference Message --- 
             let referenceMessageContent = "";
@@ -229,7 +283,7 @@ export class InteractionOrchestrator {
                  updateConversationState(this.conversationId, { mode: "idle" }); return;
              }
             
-            console.log(`Orchestrator turn: Expert ${currentExpert.name} (Index: ${nextExpertIndex}, Mode: ${state.mode}, Auto Turn: ${state.totalAutonomousTurnsTaken}/${state.maxAutonomousTurns})`);
+            debugLog(`Orchestrator turn: Expert ${currentExpert.name} (Index: ${nextExpertIndex}, Mode: ${state.mode}, Auto Turn: ${state.totalAutonomousTurnsTaken}/${state.maxAutonomousTurns})`);
 
             // --- Call Expert (STREAMING) --- 
             try {
@@ -248,7 +302,7 @@ export class InteractionOrchestrator {
                     currentExpert, history, referenceMessageContent, files, availableRoles,
                     (token) => {
                         // Stream each token to the client
-                        state.broadcastFn(this.conversationId, {
+                        broadcastFn(this.conversationId, {
                             type: "expert_stream_token",
                             expertId: currentExpert.id,
                             token: token,
@@ -263,18 +317,51 @@ export class InteractionOrchestrator {
                     expertId: currentExpert.id,
                     message: storedExpertMessage,
                 });
-                console.log(`Orchestrator broadcasted streamed response from ${currentExpert.name}`);
+                debugLog(`Orchestrator broadcasted streamed response from ${currentExpert.name}`);
             } catch (error) {
                  console.error(`Orchestrator: Error streaming expert ${currentExpert.name}:`, error);
+                 // Persist the failure so it survives refetches — a cache-only
+                 // synthetic message vanishes on the next conversation load.
+                 let errorMessage: Message | undefined;
+                 try {
+                     errorMessage = await storage.createMessage({
+                         conversationId: this.conversationId,
+                         expertId: currentExpert.id,
+                         userId: null,
+                         content: `(Error getting response from ${currentExpert.name}. Please try again.)`,
+                         role: "assistant",
+                         expertName: currentExpert.name,
+                     });
+                 } catch (storeError) {
+                     console.error("Orchestrator: Failed to store error message:", storeError);
+                 }
                  state.broadcastFn(this.conversationId, {
                     type: "message_error", expertId: currentExpert.id,
-                    expertName: currentExpert.name, message: `Error getting response from ${currentExpert.name}.`
+                    expertName: currentExpert.name, message: errorMessage ?? `Error getting response from ${currentExpert.name}.`
                 });
+                // The current index/counter was advanced before the provider call.
+                // Stop this sequence rather than silently continuing an incomplete turn.
+                const failedState = getConversationState(this.conversationId);
+                if (failedState) {
+                    const pendingMessage = failedState.wasInterrupted ? failedState.lastUserMessage : null;
+                    updateConversationState(this.conversationId, {
+                        mode: "idle",
+                        currentExpertIndex: -1,
+                        totalAutonomousTurnsTaken: 0,
+                        wasInterrupted: false,
+                        pausedFromMode: null,
+                        lastUserMessage: pendingMessage ? null : failedState.lastUserMessage
+                    });
+                    if (pendingMessage) {
+                        scheduleInterruptedMessage(failedState, pendingMessage);
+                    }
+                }
+                return;
             }
         } // End if(nextExpertIndex !== -1)
 
         // 4. Decide Next Action (Schedule next turn or transition/stop)
-        console.log(`[DEBUG] Decide Next Action for ${this.conversationId} | Current Mode: ${state.mode} | Last Expert Index: ${state.currentExpertIndex} | Next Calculated Index: ${nextExpertIndex} | Auto Turns: ${state.totalAutonomousTurnsTaken}/${state.maxAutonomousTurns}`);
+        debugLog(`[DEBUG] Decide Next Action for ${this.conversationId} | Current Mode: ${state.mode} | Last Expert Index: ${state.currentExpertIndex} | Next Calculated Index: ${nextExpertIndex} | Auto Turns: ${state.totalAutonomousTurnsTaken}/${state.maxAutonomousTurns}`);
         const currentState = getConversationState(this.conversationId);
         if (!currentState) {
              console.error(`[DEBUG] State missing in Decide Next Action for ${this.conversationId}. Aborting.`);
@@ -284,44 +371,44 @@ export class InteractionOrchestrator {
         let continueProcessing = false;
         let processingEndedNaturally = false; // Use a flag to signal natural stop vs. transition
         const wasEndOfSequentialRound = currentState.mode === "processing_sequential" && nextExpertIndex === -1;
-        console.log(`[DEBUG] wasEndOfSequentialRound = ${wasEndOfSequentialRound}`);
+        debugLog(`[DEBUG] wasEndOfSequentialRound = ${wasEndOfSequentialRound}`);
         
         if (wasEndOfSequentialRound) {
-            console.log(`[DEBUG] Checking condition: isAutonomousEnabled=${currentState.isAutonomousEnabled}, maxAutonomousTurns=${currentState.maxAutonomousTurns}`);
+            debugLog(`[DEBUG] Checking condition: isAutonomousEnabled=${currentState.isAutonomousEnabled}, maxAutonomousTurns=${currentState.maxAutonomousTurns}`);
             if (currentState.isAutonomousEnabled && currentState.maxAutonomousTurns > 0) {
-                console.log("Orchestrator: Sequential round finished. Switching to Autonomous mode."); // KEEP
+                debugLog("Orchestrator: Sequential round finished. Switching to Autonomous mode."); // KEEP
                 updateConversationState(this.conversationId, { 
                     mode: "autonomous", currentExpertIndex: -1, 
                     totalAutonomousTurnsTaken: 0, lastUserMessage: null 
                 }); 
                 continueProcessing = true;
-                console.log("[DEBUG] Set continueProcessing = true (Transitioning to Auto)");
+                debugLog("[DEBUG] Set continueProcessing = true (Transitioning to Auto)");
             } else {
-                console.log("Orchestrator: Sequential round finished. Autonomous disabled. Setting to idle."); // KEEP
+                debugLog("Orchestrator: Sequential round finished. Autonomous disabled. Setting to idle."); // KEEP
                 processingEndedNaturally = true; 
-                 console.log("[DEBUG] Set processingEndedNaturally = true (Auto Disabled/Limit 0)");
+                 debugLog("[DEBUG] Set processingEndedNaturally = true (Auto Disabled/Limit 0)");
             }
         } else if (currentState.mode === "autonomous") {
-             console.log("[DEBUG] Currently in Autonomous mode. Checking limits...");
+             debugLog("[DEBUG] Currently in Autonomous mode. Checking limits...");
              // Check limits *before* deciding to continue
              if (currentState.totalAutonomousTurnsTaken >= currentState.maxAutonomousTurns) {
-                 console.log("Orchestrator: Reached max autonomous turns. Setting mode to idle."); // KEEP
+                 debugLog("Orchestrator: Reached max autonomous turns. Setting mode to idle."); // KEEP
                  processingEndedNaturally = true; 
-                  console.log("[DEBUG] Set processingEndedNaturally = true (Auto Limit Reached)");
+                  debugLog("[DEBUG] Set processingEndedNaturally = true (Auto Limit Reached)");
              } else {
                  continueProcessing = true; // Continue autonomous processing
-                 console.log("[DEBUG] Set continueProcessing = true (Continuing Auto)");
+                 debugLog("[DEBUG] Set continueProcessing = true (Continuing Auto)");
              }
         } else if (currentState.mode === "processing_sequential" && nextExpertIndex !== -1) {
              // Continue sequential if we processed a turn and it wasn't the end signal
              continueProcessing = true;
-             console.log("[DEBUG] Set continueProcessing = true (Continuing Sequential)");
+             debugLog("[DEBUG] Set continueProcessing = true (Continuing Sequential)");
         }
 
         // Final actions if processing ended naturally
         if (processingEndedNaturally) {
-             console.log("[DEBUG] Processing ended naturally. Updating state to idle and generating insights.");
-             updateConversationState(this.conversationId, { mode: "idle", currentExpertIndex: -1, totalAutonomousTurnsTaken: 0 });
+             debugLog("[DEBUG] Processing ended naturally. Updating state to idle and generating insights.");
+             updateConversationState(this.conversationId, { mode: "idle", currentExpertIndex: -1, totalAutonomousTurnsTaken: 0, pausedFromMode: null });
              generateInsights(this.conversationId, state.broadcastFn).catch(console.error);
              continueProcessing = false; // Ensure we don't schedule next turn
         }
@@ -329,9 +416,9 @@ export class InteractionOrchestrator {
         // Schedule next turn if decided and not paused/interrupted
         // Re-fetch state one last time before scheduling to ensure mode wasn't changed by pause/interrupt
         const finalStateCheck = getConversationState(this.conversationId);
-         console.log(`[DEBUG] Final check before scheduling: continueProcessing=${continueProcessing}, finalMode=${finalStateCheck?.mode}, finalInterrupted=${finalStateCheck?.wasInterrupted}`);
+         debugLog(`[DEBUG] Final check before scheduling: continueProcessing=${continueProcessing}, finalMode=${finalStateCheck?.mode}, finalInterrupted=${finalStateCheck?.wasInterrupted}`);
         if (continueProcessing && finalStateCheck && finalStateCheck.mode !== "paused" && !finalStateCheck.wasInterrupted) {
-            console.log("[DEBUG] Scheduling next turn via setImmediate.");
+            debugLog("[DEBUG] Scheduling next turn via setImmediate.");
             setImmediate(() => {
                  this.processNextTurn().catch(err => {
                      console.error(`Orchestrator: Unhandled error in processNextTurn recursion for ${this.conversationId}:`, err);
@@ -340,10 +427,25 @@ export class InteractionOrchestrator {
             });
         } else {
              // Use the already fetched finalStateCheck here
-             console.log(`Orchestrator: Not scheduling next turn for ${this.conversationId}. Final State Mode: ${finalStateCheck?.mode}, Continue: ${continueProcessing}, Interrupted: ${finalStateCheck?.wasInterrupted}.`); // KEEP
+             debugLog(`Orchestrator: Not scheduling next turn for ${this.conversationId}. Final State Mode: ${finalStateCheck?.mode}, Continue: ${continueProcessing}, Interrupted: ${finalStateCheck?.wasInterrupted}.`); // KEEP
+             if (finalStateCheck?.wasInterrupted) {
+                  const pendingMessage = finalStateCheck.lastUserMessage;
+                  updateConversationState(this.conversationId, {
+                      mode: "idle",
+                      wasInterrupted: false,
+                      currentExpertIndex: -1,
+                      totalAutonomousTurnsTaken: 0,
+                      pausedFromMode: null,
+                      lastUserMessage: null
+                  });
+                  if (pendingMessage) {
+                      scheduleInterruptedMessage(finalStateCheck, pendingMessage);
+                  }
+                  return;
+             }
              // If we aren't continuing and weren't paused/interrupted, ensure state is idle
              if (finalStateCheck && finalStateCheck.mode !== 'paused' && !finalStateCheck.wasInterrupted && !continueProcessing) {
-                  console.log("[DEBUG] Setting state to idle because not continuing and not paused/interrupted.");
+                  debugLog("[DEBUG] Setting state to idle because not continuing and not paused/interrupted.");
                   updateConversationState(this.conversationId, { mode: "idle" });
              }
         }
@@ -353,24 +455,23 @@ export class InteractionOrchestrator {
     pause(): void {
         const state = getConversationState(this.conversationId);
         if (state && (state.mode === "processing_sequential" || state.mode === "autonomous")) {
-            console.log(`Orchestrator pausing conversation ${this.conversationId}`);
-            updateConversationState(this.conversationId, { mode: "paused" });
+            debugLog(`Orchestrator pausing conversation ${this.conversationId}`);
+            updateConversationState(this.conversationId, { mode: "paused", pausedFromMode: state.mode });
         } else {
-             console.log(`Orchestrator: Cannot pause conversation ${this.conversationId}. Current mode: ${state?.mode}`);
+             debugLog(`Orchestrator: Cannot pause conversation ${this.conversationId}. Current mode: ${state?.mode}`);
         }
     }
 
     resume(): void {
         const state = getConversationState(this.conversationId);
         if (state && state.mode === "paused") {
-            console.log(`Orchestrator resuming conversation ${this.conversationId}`);
-            // Determine which mode to resume to 
-            // If auto is enabled AND we haven't hit limits, resume to autonomous
-            const resumeToMode = (state.isAutonomousEnabled && state.totalAutonomousTurnsTaken < state.maxAutonomousTurns) 
-                                ? "autonomous" 
-                                : "processing_sequential"; // TODO: Revisit this logic - might need more nuance
+            debugLog(`Orchestrator resuming conversation ${this.conversationId}`);
+            // Resume the phase that was paused. The autonomous setting controls
+            // the sequential-to-autonomous transition, not an already-running phase.
+            const resumeToMode = state.pausedFromMode ||
+                (state.totalAutonomousTurnsTaken > 0 ? "autonomous" : "processing_sequential");
                                 
-            updateConversationState(this.conversationId, { mode: resumeToMode });
+            updateConversationState(this.conversationId, { mode: resumeToMode, pausedFromMode: null });
             
             // Trigger the next turn processing immediately
             setImmediate(() => {
@@ -380,7 +481,7 @@ export class InteractionOrchestrator {
                 });
            });
         } else {
-             console.log(`Orchestrator: Cannot resume conversation ${this.conversationId}. Current mode: ${state?.mode}`);
+             debugLog(`Orchestrator: Cannot resume conversation ${this.conversationId}. Current mode: ${state?.mode}`);
         }
     }
 
@@ -393,7 +494,7 @@ export class InteractionOrchestrator {
             ? maxTurns 
             : state.activeExperts.length * 2; // Default if not provided or invalid
 
-        console.log(`Orchestrator enabling autonomous mode for ${this.conversationId} (max ${newMaxTurns} turns)`);
+        debugLog(`Orchestrator enabling autonomous mode for ${this.conversationId} (max ${newMaxTurns} turns)`);
         updateConversationState(this.conversationId, { 
             isAutonomousEnabled: true,
             maxAutonomousTurns: newMaxTurns
@@ -407,7 +508,7 @@ export class InteractionOrchestrator {
         const state = getConversationState(this.conversationId);
         if (!state) return;
         
-        console.log(`Orchestrator disabling autonomous mode for ${this.conversationId}`);
+        debugLog(`Orchestrator disabling autonomous mode for ${this.conversationId}`);
         updateConversationState(this.conversationId, { 
             isAutonomousEnabled: false,
             // Optionally reset maxAutonomousTurns to 0 or keep the value?
@@ -415,7 +516,7 @@ export class InteractionOrchestrator {
         });
         // If currently in autonomous mode, pausing might be safer than directly setting to idle
         if (state.mode === "autonomous") {
-             console.log("Currently in autonomous mode, pausing processing.");
+             debugLog("Currently in autonomous mode, pausing processing.");
              this.pause();
         }
     }
@@ -434,28 +535,34 @@ export async function processMessageTurnBased(
         let state = getConversationState(conversationId);
         const experts = await storage.getConversationExperts(conversationId);
         if (!experts || experts.length === 0) {
-            console.log(`No experts assigned to conversation ${conversationId}. Cannot process message.`);
+            debugLog(`No experts assigned to conversation ${conversationId}. Cannot process message.`);
             return;
         }
 
-        if (!state) {
-            // Initialize if first message for this server instance
+        const stateIsStale = state &&
+            ((state.mode === "processing_sequential" || state.mode === "autonomous") &&
+                (!isUsableConversationState(state) || Date.now() - state.lastProgressAt > STALE_PROCESSING_MS));
+
+        if (!isUsableConversationState(state) || stateIsStale) {
+            if (state) {
+                console.warn(`Recovering stale or partial orchestrator state for conversation ${conversationId}.`);
+            }
+            // Initialize if first message for this server instance, or recover
+            // from a state left behind by a crashed loop.
             state = initializeConversationState(conversationId, experts, userMessage, broadcastFn);
         } else {
             // State exists, check for interruption
             const isBusy = state.mode === "processing_sequential" || state.mode === "autonomous";
             if (isBusy) {
-                 console.log(`User message arrived during active sequence (mode: ${state.mode}). Interrupting.`);
-                 // Set interrupted flag and update context. DO NOT change mode here.
-                 // The running processNextTurn loop will detect the flag and stop itself, setting mode to idle.
+                 debugLog(`User message arrived during active sequence (mode: ${state.mode}). Interrupting.`);
+                  // Set interrupted flag and update context. The running loop will
+                  // finish its current expert and immediately restart this message.
                  updateConversationState(conversationId, { 
                      wasInterrupted: true,
                      activeExperts: experts, // Update experts list potentially
                      lastUserMessage: userMessage // Store newest user message
                  });
-                 // *** Do not force state to idle here ***
-                 // Let the current turn finish and handle the interruption flag.
-                 return; // Stop further processing for *this* user message event
+                 return;
             } else {
                 // If not busy (idle or paused), just update state normally
                  updateConversationState(conversationId, { 
@@ -467,14 +574,13 @@ export async function processMessageTurnBased(
             }
         }
 
-        // Only start processing if the orchestrator is currently idle
-        // This will now be triggered by the *next* user message after an interruption clears
+        // Only start processing if the orchestrator is currently idle.
         if (state.mode === "idle") {
             const orchestrator = new InteractionOrchestrator(conversationId);
             await orchestrator.startProcessingSequence(); 
         } else {
             // This can happen if the state was paused when the message arrived
-            console.log(`Orchestrator for ${conversationId} is not idle (mode: ${state.mode}). New message queued in state.`);
+            debugLog(`Orchestrator for ${conversationId} is not idle (mode: ${state.mode}). New message queued in state.`);
         }
 
     } catch (error) {

@@ -1,4 +1,4 @@
-import { Message, Expert, Insight, FileType, Artifact } from "../shared/schema";
+import { Message, Expert, Insight, File, Artifact } from "../shared/schema";
 import { format } from "date-fns";
 
 export function generateComprehensiveMarkdown(data: {
@@ -6,7 +6,7 @@ export function generateComprehensiveMarkdown(data: {
   messages: Message[];
   experts: Expert[];
   insights: Insight[];
-  files: FileType[];
+  files: File[];
 }): string {
   let md = "";
 
@@ -61,7 +61,7 @@ export function generateComprehensiveMarkdown(data: {
     md += "## Insights\n\n";
     for (const insight of data.insights) {
       md += `### ${insight.title}\n\n`;
-      for (const point of insight.points) {
+      for (const point of insight.points ?? []) {
         md += `- ${point}\n`;
       }
       md += "\n";

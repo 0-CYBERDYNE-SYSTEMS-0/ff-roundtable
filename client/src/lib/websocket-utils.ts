@@ -1,70 +1,79 @@
-import { useState, useEffect, useCallback } from "react";
+import { useEffect, useRef, useState } from "react";
 
-// Create a WebSocket connection
-export function useWebSocket() {
+export type WebSocketStatus = "connecting" | "connected" | "reconnecting" | "disconnected";
+
+export interface WebSocketState {
+  socket: WebSocket | null;
+  status: WebSocketStatus;
+  reconnectAttempts: number;
+}
+
+// Create a WebSocket connection and keep retrying while the app is mounted.
+export function useWebSocket(): WebSocketState {
   const [socket, setSocket] = useState<WebSocket | null>(null);
+  const [status, setStatus] = useState<WebSocketStatus>("connecting");
   const [reconnectAttempts, setReconnectAttempts] = useState(0);
-  const MAX_RECONNECT_ATTEMPTS = 5;
-  
-  // Create a function to establish WebSocket connection
-  const connectWebSocket = useCallback(() => {
-    // Determine if we're using secure connection
-    const isSecure = window.location.protocol === "https:";
-    const wsProtocol = isSecure ? "wss:" : "ws:";
-    const host = window.location.host || window.location.hostname;
-    const wsUrl = `${wsProtocol}//${host}/ws`;
-    
-    console.log("Attempting to connect to WebSocket at:", wsUrl);
-    
-    // Create WebSocket connection
-    const ws = new WebSocket(wsUrl);
-    
-    // Connection opened
-    ws.addEventListener("open", (event) => {
-      console.log("WebSocket connection established");
-      // Reset reconnect attempts on successful connection
-      setReconnectAttempts(0);
-    });
-    
-    // Listen for errors
-    ws.addEventListener("error", (event) => {
-      console.error("WebSocket error:", event);
-    });
-    
-    // Connection closed
-    ws.addEventListener("close", (event) => {
-      console.log("WebSocket connection closed", event.code, event.reason);
-      
-      // Attempt to reconnect if the connection was closed abnormally
-      // and we haven't exceeded maximum reconnect attempts
-      if (event.code !== 1000 && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-        const timeout = Math.min(1000 * (2 ** reconnectAttempts), 30000); // Exponential backoff with 30s max
-        console.log(`Attempting to reconnect WebSocket in ${timeout/1000}s (attempt ${reconnectAttempts + 1}/${MAX_RECONNECT_ATTEMPTS})...`);
-        
-        setTimeout(() => {
-          setReconnectAttempts(prev => prev + 1);
-          setSocket(null); // This will trigger a reconnection due to the dependency in useEffect
-        }, timeout);
-      }
-    });
-    
-    setSocket(ws);
-    
-    return ws;
-  }, [reconnectAttempts]);
-  
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const attemptsRef = useRef(0);
+  const mountedRef = useRef(false);
+
   useEffect(() => {
-    const ws = connectWebSocket();
-    
-    // Clean up function
-    return () => {
-      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
-        ws.close(1000, "Component unmounted");
-      }
+    mountedRef.current = true;
+    let currentSocket: WebSocket | null = null;
+
+    const connect = () => {
+      if (!mountedRef.current) return;
+
+      const isSecure = window.location.protocol === "https:";
+      const wsProtocol = isSecure ? "wss:" : "ws:";
+      const host = window.location.host || window.location.hostname;
+      const wsUrl = `${wsProtocol}//${host}/ws`;
+      const isRetry = attemptsRef.current > 0;
+
+      setStatus(isRetry ? "reconnecting" : "connecting");
+      console.log("Attempting to connect to WebSocket at:", wsUrl);
+      currentSocket = new WebSocket(wsUrl);
+      setSocket(currentSocket);
+
+      currentSocket.addEventListener("open", () => {
+        if (!mountedRef.current) return;
+        attemptsRef.current = 0;
+        setReconnectAttempts(0);
+        setStatus("connected");
+        console.log("WebSocket connection established");
+      });
+
+      currentSocket.addEventListener("error", (event) => {
+        console.error("WebSocket error:", event);
+      });
+
+      currentSocket.addEventListener("close", (event) => {
+        if (!mountedRef.current) return;
+        setSocket((activeSocket) => activeSocket === currentSocket ? null : activeSocket);
+        setStatus("reconnecting");
+
+        const timeout = Math.min(1000 * (2 ** attemptsRef.current), 30000);
+        attemptsRef.current += 1;
+        setReconnectAttempts(attemptsRef.current);
+        console.log(`WebSocket closed (${event.code}); retrying in ${timeout / 1000}s...`);
+        reconnectTimerRef.current = setTimeout(connect, timeout);
+      });
     };
-  }, [connectWebSocket]);
-  
-  return socket;
+
+    connect();
+
+    return () => {
+      mountedRef.current = false;
+      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+      if (currentSocket?.readyState === WebSocket.OPEN || currentSocket?.readyState === WebSocket.CONNECTING) {
+        currentSocket.close(1000, "Component unmounted");
+      }
+      setSocket(null);
+      setStatus("disconnected");
+    };
+  }, []);
+
+  return { socket, status, reconnectAttempts };
 }
 
 // Send a message through the WebSocket

@@ -1,10 +1,13 @@
 import { users, type User, type InsertUser, conversations, type Conversation, type InsertConversation, experts, type Expert, type InsertExpert, messages, type Message, type InsertMessage, files, type File, type InsertFile, insights, type Insight, type InsertInsight, farmProfiles, type FarmProfile, type InsertFarmProfile, weatherCache } from "@shared/schema";
+import { encryptApiKey, decryptApiKey } from "./crypto";
 import createMemoryStore from "memorystore";
 import session from "express-session";
 import { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { eq, desc, and } from "drizzle-orm";
 import ConnectPgSimple from "connect-pg-simple";
+
+const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || "";
 
 const MemoryStore = createMemoryStore(session);
 const PgSessionStore = ConnectPgSimple(session);
@@ -15,9 +18,13 @@ export interface IStorage {
   // User operations
   getUser(id: number): Promise<User | undefined>;
   getUserByUsername(username: string): Promise<User | undefined>;
+  getUserByStripeSubscriptionId(subscriptionId: string): Promise<User | undefined>;
   createUser(user: InsertUser): Promise<User>;
   updateUserStripeInfo(userId: number, stripeInfo: { stripeCustomerId: string, stripeSubscriptionId: string }): Promise<User>;
   updateSubscriptionStatus(userId: number, status: string): Promise<User>;
+  getUserApiKey(userId: number): Promise<string | null>;
+  setUserApiKey(userId: number, key: string): Promise<void>;
+  removeUserApiKey(userId: number): Promise<void>;
   
   // Conversation operations
   createConversation(conversation: InsertConversation): Promise<Conversation>;
@@ -31,7 +38,7 @@ export interface IStorage {
   updateExpert(expertId: number, updates: Partial<Expert>): Promise<Expert>;
   
   // Message operations
-  createMessage(message: InsertMessage & { artifacts?: any[] }): Promise<Message>;
+  createMessage(message: InsertMessage): Promise<Message>;
   getConversationMessages(conversationId: number): Promise<Message[]>;
   
   // File operations
@@ -44,14 +51,14 @@ export interface IStorage {
 
   // Farm profile operations
   getFarmProfile(userId: number): Promise<FarmProfile | undefined>;
-  upsertFarmProfile(userId: number, profile: InsertFarmProfile): Promise<FarmProfile>;
+  upsertFarmProfile(userId: number, profile: Partial<Omit<InsertFarmProfile, "userId">>): Promise<FarmProfile>;
 
   // Weather cache operations
   getCachedWeather(lat: string, lng: string): Promise<{ data: any; fetchedAt: Date } | undefined>;
   cacheWeather(lat: string, lng: string, data: any): Promise<void>;
 
   // Session store
-  sessionStore: session.SessionStore;
+  sessionStore: session.Store;
 }
 
 // ─── In-Memory Storage (Dev Fallback) ────────────────────────────────────────
@@ -64,7 +71,7 @@ export class MemStorage implements IStorage {
   private files: Map<number, File>;
   private insights: Map<number, Insight>;
   
-  sessionStore: session.SessionStore;
+  sessionStore: session.Store;
   private userId: number;
   private conversationId: number;
   private expertId: number;
@@ -102,10 +109,14 @@ export class MemStorage implements IStorage {
       id: this.userId++,
       username: 'developer',
       email: 'dev@example.com',
-      password: 'dev:password', // Simple dev format: "password"
+      password: 'dev:password',
+      // Dev account bypasses tier gates: enterprise = no expert-count or
+      // paid-model restrictions during local development/testing.
+      tier: 'enterprise',
       stripeCustomerId: null,
       stripeSubscriptionId: null,
-      subscriptionStatus: 'active', // Auto-subscribed for development
+      subscriptionStatus: 'active',
+      openRouterKey: null,
       createdAt: new Date()
     };
     
@@ -124,15 +135,23 @@ export class MemStorage implements IStorage {
     );
   }
 
+  async getUserByStripeSubscriptionId(subscriptionId: string): Promise<User | undefined> {
+    return Array.from(this.users.values()).find(
+      (user) => user.stripeSubscriptionId === subscriptionId,
+    );
+  }
+
   async createUser(insertUser: InsertUser): Promise<User> {
     const id = this.userId++;
     const now = new Date();
     const user: User = { 
       ...insertUser, 
       id, 
+      tier: insertUser.tier ?? null,
       stripeCustomerId: null, 
       stripeSubscriptionId: null,
       subscriptionStatus: "inactive",
+      openRouterKey: null,
       createdAt: now
     };
     this.users.set(id, user);
@@ -146,10 +165,9 @@ export class MemStorage implements IStorage {
     const updatedUser: User = {
       ...user,
       stripeCustomerId: stripeInfo.stripeCustomerId,
-      stripeSubscriptionId: stripeInfo.stripeSubscriptionId,
-      subscriptionStatus: "active"
+      stripeSubscriptionId: stripeInfo.stripeSubscriptionId
     };
-    
+
     this.users.set(userId, updatedUser);
     return updatedUser;
   }
@@ -167,11 +185,49 @@ export class MemStorage implements IStorage {
     return updatedUser;
   }
 
+  async getUserApiKey(userId: number): Promise<string | null> {
+    const user = await this.getUser(userId);
+    if (!user || !user.openRouterKey) return null;
+    if (!ENCRYPTION_KEY) {
+      console.error("[BYOK] ENCRYPTION_KEY not configured — cannot decrypt user API key");
+      return null;
+    }
+    try {
+      return decryptApiKey(user.openRouterKey, ENCRYPTION_KEY);
+    } catch (err) {
+      console.error("[BYOK] Failed to decrypt user API key:", (err as Error).message);
+      return null;
+    }
+  }
+
+  async setUserApiKey(userId: number, key: string): Promise<void> {
+    if (!ENCRYPTION_KEY) {
+      throw new Error("ENCRYPTION_KEY not configured");
+    }
+    const encrypted = encryptApiKey(key, ENCRYPTION_KEY);
+    const user = await this.getUser(userId);
+    if (!user) throw new Error(`User with ID ${userId} not found`);
+    const updatedUser: User = { ...user, openRouterKey: encrypted };
+    this.users.set(userId, updatedUser);
+  }
+
+  async removeUserApiKey(userId: number): Promise<void> {
+    const user = await this.getUser(userId);
+    if (!user) throw new Error(`User with ID ${userId} not found`);
+    const updatedUser: User = { ...user, openRouterKey: null };
+    this.users.set(userId, updatedUser);
+  }
+
   // Conversation operations
   async createConversation(insertConversation: InsertConversation): Promise<Conversation> {
     const id = this.conversationId++;
     const now = new Date();
-    const conversation: Conversation = { ...insertConversation, id, createdAt: now };
+    const conversation: Conversation = {
+      ...insertConversation,
+      id,
+      title: insertConversation.title ?? "New Conversation",
+      createdAt: now,
+    };
     this.conversations.set(id, conversation);
     return conversation;
   }
@@ -183,13 +239,18 @@ export class MemStorage implements IStorage {
   async getUserConversations(userId: number): Promise<Conversation[]> {
     return Array.from(this.conversations.values())
       .filter(conversation => conversation.userId === userId)
-      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+      .sort((a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0));
   }
   
   // Expert operations
   async createExpert(insertExpert: InsertExpert): Promise<Expert> {
     const id = this.expertId++;
-    const expert: Expert = { ...insertExpert, id };
+    const expert: Expert = {
+      ...insertExpert,
+      id,
+      customInstructions: insertExpert.customInstructions ?? null,
+      avatarUrl: insertExpert.avatarUrl ?? null
+    };
     this.experts.set(id, expert);
     return expert;
   }
@@ -219,10 +280,21 @@ export class MemStorage implements IStorage {
   }
   
   // Message operations
-  async createMessage(insertMessage: InsertMessage & { artifacts?: any[] }): Promise<Message> {
+  async createMessage(insertMessage: InsertMessage): Promise<Message> {
     const id = this.messageId++;
     const now = new Date();
-    const message: Message = { ...insertMessage, id, timestamp: now, artifacts: insertMessage.artifacts || [] };
+    const message: Message = {
+      id,
+      conversationId: insertMessage.conversationId,
+      expertId: insertMessage.expertId ?? null,
+      userId: insertMessage.userId ?? null,
+      content: insertMessage.content,
+      role: insertMessage.role,
+      expertName: insertMessage.expertName ?? null,
+      expertRole: insertMessage.expertRole ?? null,
+      artifacts: Array.isArray(insertMessage.artifacts) ? insertMessage.artifacts as Message["artifacts"] : [],
+      timestamp: now,
+    };
     this.messages.set(id, message);
     return message;
   }
@@ -230,7 +302,7 @@ export class MemStorage implements IStorage {
   async getConversationMessages(conversationId: number): Promise<Message[]> {
     return Array.from(this.messages.values())
       .filter(message => message.conversationId === conversationId)
-      .sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+      .sort((a, b) => (a.timestamp?.getTime() ?? 0) - (b.timestamp?.getTime() ?? 0));
   }
   
   // File operations
@@ -245,14 +317,14 @@ export class MemStorage implements IStorage {
   async getConversationFiles(conversationId: number): Promise<File[]> {
     return Array.from(this.files.values())
       .filter(file => file.conversationId === conversationId)
-      .sort((a, b) => b.uploadedAt.getTime() - a.uploadedAt.getTime());
+      .sort((a, b) => (b.uploadedAt?.getTime() ?? 0) - (a.uploadedAt?.getTime() ?? 0));
   }
   
   // Insight operations
   async createInsight(insertInsight: InsertInsight): Promise<Insight> {
     const id = this.insightId++;
     const now = new Date();
-    const insight: Insight = { ...insertInsight, id, createdAt: now };
+    const insight: Insight = { ...insertInsight, id, points: insertInsight.points ?? [], createdAt: now };
     this.insights.set(id, insight);
     return insight;
   }
@@ -260,7 +332,7 @@ export class MemStorage implements IStorage {
   async getConversationInsights(conversationId: number): Promise<Insight[]> {
     return Array.from(this.insights.values())
       .filter(insight => insight.conversationId === conversationId)
-      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+      .sort((a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0));
   }
 
   // Farm profile operations (MemStorage)
@@ -270,22 +342,24 @@ export class MemStorage implements IStorage {
     return this.farmProfiles.get(userId);
   }
 
-  async upsertFarmProfile(userId: number, profile: InsertFarmProfile): Promise<FarmProfile> {
+  async upsertFarmProfile(userId: number, profile: Partial<Omit<InsertFarmProfile, "userId">>): Promise<FarmProfile> {
+    // Merge with existing so partial PUTs preserve unspecified fields.
     const existing = this.farmProfiles.get(userId);
+    const merged = { ...(existing ?? {}), ...profile } as InsertFarmProfile;
     const now = new Date();
     const fp: FarmProfile = {
       id: existing?.id || (this.insightId++),
       userId,
-      farmName: profile.farmName || "My Farm",
-      location: profile.location || "",
-      lat: profile.lat || null,
-      lng: profile.lng || null,
-      acres: profile.acres ?? 0,
-      crops: profile.crops || [],
-      soilType: profile.soilType || "",
-      waterSource: profile.waterSource || "",
-      climateZone: profile.climateZone || "",
-      hardinessZone: profile.hardinessZone || "",
+      farmName: merged.farmName ?? "",
+      location: merged.location ?? "",
+      lat: merged.lat ?? null,
+      lng: merged.lng ?? null,
+      acres: merged.acres ?? 0,
+      crops: merged.crops ?? [],
+      soilType: merged.soilType ?? "",
+      waterSource: merged.waterSource ?? "",
+      climateZone: merged.climateZone ?? "",
+      hardinessZone: merged.hardinessZone ?? "",
       createdAt: existing?.createdAt || now,
       updatedAt: now,
     };
@@ -310,7 +384,7 @@ export class MemStorage implements IStorage {
 export class PostgresStorage implements IStorage {
   private pool: Pool;
   private db: ReturnType<typeof drizzle>;
-  sessionStore: session.SessionStore;
+  sessionStore: session.Store;
 
   constructor(databaseUrl: string) {
     this.pool = new Pool({
@@ -366,6 +440,11 @@ export class PostgresStorage implements IStorage {
     return result[0];
   }
 
+  async getUserByStripeSubscriptionId(subscriptionId: string): Promise<User | undefined> {
+    const result = await this.db.select().from(users).where(eq(users.stripeSubscriptionId, subscriptionId)).limit(1);
+    return result[0];
+  }
+
   async createUser(insertUser: InsertUser): Promise<User> {
     const result = await this.db.insert(users).values(insertUser).returning();
     return result[0];
@@ -377,7 +456,6 @@ export class PostgresStorage implements IStorage {
       .set({
         stripeCustomerId: stripeInfo.stripeCustomerId,
         stripeSubscriptionId: stripeInfo.stripeSubscriptionId,
-        subscriptionStatus: "active",
       })
       .where(eq(users.id, userId))
       .returning();
@@ -395,6 +473,39 @@ export class PostgresStorage implements IStorage {
 
     if (!result[0]) throw new Error(`User with ID ${userId} not found`);
     return result[0];
+  }
+
+  async getUserApiKey(userId: number): Promise<string | null> {
+    const user = await this.getUser(userId);
+    if (!user || !user.openRouterKey) return null;
+    if (!ENCRYPTION_KEY) {
+      console.error("[BYOK] ENCRYPTION_KEY not configured — cannot decrypt user API key");
+      return null;
+    }
+    try {
+      return decryptApiKey(user.openRouterKey, ENCRYPTION_KEY);
+    } catch (err) {
+      console.error("[BYOK] Failed to decrypt user API key:", (err as Error).message);
+      return null;
+    }
+  }
+
+  async setUserApiKey(userId: number, key: string): Promise<void> {
+    if (!ENCRYPTION_KEY) {
+      throw new Error("ENCRYPTION_KEY not configured");
+    }
+    const encrypted = encryptApiKey(key, ENCRYPTION_KEY);
+    await this.db
+      .update(users)
+      .set({ openRouterKey: encrypted })
+      .where(eq(users.id, userId));
+  }
+
+  async removeUserApiKey(userId: number): Promise<void> {
+    await this.db
+      .update(users)
+      .set({ openRouterKey: null })
+      .where(eq(users.id, userId));
   }
 
   // ── Conversation operations ────────────────────────────────────────────────
@@ -437,11 +548,12 @@ export class PostgresStorage implements IStorage {
   }
 
   async updateExpert(expertId: number, updates: Partial<Expert>): Promise<Expert> {
-    // Only allow updating name, model, systemPrompt, avatarUrl
+    // Only allow updating name, model, systemPrompt, customInstructions, avatarUrl
     const allowed = {
       ...(updates.name !== undefined && { name: updates.name }),
       ...(updates.model !== undefined && { model: updates.model }),
       ...(updates.systemPrompt !== undefined && { systemPrompt: updates.systemPrompt }),
+      ...(updates.customInstructions !== undefined && { customInstructions: updates.customInstructions }),
       ...(updates.avatarUrl !== undefined && { avatarUrl: updates.avatarUrl }),
     };
 
@@ -457,7 +569,7 @@ export class PostgresStorage implements IStorage {
 
   // ── Message operations ─────────────────────────────────────────────────────
 
-  async createMessage(insertMessage: InsertMessage & { artifacts?: any[] }): Promise<Message> {
+  async createMessage(insertMessage: InsertMessage): Promise<Message> {
     const values = { ...insertMessage, artifacts: insertMessage.artifacts || [] };
     const result = await this.db.insert(messages).values(values).returning();
     const raw = result[0];
@@ -522,15 +634,17 @@ export class PostgresStorage implements IStorage {
     return result[0];
   }
 
-  async upsertFarmProfile(userId: number, profile: InsertFarmProfile): Promise<FarmProfile> {
+  async upsertFarmProfile(userId: number, profile: Partial<Omit<InsertFarmProfile, "userId">>): Promise<FarmProfile> {
     // Check if a profile already exists for this user
     const existing = await this.getFarmProfile(userId);
 
     if (existing) {
-      // Update existing
+      // Update existing — merge with current row so partial PUTs
+      // preserve fields the client didn't send.
       const result = await this.db
         .update(farmProfiles)
         .set({
+          ...existing,
           ...profile,
           userId: userId,
           updatedAt: new Date(),
@@ -567,7 +681,7 @@ export class PostgresStorage implements IStorage {
 
     // Check if cache is still fresh (within 30 minutes)
     const thirtyMinutesAgo = new Date(Date.now() - 30 * 60 * 1000);
-    if (entry.fetchedAt < thirtyMinutesAgo) {
+    if (!entry.fetchedAt || entry.fetchedAt < thirtyMinutesAgo) {
       return undefined;
     }
 

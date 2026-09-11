@@ -39,6 +39,7 @@ interface ExpertCardProps {
   isLoadingModels: boolean;
   onToggle: () => void;
   onChangeModel: (newModel: string) => void;
+  userTier?: string;
 }
 
 // Helper to get model performance metrics (would be replaced with actual data in a production app)
@@ -81,16 +82,17 @@ export default function ExpertCard({
   isLoadingModels,
   onToggle,
   onChangeModel,
+  userTier,
 }: ExpertCardProps) {
   const [searchTerm, setSearchTerm] = useState("");
   const [modelCategory, setModelCategory] = useState<string | null>(null);
   const [isModelPickerOpen, setIsModelPickerOpen] = useState(false);
 
   const cardClasses = `border rounded-lg p-3 transition-all ${
-    isSelected 
-      ? 'border-primary border-2 bg-primary-light bg-opacity-10 shadow-sm' 
-      : isAlreadyAdded 
-        ? 'border-neutral-300 bg-neutral-50 opacity-75' 
+    isSelected
+      ? 'border-primary border-2 bg-primary/10 shadow-sm'
+      : isAlreadyAdded
+        ? 'border-neutral-300 bg-neutral-50 opacity-75'
         : 'border-neutral-200 hover:border-primary hover:shadow-sm'
   }`;
 
@@ -221,22 +223,32 @@ export default function ExpertCard({
                   
                   {availableCategories.length > 1 && (
                     <div className="flex flex-wrap gap-1 mt-2">
-                      <Badge 
-                        variant={!modelCategory ? "default" : "outline"} 
-                        className="cursor-pointer text-xs"
+                      <button
+                        type="button"
+                        aria-pressed={!modelCategory}
                         onClick={() => setModelCategory(null)}
+                        className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium cursor-pointer transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                          !modelCategory
+                            ? "bg-primary text-primary-foreground"
+                            : "border border-neutral-300 text-neutral-700 hover:bg-neutral-100"
+                        }`}
                       >
                         All
-                      </Badge>
+                      </button>
                       {availableCategories.map(category => (
-                        <Badge 
+                        <button
                           key={category}
-                          variant={modelCategory === category ? "default" : "outline"} 
-                          className="cursor-pointer text-xs"
+                          type="button"
+                          aria-pressed={modelCategory === category}
                           onClick={() => setModelCategory(category === modelCategory ? null : category)}
+                          className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium cursor-pointer transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                            modelCategory === category
+                              ? "bg-primary text-primary-foreground"
+                              : "border border-neutral-300 text-neutral-700 hover:bg-neutral-100"
+                          }`}
                         >
                           {category}
-                        </Badge>
+                        </button>
                       ))}
                     </div>
                   )}
@@ -259,22 +271,26 @@ export default function ExpertCard({
                             </h4>
                             <div>
                               {models.map((model) => (
-                                <div 
+                                <button
+                                  type="button"
                                   key={model.id}
                                   className={`
-                                    flex items-center justify-between w-full p-2 text-left hover:bg-muted rounded-md cursor-pointer
+                                    flex items-center justify-between w-full p-2 text-left rounded-md cursor-pointer transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring hover:bg-muted
                                     ${selectedModel === model.id ? 'bg-muted' : ''}
                                   `}
                                   onClick={() => handleSelectModel(model.id)}
                                 >
-                                  <div>
+                                  <div className="flex items-center gap-2">
                                     <ModelBadge modelId={model.id} modelName={model.name} size="sm" showId={false} />
+                                    {userTier === "free" && !model.id.endsWith(":free") && !model.id.startsWith("local/") && (
+                                      <Badge variant="secondary" className="text-[10px] px-1 py-0">PRO</Badge>
+                                    )}
                                     <p className="text-xs text-gray-500 mt-0.5">{model.description?.substring(0, 60)}{model.description?.length > 60 ? '...' : ''}</p>
                                   </div>
                                   {selectedModel === model.id && (
                                     <Check className="h-4 w-4 text-primary ml-2 flex-shrink-0" />
                                   )}
-                                </div>
+                                </button>
                               ))}
                             </div>
                           </div>

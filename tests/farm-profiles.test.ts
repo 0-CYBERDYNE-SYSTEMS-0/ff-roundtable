@@ -19,7 +19,8 @@ import type { Express } from "express";
 
 // ── Force MemStorage BEFORE any server imports ──
 process.env.DATABASE_URL = "";
-process.env.SESSION_SECRET="vite..._ENV = "test";
+process.env.SESSION_SECRET = "test-secret";
+process.env.NODE_ENV = "test";
 
 // ── Mock weather module ──
 const { mockGetWeather, mockFormatWeather } = vi.hoisted(() => ({
@@ -63,6 +64,23 @@ async function createTestApp(): Promise<Express> {
 async function devLogin(agent: request.SuperAgentTest) {
   const res = await agent.post("/api/dev-login");
   expect(res.status).toBe(200);
+  return agent;
+}
+
+let freshUserCounter = 0;
+
+// Register a unique user and log in. Use when a test needs a clean slate
+// (the shared dev account's farm profile persists across tests).
+async function freshUserLogin(agent: ReturnType<typeof request.agent>) {
+  freshUserCounter += 1;
+  const res = await agent
+    .post("/api/register")
+    .send({
+      username: `fp_fresh_${freshUserCounter}_${Date.now()}`,
+      password: "testpass123",
+      email: `fp_fresh_${freshUserCounter}@example.com`,
+    });
+  expect(res.status).toBe(201);
   return agent;
 }
 
@@ -254,7 +272,7 @@ describe("PUT /api/protected/farm-profile", () => {
 
   it("accepts farm profile with all optional fields empty", async () => {
     const agent = request.agent(app);
-    await devLogin(agent);
+    await freshUserLogin(agent); // fresh user: dev account's profile persists across tests
 
     const res = await agent.put("/api/protected/farm-profile")
       .send({ farmName: "Minimal Farm" });
@@ -324,7 +342,7 @@ describe("GET /api/protected/weather", () => {
 
   it("returns available:false when farm profile has no coordinates", async () => {
     const agent = request.agent(app);
-    await devLogin(agent);
+    await freshUserLogin(agent); // fresh user: dev account's profile persists across tests
 
     const res = await agent.get("/api/protected/weather");
     expect(res.status).toBe(200);

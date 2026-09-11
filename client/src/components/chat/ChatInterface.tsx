@@ -15,6 +15,7 @@ import ArtifactDisplay from "../artifacts/ArtifactDisplay";
 import ExpertSettingsModal from "../expert/ExpertSettingsModal";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { useQueryClient } from "@tanstack/react-query";
+import { useToast } from "@/hooks/use-toast";
 
 interface ChatInterfaceProps {
   messages: Message[];
@@ -22,6 +23,9 @@ interface ChatInterfaceProps {
   onSendMessage: (content: string) => void;
   onUploadFile: (file: File) => void;
   isLoading: boolean;
+  isUploading?: boolean;
+  isLoadingMessages?: boolean;
+  messagesError?: boolean;
   user: User | null;
   insights: any[];
   visualizations: any[];
@@ -35,6 +39,9 @@ export default function ChatInterface({
   onSendMessage,
   onUploadFile,
   isLoading,
+  isUploading = false,
+  isLoadingMessages = false,
+  messagesError = false,
   user,
   insights,
   visualizations,
@@ -42,6 +49,7 @@ export default function ChatInterface({
   typingExpertIds = new Set(),
 }: ChatInterfaceProps) {
   const queryClient = useQueryClient();
+  const { toast } = useToast();
   const [messageContent, setMessageContent] = useState("");
   const [expertsCollapsed, setExpertsCollapsed] = useState(false);
   const [rightSidebarWidth, setRightSidebarWidth] = useState(400);
@@ -49,10 +57,36 @@ export default function ChatInterface({
   const [isExpertModalOpen, setIsExpertModalOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const scrollAreaRef = useRef<HTMLDivElement>(null);
+  const isNearBottomRef = useRef(true);
   const isMobile = useIsMobile();
   const [showMobileExpertPanel, setShowMobileExpertPanel] = useState(false);
 
-  // Get background color for expert based on ID - using farm theme
+  // Track whether the user is reading near the bottom so streaming tokens
+  // don't yank the viewport down while they scroll back through history.
+  useEffect(() => {
+    const viewport = scrollAreaRef.current?.querySelector<HTMLElement>(
+      "[data-radix-scroll-area-viewport]"
+    );
+    if (!viewport) return;
+    const handleScroll = () => {
+      isNearBottomRef.current =
+        viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 120;
+    };
+    handleScroll();
+    viewport.addEventListener("scroll", handleScroll, { passive: true });
+    return () => viewport.removeEventListener("scroll", handleScroll);
+  }, []);
+
+  useEffect(() => {
+    // A fresh conversation load starts pinned to the latest message.
+    if (isLoadingMessages) {
+      isNearBottomRef.current = true;
+    }
+    if (isNearBottomRef.current) {
+      messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+  }, [messages, streamingMessages, isLoading, isLoadingMessages]);
   const getExpertBubbleColor = (expertId: number) => {
     const colors = [
       "bg-farm-powder/40 border-farm-blue/20",
@@ -94,6 +128,7 @@ export default function ChatInterface({
   const handleFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
       onUploadFile(e.target.files[0]);
+      e.target.value = "";
     }
   };
 
@@ -120,18 +155,23 @@ export default function ChatInterface({
       });
 
       if (!response.ok) {
-        throw new Error('Failed to update expert');
+        const responseText = await response.text();
+        throw new Error(responseText || 'Failed to update expert');
       }
 
-      // Invalidate relevant queries to refresh data
+      // Invalidate the same query key used by HomePage.
       const expert = experts.find(e => e.id === expertId);
       if (expert) {
-        queryClient.invalidateQueries({ queryKey: ['conversation', expert.conversationId] });
-        queryClient.invalidateQueries({ queryKey: ['experts', expert.conversationId] });
+        queryClient.invalidateQueries({ queryKey: [`/api/protected/conversations/${expert.conversationId}/experts`] });
       }
     } catch (error) {
       console.error('Error updating expert:', error);
-      alert('Failed to update expert. Please try again.');
+      toast({
+        title: "Failed to update expert",
+        description: error instanceof Error ? error.message : "Please try again.",
+        variant: "destructive",
+      });
+      throw error;
     }
   };
 
@@ -144,20 +184,7 @@ export default function ChatInterface({
       if (!messagesByDate[date]) {
         messagesByDate[date] = [];
       }
-      
-      // Check for duplicate messages (same content from same user/expert within 2 seconds)
-      const lastMessage = messagesByDate[date][messagesByDate[date].length - 1];
-      const isDuplicate = lastMessage && 
-        lastMessage.content === message.content &&
-        lastMessage.userId === message.userId &&
-        lastMessage.expertId === message.expertId &&
-        lastMessage.timestamp &&
-        message.timestamp &&
-        Math.abs(new Date(lastMessage.timestamp).getTime() - new Date(message.timestamp).getTime()) < 2000;
-      
-      if (!isDuplicate) {
-        messagesByDate[date].push(message);
-      }
+      messagesByDate[date].push(message);
     }
   });
 
@@ -191,7 +218,7 @@ export default function ChatInterface({
 
   // Enhanced loading indicator component
   const renderLoadingIndicator = () => {
-    if (!isLoading) return null;
+    if (!isLoading || isLoadingMessages || messagesError || streamingMessages.size > 0) return null;
 
     return (
       <div className="space-y-4">
@@ -227,16 +254,19 @@ export default function ChatInterface({
   };
 
   return (
-    <div className="w-full flex h-full overflow-hidden">
+    <div className="relative w-full flex h-full overflow-hidden">
       {/* Left Sidebar - Experts List */}
-      <div className={`flex-shrink-0 bg-gradient-to-b from-farm-powder/30 to-white border-r border-neutral-200 transition-all duration-300 md:flex ${isMobile && !showMobileExpertPanel ? 'hidden' : ''} ${expertsCollapsed ? 'w-12' : 'w-64'}`}>
+      <div className={`${isMobile ? 'absolute inset-y-0 left-0 z-30 shadow-xl' : ''} flex-shrink-0 bg-gradient-to-b from-farm-powder/30 to-white border-r border-neutral-200 transition-all duration-300 md:flex ${isMobile && !showMobileExpertPanel ? 'hidden' : ''} ${expertsCollapsed ? 'w-12' : 'w-64'}`}>
         <div className="h-full flex flex-col">
           <div className="p-3 border-b border-neutral-200 flex items-center justify-between">
             {!expertsCollapsed && <h3 className="font-semibold text-farm-blue text-sm">Expert Panel</h3>}
             <button
+              type="button"
               onClick={() => setExpertsCollapsed(!expertsCollapsed)}
               className="p-1.5 hover:bg-farm-blue/10 rounded transition-colors"
               title={expertsCollapsed ? "Expand expert list" : "Collapse expert list"}
+              aria-label={expertsCollapsed ? "Expand expert list" : "Collapse expert list"}
+              aria-expanded={!expertsCollapsed}
             >
               <svg className={`w-4 h-4 text-farm-blue transition-transform ${expertsCollapsed ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
@@ -307,13 +337,31 @@ export default function ChatInterface({
         </div>
       </div>
 
+      {isMobile && showMobileExpertPanel && (
+        <div
+          className="absolute inset-0 z-20 bg-black/40"
+          aria-hidden="true"
+          onClick={() => setShowMobileExpertPanel(false)}
+        />
+      )}
+
       {/* Main Chat Area */}
       <div className="flex-1 flex flex-col h-full bg-white border-r border-neutral-200 min-w-0">
         {/* Chat Messages */}
-        <ScrollArea className="flex-1 p-4">
-          {renderWelcomeMessage()}
-          
-          {Object.entries(messagesByDate).map(([date, dateMessages]) => (
+        <ScrollArea ref={scrollAreaRef} className="flex-1 p-4">
+          {isLoadingMessages && (
+            <div role="status" className="flex items-center justify-center gap-2 py-8 text-sm text-neutral-500">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Loading conversation…
+            </div>
+          )}
+          {messagesError && (
+            <div role="alert" className="rounded-lg border border-red-200 bg-red-50 p-4 text-center text-sm text-red-700">
+              We couldn’t load this conversation. Please select it again or refresh the page.
+            </div>
+          )}
+          {!isLoadingMessages && !messagesError && renderWelcomeMessage()}
+          {!isLoadingMessages && !messagesError && Object.entries(messagesByDate).map(([date, dateMessages]) => (
             <div key={date}>
               <div className="text-center my-4">
                 <span className="text-xs bg-farm-tan/30 text-farm-blue px-3 py-1.5 rounded-full font-medium shadow-sm">
@@ -366,16 +414,8 @@ export default function ChatInterface({
                         </div>
                         
                         {/* Render artifacts inline */}
-                        {(() => {
-                          console.log(`[ChatInterface] Message ${message.id}: artifacts=`, message.artifacts, `length=${message.artifacts?.length || 0}`);
-                          return null;
-                        })()}
                         {message.artifacts && message.artifacts.length > 0 && (
                           <div className="space-y-2" data-testid={`artifacts-message-${message.id}`}>
-                            {(() => {
-                              console.log(`[ChatInterface] RENDERING ${message.artifacts.length} artifacts for message ${message.id}`);
-                              return null;
-                            })()}
                             {message.artifacts.map((artifact, index) => (
                               <ArtifactDisplay
                                 key={`${message.id}-artifact-${index}`}
@@ -461,8 +501,10 @@ export default function ChatInterface({
               className="text-farm-blue hover:text-farm-green hover:bg-farm-powder/30 transition-all duration-200"
               onClick={handleFileUpload}
               title="Upload File"
+              aria-label={isUploading ? "Uploading file" : "Upload file"}
+              disabled={isUploading}
             >
-              <Paperclip className="h-5 w-5" />
+              {isUploading ? <Loader2 className="h-5 w-5 animate-spin" /> : <Paperclip className="h-5 w-5" />}
             </Button>
             <div className="relative flex-1">
               <Textarea
@@ -471,32 +513,20 @@ export default function ChatInterface({
                 onChange={(e) => setMessageContent(e.target.value)}
                 onKeyDown={handleKeyDown}
                 className="min-h-[60px] resize-none pr-10 border-farm-tan/40 focus:border-farm-blue focus:ring-farm-blue/20"
-                disabled={false}
+                aria-label="Message to the roundtable"
               />
             </div>
             <Button
               className="bg-gradient-to-br from-farm-green to-farm-dark-green hover:from-farm-dark-green hover:to-farm-green text-white rounded-full p-2 ml-2 h-11 w-11 flex items-center justify-center shadow-md hover:shadow-lg transition-all duration-200 disabled:opacity-50"
               onClick={handleSendMessage}
               disabled={messageContent.trim() === ""}
+              aria-label="Send message"
             >
               <Send className="h-5 w-5" />
             </Button>
           </div>
         </div>
         
-        {/* Loading indicator for pending expert responses */}
-        {isLoading && (
-          <div className="flex items-start mb-4">
-            <div className="flex-shrink-0 mr-3">
-              <div className="w-10 h-10 rounded-full bg-gradient-to-br from-farm-blue to-farm-green flex items-center justify-center shadow-md">
-                <Loader2 className="h-5 w-5 animate-spin text-white" />
-              </div>
-            </div>
-            <div className="bg-farm-powder/30 border border-farm-tan/30 rounded-xl p-3 shadow-sm">
-              <p className="text-sm text-farm-blue font-medium">Experts are thinking...</p>
-            </div>
-          </div>
-        )}
       </div>
 
       {/* Floating button to toggle expert panel on mobile */}
@@ -506,6 +536,8 @@ export default function ChatInterface({
           size="icon"
           onClick={() => setShowMobileExpertPanel(!showMobileExpertPanel)}
           title={showMobileExpertPanel ? "Hide experts" : "Show experts"}
+          aria-label={showMobileExpertPanel ? "Hide experts" : "Show experts"}
+          aria-expanded={showMobileExpertPanel}
         >
           <Users className="h-5 w-5" />
         </Button>
