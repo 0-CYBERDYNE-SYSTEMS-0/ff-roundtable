@@ -16,6 +16,14 @@ interface SidebarPanelProps {
   activeConversationId: number | null;
   onRefreshInsights: () => void;
   isLoadingInsights: boolean;
+  isLoadingConversations?: boolean;
+  conversationsError?: boolean;
+  isLoadingInsightsData?: boolean;
+  insightsError?: boolean;
+  isLoadingFiles?: boolean;
+  filesError?: boolean;
+  isStartingNewSession?: boolean;
+  isUploading?: boolean;
   experts?: Expert[];
 }
 
@@ -30,6 +38,14 @@ export default function SidebarPanel({
   activeConversationId,
   onRefreshInsights,
   isLoadingInsights,
+  isLoadingConversations = false,
+  conversationsError = false,
+  isLoadingInsightsData = false,
+  insightsError = false,
+  isLoadingFiles = false,
+  filesError = false,
+  isStartingNewSession = false,
+  isUploading = false,
   experts = []
 }: SidebarPanelProps) {
   const [activeTab, setActiveTab] = useState<'conversations' | 'insights' | 'files'>('insights');
@@ -57,9 +73,10 @@ export default function SidebarPanel({
           <Button
             className="w-full bg-gradient-to-r from-farm-green to-farm-dark-green hover:from-farm-dark-green hover:to-farm-green text-white rounded-lg px-4 py-2.5 flex items-center justify-center mb-2 shadow-md hover:shadow-lg transition-all duration-200 font-semibold"
             onClick={onStartNewSession}
+            disabled={isStartingNewSession}
           >
             <Plus className="mr-2 h-4 w-4" />
-            New Roundtable
+            {isStartingNewSession ? "Creating…" : "New Roundtable"}
           </Button>
           <Button
             variant="outline"
@@ -74,18 +91,27 @@ export default function SidebarPanel({
         {/* Tabs */}
         <div className="flex border-b border-farm-tan/30 bg-white">
           <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === 'conversations'}
             className={`flex-1 py-3 text-center font-semibold text-sm transition-all duration-200 ${activeTab === 'conversations' ? 'text-farm-blue border-b-2 border-farm-blue bg-farm-powder/10' : 'text-neutral-600 hover:text-farm-blue hover:bg-farm-powder/5'}`}
             onClick={() => setActiveTab('conversations')}
           >
             Conversations
           </button>
           <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === 'insights'}
             className={`flex-1 py-3 text-center font-semibold text-sm transition-all duration-200 ${activeTab === 'insights' ? 'text-farm-blue border-b-2 border-farm-blue bg-farm-powder/10' : 'text-neutral-600 hover:text-farm-blue hover:bg-farm-powder/5'}`}
             onClick={() => setActiveTab('insights')}
           >
             Insights
           </button>
           <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === 'files'}
             className={`flex-1 py-3 text-center font-semibold text-sm transition-all duration-200 ${activeTab === 'files' ? 'text-farm-blue border-b-2 border-farm-blue bg-farm-powder/10' : 'text-neutral-600 hover:text-farm-blue hover:bg-farm-powder/5'}`}
             onClick={() => setActiveTab('files')}
           >
@@ -101,7 +127,11 @@ export default function SidebarPanel({
                 <h2 className="font-serif font-bold text-lg text-farm-blue">Your Conversations</h2>
               </div>
 
-              {conversations.length === 0 ? (
+              {isLoadingConversations ? (
+                <p className="py-8 text-center text-sm text-neutral-500">Loading conversations…</p>
+              ) : conversationsError ? (
+                <p role="alert" className="py-8 text-center text-sm text-red-600">Couldn’t load conversations. Please refresh the page.</p>
+              ) : conversations.length === 0 ? (
                 <div className="text-center py-8 text-neutral-500 space-y-4">
                   <div className="bg-farm-powder/20 rounded-xl p-6 border border-farm-tan/30">
                     <div className="text-4xl mb-3">📋</div>
@@ -115,16 +145,17 @@ export default function SidebarPanel({
               ) : (
                 <div className="space-y-2">
                   {conversations.map(conversation => (
-                    <div
+                    <button
                       key={conversation.id}
-                      className={`p-3 rounded-lg cursor-pointer transition-all duration-200 ${activeConversationId === conversation.id ? 'bg-farm-powder/30 border-2 border-farm-blue shadow-md' : 'bg-white border border-farm-tan/30 hover:bg-farm-powder/10 hover:border-farm-blue/30'}`}
+                      type="button"
+                      className={`w-full text-left p-3 rounded-lg cursor-pointer transition-all duration-200 ${activeConversationId === conversation.id ? 'bg-farm-powder/30 border-2 border-farm-blue shadow-md' : 'bg-white border border-farm-tan/30 hover:bg-farm-powder/10 hover:border-farm-blue/30'}`}
                       onClick={() => onSelectConversation(conversation.id)}
                     >
                       <h3 className="font-semibold text-farm-blue">{conversation.title}</h3>
                       <p className="text-xs text-neutral-600 mt-1">
                         {conversation.createdAt ? format(new Date(conversation.createdAt), 'MMM d, yyyy • h:mm a') : 'Unknown date'}
                       </p>
-                    </div>
+                    </button>
                   ))}
                 </div>
               )}
@@ -141,13 +172,18 @@ export default function SidebarPanel({
                   className="text-farm-blue hover:text-farm-green hover:bg-farm-powder/30 cursor-pointer h-8 w-8 transition-all duration-200"
                   title="Refresh insights"
                   onClick={onRefreshInsights}
-                  disabled={isLoadingInsights}
+                  disabled={isLoadingInsights || isLoadingInsightsData}
+                  aria-label="Refresh insights"
                 >
                   <RefreshCw className={`h-4 w-4 ${isLoadingInsights ? 'animate-spin' : ''}`} />
                 </Button>
               </div>
 
-              {insights.length === 0 ? (
+              {isLoadingInsightsData ? (
+                <p className="py-8 text-center text-sm text-neutral-500">Loading insights…</p>
+              ) : insightsError ? (
+                <p role="alert" className="py-8 text-center text-sm text-red-600">Couldn’t load insights. Please try refreshing.</p>
+              ) : insights.length === 0 ? (
                 <div className="text-center py-8 text-neutral-500 space-y-4">
                   <div className="bg-farm-powder/20 rounded-xl p-6 border border-farm-tan/30">
                     <div className="text-4xl mb-3">💡</div>
@@ -196,13 +232,19 @@ export default function SidebarPanel({
                     className="text-farm-blue hover:text-farm-green hover:bg-farm-powder/30 cursor-pointer h-8 w-8 transition-all duration-200"
                     title="Upload File"
                     onClick={handleFileUploadClick}
+                    disabled={isUploading || !activeConversationId}
+                    aria-label={isUploading ? "Uploading file" : "Upload file"}
                   >
                     <Upload className="h-4 w-4" />
                   </Button>
                 </div>
               </div>
 
-              {files.length === 0 ? (
+              {isLoadingFiles ? (
+                <p className="py-8 text-center text-sm text-neutral-500">Loading files…</p>
+              ) : filesError ? (
+                <p role="alert" className="py-8 text-center text-sm text-red-600">Couldn’t load files. Please try again.</p>
+              ) : files.length === 0 ? (
                 <div className="text-center py-8 text-neutral-500 space-y-4">
                   <div className="bg-farm-powder/20 rounded-xl p-6 border border-farm-tan/30">
                     <div className="text-4xl mb-3">📁</div>
@@ -230,6 +272,7 @@ export default function SidebarPanel({
                         download
                         className="text-farm-blue hover:text-farm-green transition-colors"
                         title="Download File"
+                        aria-label={`Download ${file.filename}`}
                       >
                         <FileDown className="h-4 w-4" />
                       </a>

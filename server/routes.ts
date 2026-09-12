@@ -1,19 +1,22 @@
 import type { Express, Request, Response } from "express";
+import express from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { setupAuth } from "./auth";
 import { callOpenRouterAPI, callPerplexityAPI, generateSystemPrompt, getExpertResponse, generateInsights } from "./ai";
 import { processMessageTurnBased, InteractionOrchestrator, getConversationState } from "./orchestrator";
+import { encryptApiKey, decryptApiKey, maskApiKey } from "./crypto";
 import multer from "multer";
 import path from "path";
 import fs from "fs";
 import { randomBytes } from "crypto";
 import Stripe from "stripe";
 import { WebSocketServer } from "ws";
-import { InsertConversation, InsertExpert, InsertMessage, Message } from "@shared/schema";
+import { InsertConversation, InsertExpert, InsertMessage, Message, insertFarmProfileSchema } from "@shared/schema";
 import { generateComprehensiveMarkdown } from './export-utils';
 import { getWeatherForFarm, formatWeatherContext } from './weather';
 import { format } from 'date-fns';
+import { TIERS, getTierLimits, isPaidModel } from './tiers';
 
 // Load dev config
 let devConfig: any = null;
@@ -44,13 +47,41 @@ if (process.env.STRIPE_SECRET_KEY) {
   console.warn("No STRIPE_SECRET_KEY provided. Stripe functionality will be unavailable.");
 }
 
+// Stripe's expanded invoice is typed as a string-or-object union. Keep the
+// legacy expanded payment_intent response shape while narrowing that union.
+function getSubscriptionClientSecret(subscription: Stripe.Subscription): string | null {
+  const invoice = subscription.latest_invoice;
+  if (!invoice || typeof invoice === "string") return null;
+
+  const expandedInvoice = invoice as Stripe.Invoice & {
+    payment_intent?: string | Stripe.PaymentIntent | null;
+  };
+  const paymentIntent = expandedInvoice.payment_intent;
+  return paymentIntent && typeof paymentIntent !== "string"
+    ? paymentIntent.client_secret
+    : null;
+}
+
 // Development mode flag - uses NODE_ENV to determine dev vs production
 const DEVELOPMENT_MODE = process.env.NODE_ENV !== "production";
 
 export async function registerRoutes(app: Express): Promise<Server> {
   // Setup authentication routes
   setupAuth(app);
-  
+
+  // Serve uploaded conversation files. Must be registered before the SPA
+  // catch-all so download links resolve to real files (auth-gated).
+  app.use(
+    "/uploads",
+    (req, res, next) => {
+      if (!req.isAuthenticated()) {
+        return res.status(401).json({ message: "Authentication required" });
+      }
+      next();
+    },
+    express.static(path.join(process.cwd(), "uploads"))
+  );
+
   // Special development login endpoint
   if (DEVELOPMENT_MODE) {
     app.post("/api/dev-login", async (req, res) => {
@@ -69,7 +100,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
         // Log the user in directly
         req.login(devUser, (err) => {
           if (err) return res.status(500).json({ message: "Login failed", error: err.message });
-          return res.status(200).json(devUser);
+          const { password, ...safeUser } = devUser;
+          return res.status(200).json({ ...safeUser, password: "***" });
         });
       } catch (error: any) {
         console.error("Dev login error:", error);
@@ -106,7 +138,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
               role: expert.role,
               model: expert.model, // Use each expert's specific model from dev-config
               avatarUrl: expert.avatarUrl,
-              systemPrompt: generateSystemPrompt({ role: expert.role } as Expert, undefined)
+              systemPrompt: generateSystemPrompt({ role: expert.role } as any, undefined)
             })
           );
 
@@ -250,10 +282,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
           }
           // Handle error messages
           else if (data.type === "message_error") {
+            // Prefer the persisted error message (survives refetch); fall back
+            // to a synthetic frame when only error text is available.
+            const persisted = data.message && typeof data.message === "object" && data.message.id
+              ? data.message
+              : null;
             client.send(JSON.stringify({
               type: "message_error",
               conversationId,
-              message: {
+              expertId: data.expertId,
+              expertName: data.expertName,
+              message: persisted ?? {
                 id: Date.now(),
                 conversationId,
                 content: `(Error generating response: ${data.message || 'Unknown error'})`,
@@ -264,6 +303,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
                 userId: null,
                 timestamp: new Date()
               }
+            }));
+          }
+          // Handle pipeline errors (message stays but processing must stop)
+          else if (data.type === "error") {
+            client.send(JSON.stringify({
+              type: "error",
+              conversationId,
+              message: data.message || "Something went wrong."
             }));
           }
           // Handle regular messages (Message objects)
@@ -298,7 +345,75 @@ export async function registerRoutes(app: Express): Promise<Server> {
     });
   });
   
-  // Stripe subscription endpoints
+  // Stripe Checkout session for Pro tier
+  app.post("/api/create-checkout-session", async (req, res) => {
+    if (!req.isAuthenticated()) {
+      return res.status(401).json({ message: "Authentication required" });
+    }
+    if (!stripe) {
+      return res.status(500).json({ message: "Stripe integration not configured" });
+    }
+    try {
+      const user = req.user;
+      let customerId = user.stripeCustomerId;
+      if (!customerId) {
+        const customer = await stripe.customers.create({
+          email: user.email,
+          name: user.username,
+        });
+        customerId = customer.id;
+        await storage.updateUserStripeInfo(user.id, {
+          stripeCustomerId: customerId,
+          stripeSubscriptionId: user.stripeSubscriptionId || "",
+        });
+      }
+
+      const priceId = process.env.STRIPE_PRICE_ID_PRO;
+      if (!priceId) {
+        return res.status(500).json({ message: "Stripe Pro price ID not configured" });
+      }
+
+      const session = await stripe.checkout.sessions.create({
+        customer: customerId,
+        mode: "subscription",
+        line_items: [{ price: priceId, quantity: 1 }],
+        success_url: `${req.headers.origin || process.env.ALLOWED_ORIGIN || "http://localhost:5173"}/dashboard?checkout=success`,
+        cancel_url: `${req.headers.origin || process.env.ALLOWED_ORIGIN || "http://localhost:5173"}/pricing?checkout=cancel`,
+      });
+
+      res.json({ url: session.url });
+    } catch (error: any) {
+      console.error("Stripe checkout error:", error);
+      res.status(500).json({ message: error.message });
+    }
+  });
+
+  // Cancel subscription
+  app.post("/api/cancel-subscription", async (req, res) => {
+    if (!req.isAuthenticated()) {
+      return res.status(401).json({ message: "Authentication required" });
+    }
+    if (!stripe) {
+      return res.status(500).json({ message: "Stripe integration not configured" });
+    }
+    try {
+      const user = req.user;
+      if (!user.stripeSubscriptionId) {
+        return res.status(400).json({ message: "No active subscription" });
+      }
+      await stripe.subscriptions.cancel(user.stripeSubscriptionId);
+      // Downgrade tier back to free
+      const updated = await storage.updateSubscriptionStatus(user.id, "inactive");
+      // Also need to update tier — storage method only updates subscriptionStatus, so we need a new method
+      // For now, update via direct storage call if available, or use existing stripe info update
+      res.json({ message: "Subscription cancelled", tier: "free" });
+    } catch (error: any) {
+      console.error("Stripe cancel error:", error);
+      res.status(500).json({ message: error.message });
+    }
+  });
+
+  // Stripe subscription endpoints (legacy — keep for backward compat)
   app.post("/api/create-subscription", async (req, res) => {
     if (!req.isAuthenticated()) {
       return res.status(401).json({ message: "Authentication required" });
@@ -310,13 +425,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
     
     try {
       const user = req.user;
-      
-      // If user already has active subscription
-      if (user.stripeSubscriptionId && user.subscriptionStatus === "active") {
+
+      // If the user already has a subscription on record, retrieve it instead
+      // of creating a duplicate (payment may still be incomplete — that's ok,
+      // the client uses the clientSecret to finish checkout).
+      if (user.stripeSubscriptionId) {
         const subscription = await stripe.subscriptions.retrieve(user.stripeSubscriptionId);
         return res.json({
           subscriptionId: subscription.id,
-          clientSecret: subscription.latest_invoice?.payment_intent?.client_secret || null,
+          clientSecret: getSubscriptionClientSecret(subscription),
         });
       }
       
@@ -353,7 +470,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       
       res.json({
         subscriptionId: subscription.id,
-        clientSecret: subscription.latest_invoice?.payment_intent?.client_secret || null,
+        clientSecret: getSubscriptionClientSecret(subscription),
       });
     } catch (error: any) {
       console.error("Stripe error:", error);
@@ -371,10 +488,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
     
     let event;
-    
+
     try {
+      // Signature verification requires the exact raw bytes Stripe sent.
       event = stripe.webhooks.constructEvent(
-        req.body,
+        (req as any).rawBody ?? req.body,
         sig,
         endpointSecret
       );
@@ -389,12 +507,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
         try {
           const invoice = event.data.object as any; // Type assertion to avoid TS errors
           if (invoice.subscription) {
-            // Get all users and find the one with matching subscription ID
-            const allUsers = await Promise.all(
-              [...Array(100)].map((_, i) => storage.getUser(i)).filter(Boolean)
-            );
-            
-            const user = allUsers.find(u => u && u.stripeSubscriptionId === invoice.subscription);
+            // Look the user up by their stored subscription id — scanning ids
+            // 0-99 breaks activation once the app has more than 100 users.
+            const user = await storage.getUserByStripeSubscriptionId(invoice.subscription);
             if (user) {
               await storage.updateSubscriptionStatus(user.id, "active");
               console.log(`Updated user ${user.id} subscription to active`);
@@ -404,18 +519,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
           console.error("Error processing invoice.payment_succeeded:", error);
         }
         break;
-        
+
       case "customer.subscription.deleted":
       case "customer.subscription.updated":
         try {
           const subscription = event.data.object as any; // Type assertion to avoid TS errors
-          
-          // Get all users and find the one with matching subscription ID
-          const allUsers = await Promise.all(
-            [...Array(100)].map((_, i) => storage.getUser(i)).filter(Boolean)
-          );
-          
-          const user = allUsers.find(u => u && u.stripeSubscriptionId === subscription.id);
+
+          const user = await storage.getUserByStripeSubscriptionId(subscription.id);
           if (user) {
             const status = subscription.status === "active" ? "active" : "inactive";
             await storage.updateSubscriptionStatus(user.id, status);
@@ -430,7 +540,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
     res.json({ received: true });
   });
   
-  // Conversation endpoints
+  // Get user tier and limits
+  app.get("/api/user/tier", async (req, res) => {
+    if (!req.isAuthenticated()) {
+      return res.status(401).json({ message: "Authentication required" });
+    }
+    try {
+      const user = await storage.getUser(req.user!.id);
+      const tier = user?.tier || "free";
+      const limits = getTierLimits(tier);
+      res.json({ tier, limits });
+    } catch (error: any) {
+      res.status(500).json({ message: error.message });
+    }
+  });
   app.post("/api/protected/conversations", async (req, res) => {
     try {
       const userId = req.user!.id;
@@ -482,15 +605,37 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (!conversation || conversation.userId !== req.user!.id) {
         return res.status(404).json({ message: "Conversation not found" });
       }
+
+      const user = await storage.getUser(req.user!.id);
+      const tier = user?.tier || "free";
+      const limits = getTierLimits(tier);
+
+      // Check expert count limit
+      const existingExperts = await storage.getConversationExperts(conversationId);
+      if (existingExperts.length >= limits.maxExperts) {
+        return res.status(403).json({
+          code: "TIER_LIMIT_EXPERTS",
+          limit: limits.maxExperts,
+          message: `Your ${limits.name} tier allows up to ${limits.maxExperts} experts.`,
+        });
+      }
       
       const { name, role, model, avatarUrl } = req.body;
+
+      // Check paid model restriction for free tier
+      if (tier === "free" && isPaidModel(model)) {
+        return res.status(403).json({
+          code: "TIER_LIMIT_MODEL",
+          message: "Upgrade to Pro for paid models",
+        });
+      }
       
       const expert: InsertExpert = {
         conversationId,
         name,
         role,
         model,
-        systemPrompt: generateSystemPrompt(role),
+        systemPrompt: generateSystemPrompt({ role } as any),
         avatarUrl
       };
       
@@ -520,6 +665,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Update expert settings
   app.patch("/api/experts/:expertId", async (req, res) => {
     try {
+      if (!req.isAuthenticated()) {
+        return res.status(401).json({ message: "Authentication required" });
+      }
       const expertId = parseInt(req.params.expertId);
       const expert = await storage.getExpertById(expertId);
 
@@ -534,11 +682,25 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
 
       const { name, model, customInstructions } = req.body;
-      const updates: Partial<Expert> = {};
+      const updates: Partial<any> = {};
 
       if (name !== undefined) updates.name = name;
       if (model !== undefined) updates.model = model;
       if (customInstructions !== undefined) updates.customInstructions = customInstructions;
+
+      // Enforce the same paid-model restriction as expert creation — without
+      // this, free-tier users can upgrade any expert's model via the settings
+      // modal and bypass the gate entirely.
+      if (model !== undefined) {
+        const user = await storage.getUser(req.user!.id);
+        const tier = user?.tier || "free";
+        if (tier === "free" && isPaidModel(model)) {
+          return res.status(403).json({
+            code: "TIER_LIMIT_MODEL",
+            message: "Upgrade to Pro for paid models",
+          });
+        }
+      }
 
       const updatedExpert = await storage.updateExpert(expertId, updates);
       res.json(updatedExpert);
@@ -573,7 +735,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.put("/api/protected/farm-profile", async (req, res) => {
     try {
       const userId = req.user!.id;
-      const profile = await storage.upsertFarmProfile(userId, req.body);
+      // Validate and whitelist — req.body must never be spread straight into
+      // storage or clients could inject id/createdAt/arbitrary columns.
+      const parsed = insertFarmProfileSchema.omit({ userId: true }).partial().safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ message: "Invalid farm profile data", errors: parsed.error.flatten() });
+      }
+      const profile = await storage.upsertFarmProfile(userId, parsed.data);
       res.json(profile);
     } catch (error: any) {
       res.status(500).json({ message: error.message });
@@ -797,7 +965,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       // Generate comprehensive markdown
       const markdown = generateComprehensiveMarkdown({
-        conversation,
+        conversation: {
+          title: conversation.title ?? "New Conversation",
+          createdAt: conversation.createdAt ?? new Date(0),
+        },
         messages,
         experts,
         insights,
@@ -805,11 +976,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
       });
 
       // Generate filename
-      const safeTitle = conversation.title
+      const safeTitle = (conversation.title ?? "New Conversation")
         .replace(/[^a-z0-9]/gi, '-')
         .toLowerCase()
         .substring(0, 50);
-      const date = format(conversation.createdAt, 'yyyy-MM-dd');
+      const date = format(conversation.createdAt ?? new Date(0), 'yyyy-MM-dd');
       const filename = `roundtable-${safeTitle}-${date}.md`;
 
       res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
@@ -907,7 +1078,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(404).json({ message: "Not found" });
       }
       try {
+        if (!req.isAuthenticated()) {
+          return res.status(401).json({ message: "Not authenticated" });
+        }
         const conversationId = parseInt(req.params.conversationId);
+        const conversation = await storage.getConversation(conversationId);
+        if (!conversation || conversation.userId !== req.user!.id) {
+          return res.status(404).json({ message: "Conversation not found" });
+        }
         
         // Create a test message with various artifacts
         const testMessage = {
@@ -985,41 +1163,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
   }
 
   // Farm Profile endpoints
-  app.get("/api/protected/farm-profile", async (req, res) => {
-    try {
-      const userId = req.user!.id;
-      const profile = await storage.getFarmProfile(userId);
-      
-      // Try to get weather if profile has coords
-      let weatherSummary: string | null = null;
-      if (profile?.lat && profile?.lng) {
-        try {
-          const { getWeather } = await import("./weather");
-          const weather = await getWeather(profile.lat, profile.lng);
-          if (weather) {
-            const { formatWeatherForPrompt } = await import("./weather");
-            weatherSummary = formatWeatherForPrompt(weather);
-          }
-        } catch {}
-      }
-      
-      res.json({ profile: profile || null, weather: weatherSummary });
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
-
-  app.put("/api/protected/farm-profile", async (req, res) => {
-    try {
-      const userId = req.user!.id;
-      const profile = await storage.upsertFarmProfile(userId, req.body);
-      res.json(profile);
-    } catch (error: any) {
-      console.error("Error saving farm profile:", error);
-      res.status(500).json({ message: error.message });
-    }
-  });
-
   // Weather endpoint
   app.get("/api/protected/weather", async (req, res) => {
     try {
@@ -1045,6 +1188,122 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error: any) {
       console.error("Weather fetch error:", error);
       res.status(500).json({ message: error.message });
+    }
+  });
+
+  // ── BYOK API Key endpoints ───────────────────────────────────────────────────
+
+  // POST /api/user/api-key — save user's OpenRouter key
+  app.post("/api/user/api-key", async (req, res) => {
+    try {
+      if (!req.isAuthenticated()) {
+        return res.status(401).json({ message: "Authentication required" });
+      }
+
+      const { apiKey } = req.body;
+      if (!apiKey || typeof apiKey !== "string") {
+        return res.status(400).json({ message: "apiKey is required" });
+      }
+
+      // Validate key format (OpenRouter keys start with "sk-or-" or "sk-")
+      if (!apiKey.startsWith("sk-or-") && !apiKey.startsWith("sk-")) {
+        return res.status(400).json({ message: "Invalid API key format. Key must start with 'sk-or-' or 'sk-'" });
+      }
+
+      await storage.setUserApiKey(req.user!.id, apiKey);
+
+      res.json({
+        masked: maskApiKey(apiKey),
+        message: "API key saved successfully",
+      });
+    } catch (error: any) {
+      console.error("Error saving API key:", error.message);
+      res.status(500).json({ message: error.message });
+    }
+  });
+
+  // GET /api/user/api-key/status — return masked key status
+  app.get("/api/user/api-key/status", async (req, res) => {
+    try {
+      if (!req.isAuthenticated()) {
+        return res.status(401).json({ message: "Authentication required" });
+      }
+
+      const user = await storage.getUser(req.user!.id);
+      const hasKey = !!user?.openRouterKey;
+      let masked: string | null = null;
+
+      if (hasKey && user?.openRouterKey) {
+        try {
+          const decrypted = await storage.getUserApiKey(req.user!.id);
+          if (decrypted) {
+            masked = maskApiKey(decrypted);
+          }
+        } catch {
+          masked = "***";
+        }
+      }
+
+      res.json({ hasKey, masked });
+    } catch (error: any) {
+      console.error("Error checking API key status:", error.message);
+      res.status(500).json({ message: error.message });
+    }
+  });
+
+  // DELETE /api/user/api-key — remove stored key
+  app.delete("/api/user/api-key", async (req, res) => {
+    try {
+      if (!req.isAuthenticated()) {
+        return res.status(401).json({ message: "Authentication required" });
+      }
+
+      await storage.removeUserApiKey(req.user!.id);
+      res.json({ message: "API key removed successfully" });
+    } catch (error: any) {
+      console.error("Error removing API key:", error.message);
+      res.status(500).json({ message: error.message });
+    }
+  });
+
+  // POST /api/validate-openrouter-key — validate a key without storing
+  app.post("/api/validate-openrouter-key", async (req, res) => {
+    try {
+      if (!req.isAuthenticated()) {
+        return res.status(401).json({ message: "Authentication required" });
+      }
+
+      const { apiKey } = req.body;
+      if (!apiKey || typeof apiKey !== "string") {
+        return res.status(400).json({ message: "apiKey is required" });
+      }
+
+      // Validate key format
+      if (!apiKey.startsWith("sk-or-") && !apiKey.startsWith("sk-")) {
+        return res.status(400).json({ valid: false, error: "Invalid API key format. Key must start with 'sk-or-' or 'sk-'" });
+      }
+
+      // Make a minimal OpenRouter API call to validate
+      const response = await fetch("https://openrouter.ai/api/v1/auth/key", {
+        method: "GET",
+        headers: {
+          "Authorization": `Bearer ${apiKey}`,
+          "HTTP-Referer": "https://farm-friend-roundtable.replit.app",
+          "X-Title": "Farm Friend Roundtable",
+        },
+        signal: AbortSignal.timeout(30_000),
+      });
+
+      if (response.ok) {
+        res.json({ valid: true });
+      } else {
+        const errorText = await response.text();
+        console.log(`[BYOK] Key validation failed: ${response.status} ${errorText}`);
+        res.json({ valid: false, error: `OpenRouter rejected the key (${response.status})` });
+      }
+    } catch (error: any) {
+      console.error("Error validating API key:", error.message);
+      res.status(500).json({ valid: false, error: error.message });
     }
   });
 

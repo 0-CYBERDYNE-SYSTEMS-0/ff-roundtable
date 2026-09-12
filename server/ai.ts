@@ -9,6 +9,21 @@ import axios from "axios";
 import { randomBytes } from "crypto";
 import { getProvider } from "./ai-providers";
 
+const AI_REQUEST_TIMEOUT_MS = 120_000;
+const MAX_MODEL_MESSAGE_CHARS = 12_000;
+const MAX_FILE_CONTEXT_FILES = 10;
+
+function truncateForModel(content: string, maxChars = MAX_MODEL_MESSAGE_CHARS): string {
+  return content.length > maxChars
+    ? `${content.slice(0, maxChars)}\n... [Content Truncated] ...`
+    : content;
+}
+
+function sanitizeGeneratedFilename(filename: string): string {
+  const basename = path.basename(filename);
+  return basename.replace(/[^a-zA-Z0-9_.-]/g, "_") || "generated-file";
+}
+
 // Define the structure for messages sent to AI APIs
 export interface AIMessage {
   role: "system" | "user" | "assistant";
@@ -37,6 +52,11 @@ Always be respectful, helpful, and conversational while maintaining your expert 
 
 You are part of a team of experts: [${availableRoles?.join(', ') || 'various roles'}].
 `;
+
+  // Inject farmer's custom instructions for this expert if present
+  if (expert.customInstructions?.trim()) {
+    basePrompt += `\n📌 CUSTOM INSTRUCTIONS FROM THE FARMER (follow these closely):\n${expert.customInstructions.trim()}\n`;
+  }
 
   // Inject farm profile context if available
   if (farmContext) {
@@ -255,6 +275,7 @@ export async function callPerplexityAPI(query: string): Promise<AIModelResponse>
         max_tokens: 1024,
         stream: false
       }),
+      signal: AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS),
     });
     
     if (!response.ok) {
@@ -369,7 +390,7 @@ export async function getExpertResponseStream(
 
   if (files.length > 0) {
      let fileContextString = "\n\n--- Attached Files Context ---\n";
-     for (const file of files) {
+     for (const file of files.slice(0, MAX_FILE_CONTEXT_FILES)) {
          const contentSnippet = await readFileContent(file);
          fileContextString += `\nFile Name: ${file.filename} (${file.fileType})\n`;
          if (contentSnippet) {
@@ -382,10 +403,10 @@ export async function getExpertResponseStream(
 
    messages.push(...history.map(msg => ({
       role: mapDbRoleToApiRole(msg.role),
-      content: msg.content
+      content: truncateForModel(msg.content)
    })).slice(-15));
 
-   messages.push({ role: "user", content: referenceMessageContent });
+   messages.push({ role: "user", content: truncateForModel(referenceMessageContent) });
 
    console.log(`[STREAM] Sending ${messages.length} messages to LLM for ${expert.role}.`);
 
@@ -414,14 +435,15 @@ export async function getExpertResponseStream(
         }
         const uploadsDir = path.join(process.cwd(), "uploads");
         if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir);
-        const uniqueFilename = `${randomBytes(8).toString("hex")}-${fileData.filename}`;
+        const safeFilename = sanitizeGeneratedFilename(fileData.filename);
+        const uniqueFilename = `${randomBytes(8).toString("hex")}-${safeFilename}`;
         const filePath = path.join(uploadsDir, uniqueFilename);
         fs.writeFileSync(filePath, fileData.content);
         const fileUrl = `/uploads/${uniqueFilename}`;
 
         const newFile: InsertFile = {
            conversationId: expert.conversationId,
-           filename: fileData.filename,
+           filename: safeFilename,
            fileUrl: fileUrl,
            fileType: fileData.filetype,
            uploadedBy: `Expert: ${expert.name}`,
@@ -484,7 +506,7 @@ export async function getExpertResponse(
 
   if (files.length > 0) {
      let fileContextString = "\n\n--- Attached Files Context ---\n";
-     for (const file of files) {
+     for (const file of files.slice(0, MAX_FILE_CONTEXT_FILES)) {
          const contentSnippet = await readFileContent(file);
          fileContextString += `\nFile Name: ${file.filename} (${file.fileType})\n`;
          if (contentSnippet) {
@@ -500,10 +522,10 @@ export async function getExpertResponse(
 
    messages.push(...history.map(msg => ({
       role: mapDbRoleToApiRole(msg.role),
-      content: msg.content
+      content: truncateForModel(msg.content)
    })).slice(-15));
 
-   messages.push({ role: "user", content: referenceMessageContent });
+   messages.push({ role: "user", content: truncateForModel(referenceMessageContent) });
 
    console.log(`[DEBUG] Sending ${messages.length} messages to LLM for ${expert.role}.`);
 
@@ -527,14 +549,15 @@ export async function getExpertResponse(
          if (!fs.existsSync(uploadsDir)) {
            fs.mkdirSync(uploadsDir);
          }
-         const uniqueFilename = `${randomBytes(8).toString("hex")}-${fileData.filename}`;
+         const safeFilename = sanitizeGeneratedFilename(fileData.filename);
+        const uniqueFilename = `${randomBytes(8).toString("hex")}-${safeFilename}`;
          const filePath = path.join(uploadsDir, uniqueFilename);
          fs.writeFileSync(filePath, fileData.content);
          const fileUrl = `/uploads/${uniqueFilename}`;
 
          const newFile: InsertFile = {
             conversationId: expert.conversationId,
-            filename: fileData.filename,
+            filename: safeFilename,
             fileUrl: fileUrl,
             fileType: fileData.filetype,
             uploadedBy: `Expert: ${expert.name}`,
@@ -587,7 +610,7 @@ export async function generateInsights(conversationId: number, broadcastFn?: (co
     
     const historyText = messages
       .slice(-20)
-      .map(m => `${m.expertName || m.role}: ${m.content}`)
+      .map(m => `${m.expertName || m.role}: ${truncateForModel(m.content)}`)
       .join("\n");
     
     const insightPrompt = `
@@ -651,7 +674,7 @@ export async function getModeratorNextSpeakerSuggestion(
         { role: "system", content: moderatorSystemPrompt },
         ...history.slice(-6).map(msg => ({
              role: mapDbRoleToApiRole(msg.role),
-             content: msg.content
+             content: truncateForModel(msg.content)
         })),
         { role: "user", content: queryPrompt }
     ];

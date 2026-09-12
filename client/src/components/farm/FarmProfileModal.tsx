@@ -17,7 +17,7 @@ interface FarmProfileData {
   location: string;
   lat: string;
   lng: string;
-  acres: number;
+  acres: string;
   crops: string;
   soilType: string;
   waterSource: string;
@@ -31,36 +31,42 @@ interface FarmProfileModalProps {
   onSaved: () => void;
 }
 
+const EMPTY_FORM: FarmProfileData = {
+  farmName: "",
+  location: "",
+  lat: "",
+  lng: "",
+  acres: "",
+  crops: "",
+  soilType: "",
+  waterSource: "",
+  climateZone: "",
+  hardinessZone: "",
+};
+
 export default function FarmProfileModal({ isOpen, onClose, onSaved }: FarmProfileModalProps) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
-  const [form, setForm] = useState<FarmProfileData>({
-    farmName: "",
-    location: "",
-    lat: "",
-    lng: "",
-    acres: 0,
-    crops: "",
-    soilType: "",
-    waterSource: "",
-    climateZone: "",
-    hardinessZone: "",
-  });
+  const [dirty, setDirty] = useState(false);
+  const [form, setForm] = useState<FarmProfileData>(EMPTY_FORM);
 
   useEffect(() => {
     // Fetch existing profile on mount
     async function loadProfile() {
+      setError("");
+      setDirty(false);
       try {
         const res = await fetch("/api/protected/farm-profile", { credentials: "include" });
         if (res.ok) {
-          const profile = await res.json();
+          const payload = await res.json();
+          const profile = payload?.profile ?? payload;
           if (profile) {
             setForm({
               farmName: profile.farmName || "",
               location: profile.location || "",
               lat: profile.lat || "",
               lng: profile.lng || "",
-              acres: profile.acres || 0,
+              acres: profile.acres ? String(profile.acres) : "",
               crops: (profile.crops || []).join(", "),
               soilType: profile.soilType || "",
               waterSource: profile.waterSource || "",
@@ -75,7 +81,18 @@ export default function FarmProfileModal({ isOpen, onClose, onSaved }: FarmProfi
   }, [isOpen]);
 
   const handleChange = (field: keyof FarmProfileData, value: string | number) => {
+    setDirty(true);
     setForm((prev) => ({ ...prev, [field]: value }));
+  };
+
+  // Don't throw away a half-filled form (this modal auto-opens during
+  // onboarding) without asking, and never close mid-save.
+  const requestClose = () => {
+    if (saving) return;
+    if (dirty && !window.confirm("You have unsaved changes. Discard them?")) {
+      return;
+    }
+    onClose();
   };
 
   const handleSave = async () => {
@@ -101,7 +118,7 @@ export default function FarmProfileModal({ isOpen, onClose, onSaved }: FarmProfi
           location: form.location,
           lat: form.lat || null,
           lng: form.lng || null,
-          acres: form.acres || 0,
+          acres: Math.max(0, Math.floor(Number(form.acres) || 0)),
           crops: cropsArray,
           soilType: form.soilType,
           waterSource: form.waterSource,
@@ -111,10 +128,11 @@ export default function FarmProfileModal({ isOpen, onClose, onSaved }: FarmProfi
       });
 
       if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.message || "Failed to save");
+        const errBody = await res.json().catch(() => null);
+        throw new Error(errBody?.message || "Failed to save farm profile");
       }
 
+      setDirty(false);
       onSaved();
     } catch (err: any) {
       setError(err.message || "Failed to save farm profile");
@@ -124,7 +142,7 @@ export default function FarmProfileModal({ isOpen, onClose, onSaved }: FarmProfi
   };
 
   return (
-    <Dialog open={isOpen} onOpenChange={(o) => !o && onClose()}>
+    <Dialog open={isOpen} onOpenChange={(o) => !o && requestClose()}>
       <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="text-xl font-bold text-farm-blue flex items-center gap-2">
@@ -191,9 +209,10 @@ export default function FarmProfileModal({ isOpen, onClose, onSaved }: FarmProfi
               id="acres"
               type="number"
               min="0"
+              step="1"
               placeholder="200"
-              value={form.acres || ""}
-              onChange={(e) => handleChange("acres", parseInt(e.target.value) || 0)}
+              value={form.acres}
+              onChange={(e) => handleChange("acres", e.target.value)}
             />
           </div>
           <div>
@@ -265,7 +284,7 @@ export default function FarmProfileModal({ isOpen, onClose, onSaved }: FarmProfi
 
         <div className="flex justify-end gap-3 mt-6">
           {form.farmName && (
-            <Button variant="outline" onClick={onClose} disabled={saving}>
+            <Button variant="outline" onClick={requestClose} disabled={saving}>
               Cancel
             </Button>
           )}

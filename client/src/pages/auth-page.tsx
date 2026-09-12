@@ -19,6 +19,7 @@ const loginSchema = z.object({
 });
 
 const registerSchema = insertUserSchema.extend({
+  username: z.string().min(1, "Username is required"),
   password: z.string().min(6, "Password must be at least 6 characters"),
   confirmPassword: z.string().min(1, "Please confirm your password"),
   email: z.string().email("Please enter a valid email"),
@@ -284,7 +285,7 @@ export default function AuthPage() {
         </div>
         
         {/* Right side - Hero section */}
-        <div className="w-full md:w-1/2 bg-gradient-to-br from-primary-light to-primary-dark text-white p-8 flex flex-col justify-center">
+        <div className="w-full md:w-1/2 bg-gradient-to-br from-farm-blue to-farm-green text-white p-8 flex flex-col justify-center">
           <h2 className="text-3xl font-serif font-bold mb-4">Expert Agricultural Advice at Your Fingertips</h2>
           <p className="mb-6">Join Farm Friend Roundtable and connect with AI experts in soil science, crop management, irrigation, pest control, and more.</p>
           

@@ -38,14 +38,20 @@ async function comparePasswords(supplied: string, stored: string): Promise<boole
   return bcrypt.compare(supplied, stored);
 }
 
-// Login rate limiter: 5 attempts per 15 minutes per IP
-const loginLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 5,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { message: "Too many login attempts. Please try again in 15 minutes." },
-});
+// Login rate limiter: 5 attempts per 15 minutes per IP.
+// Factory (not a module-level singleton): each Express app gets its own
+// counter, so isolated test apps don't share/exhaust one global bucket.
+function makeLoginLimiter() {
+  return rateLimit({
+    windowMs: 15 * 60 * 1000,
+    // Default 5 in production. Override hook exists for load-heavy test
+    // suites that legitimately perform many logins against one app.
+    max: Number(process.env.LOGIN_RATELIMIT_MAX ?? 5),
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { message: "Too many login attempts. Please try again in 15 minutes." },
+  });
+}
 
 export function setupAuth(app: Express) {
   if (!process.env.SESSION_SECRET) {
@@ -96,14 +102,30 @@ export function setupAuth(app: Express) {
   // Registration with bcrypt password hashing
   app.post("/api/register", async (req, res, next) => {
     try {
-      const existingUser = await storage.getUserByUsername(req.body.username);
+      // Server-side validation — the client schema is not a security boundary.
+      // Without this a blank username creates an account that can never log in,
+      // and a crafted body could set tier/stripe fields at signup.
+      const username = typeof req.body.username === "string" ? req.body.username.trim() : "";
+      const email = typeof req.body.email === "string" ? req.body.email.trim() : "";
+      if (!username) {
+        return res.status(400).json({ message: "Username is required" });
+      }
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return res.status(400).json({ message: "A valid email is required" });
+      }
+      if (typeof req.body.password !== "string" || req.body.password.length < 6) {
+        return res.status(400).json({ message: "Password must be at least 6 characters" });
+      }
+
+      const existingUser = await storage.getUserByUsername(username);
       if (existingUser) {
         return res.status(400).json({ message: "Username already exists" });
       }
 
       const hashedPassword = await hashPassword(req.body.password);
       const user = await storage.createUser({
-        ...req.body,
+        username,
+        email,
         password: hashedPassword,
       });
 
@@ -119,7 +141,7 @@ export function setupAuth(app: Express) {
   });
 
   // Login with rate limiting
-  app.post("/api/login", loginLimiter, (req: Request, res: Response, next: NextFunction) => {
+  app.post("/api/login", makeLoginLimiter(), (req: Request, res: Response, next: NextFunction) => {
     passport.authenticate("local", (err: any, user: Express.User | false) => {
       if (err) return next(err);
       if (!user) {

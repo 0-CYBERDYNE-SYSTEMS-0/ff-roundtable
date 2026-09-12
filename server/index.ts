@@ -7,7 +7,13 @@ import cors from "cors";
 import rateLimit from "express-rate-limit";
 
 const app = express();
-app.use(express.json());
+// Keep the raw body around so the Stripe webhook can verify signatures —
+// re-serializing a parsed object would produce different bytes.
+app.use(express.json({
+  verify: (req, _res, buf) => {
+    (req as any).rawBody = buf;
+  },
+}));
 app.use(express.urlencoded({ extended: false }));
 
 // Security headers
