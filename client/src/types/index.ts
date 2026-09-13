@@ -8,10 +8,16 @@ export type Conversation = SchemaConversation;
 export type Insight = SchemaInsight;
 export type File = SchemaFile;
 
+// Multimodal content parts (mirrors server/ai.ts ContentPart) — image_url
+// parts carry uploaded images as base64 data URLs for vision-capable models.
+export type ContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } };
+
 // AI Message format for API calls
 export interface AIMessage {
   role: "system" | "user" | "assistant";
-  content: string;
+  content: string | ContentPart[];
 }
 
 // AI Model Response
