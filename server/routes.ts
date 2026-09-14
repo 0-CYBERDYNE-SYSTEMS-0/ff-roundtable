@@ -13,6 +13,8 @@ import { randomBytes } from "crypto";
 import Stripe from "stripe";
 import { WebSocketServer } from "ws";
 import { InsertConversation, InsertExpert, InsertMessage, Message, insertFarmProfileSchema } from "@shared/schema";
+import { buildVCalendar } from "@shared/ics";
+import { extractScheduleRows, parseIsoDate, nextMondayFrom, resolveRowStartDate, buildRowSummary } from "@shared/schedule-extract";
 import { generateComprehensiveMarkdown } from './export-utils';
 import { getWeatherForFarm, formatWeatherContext } from './weather';
 import { format } from 'date-fns';
@@ -988,6 +990,65 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.send(markdown);
     } catch (error: any) {
       console.error("Export error:", error);
+      res.status(500).json({ message: error.message });
+    }
+  });
+
+  // Export conversation schedule as an .ics calendar (week-by-week all-day events)
+  app.get("/api/protected/conversations/:id/export.ics", async (req, res) => {
+    try {
+      const conversationId = parseInt(req.params.id);
+      const conversation = await storage.getConversation(conversationId);
+
+      if (!conversation || conversation.userId !== req.user!.id) {
+        return res.status(404).json({ message: "Conversation not found" });
+      }
+
+      // Anchor date: ?start=YYYY-MM-DD (validated) or the next Monday, strictly
+      // after today's UTC date (a Monday anchors to the following Monday).
+      const startParam = typeof req.query.start === "string" ? req.query.start : "";
+      let anchor: string;
+      if (startParam) {
+        const parsed = parseIsoDate(startParam);
+        if (!parsed) {
+          return res.status(422).json({ error: "Invalid start date. Use YYYY-MM-DD." });
+        }
+        anchor = parsed;
+      } else {
+        anchor = nextMondayFrom(new Date());
+      }
+
+      const messages = await storage.getConversationMessages(conversationId);
+      const files = await storage.getConversationFiles(conversationId);
+
+      const rows = extractScheduleRows(messages, files);
+      if (rows.length === 0) {
+        return res.status(422).json({
+          error: "No schedulable items found in this conversation. Ask an expert for a week-by-week plan first.",
+        });
+      }
+
+      const events = rows.map((row, index) => ({
+        uid: `${conversationId}-${index}@farmfriend-roundtable`,
+        summary: buildRowSummary(row),
+        startDate: resolveRowStartDate(row, anchor),
+        description: row.description,
+      }));
+
+      const ics = buildVCalendar(events, conversation.title ?? "New Conversation");
+
+      const safeTitle = (conversation.title ?? "New Conversation")
+        .replace(/[^a-z0-9]/gi, '-')
+        .toLowerCase()
+        .substring(0, 50);
+      const date = format(conversation.createdAt ?? new Date(0), 'yyyy-MM-dd');
+      const filename = `roundtable-${safeTitle}-${date}.ics`;
+
+      res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+      res.setHeader("Content-Type", "text/calendar; charset=utf-8");
+      res.send(ics);
+    } catch (error: any) {
+      console.error("ICS export error:", error);
       res.status(500).json({ message: error.message });
     }
   });

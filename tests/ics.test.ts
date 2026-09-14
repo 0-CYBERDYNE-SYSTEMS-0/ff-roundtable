@@ -3,7 +3,10 @@
  * Node env only; no server imports (route tests live in the second half).
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach, vi } from "vitest";
+import request from "supertest";
+import express from "express";
+import type { Express } from "express";
 import {
   buildVCalendar,
   escapeIcsText,
@@ -22,6 +25,40 @@ import {
   MAX_SCHEDULE_ROWS,
 } from "../shared/schedule-extract";
 import type { Artifact, File, Message } from "../shared/schema";
+
+// ── Route-test preamble (mirrors tests/conversations.test.ts) ──
+// Env forcing MUST run before the server imports below; vite's SSR transform
+// executes module statements in textual order.
+process.env.DATABASE_URL = "";
+process.env.SESSION_SECRET = "vitest-ics-secret";
+process.env.NODE_ENV = "test";
+process.env.LOGIN_RATELIMIT_MAX = "1000";
+
+const { mockProcessMessageTurnBased } = vi.hoisted(() => ({
+  mockProcessMessageTurnBased: vi.fn(),
+}));
+
+vi.mock("../server/orchestrator", () => ({
+  processMessageTurnBased: mockProcessMessageTurnBased,
+  InteractionOrchestrator: class {
+    pause() {}
+    resume() {}
+    enableAutonomous(_maxTurns?: number) {}
+    disableAutonomous() {}
+  },
+  getConversationState: vi.fn().mockReturnValue(null),
+}));
+
+vi.mock("../server/ai", () => ({
+  generateSystemPrompt: vi.fn().mockReturnValue("You are a helpful agricultural expert."),
+  callOpenRouterAPI: vi.fn(),
+  callPerplexityAPI: vi.fn(),
+  getExpertResponse: vi.fn(),
+  generateInsights: vi.fn(),
+}));
+
+import { registerRoutes } from "../server/routes";
+import { storage } from "../server/storage";
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -57,10 +94,6 @@ function makeFile(overrides: Partial<File> = {}): File {
 /** RFC 5545 unfolding: remove CRLF + single leading space. */
 function unfold(folded: string): string {
   return folded.split("\r\n ").join("");
-}
-
-function physicalLines(ics: string): string[] {
-  return ics.split("\r\n").filter((l) => l.length > 0);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -473,5 +506,219 @@ describe("extractScheduleRows — no matches", () => {
       () => "just prose, no schedule",
     );
     expect(rows).toEqual([]);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Route: GET /api/protected/conversations/:id/export.ics
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe("GET /api/protected/conversations/:id/export.ics", () => {
+  let app: Express;
+
+  const tableArtifact = (title = "Nitrogen Plan"): Artifact => ({
+    type: "table",
+    title,
+    content: [
+      "| Week | Task | Amount |",
+      "| --- | --- | --- |",
+      "| W1 | Soil test | 10 kg |",
+      "| Week 2 | Compost turn | 5 kg |",
+      "| 3 | Spread lime | 2 kg |",
+    ].join("\n"),
+  });
+
+  async function registerAndLogin(
+    agent: request.SuperAgentTest,
+    username: string,
+    password = "icspass123",
+    email = "ics@example.com",
+  ) {
+    const res = await agent.post("/api/register").send({ username, password, email: `${username}.${email}` });
+    expect(res.status).toBe(201);
+    return agent;
+  }
+
+  async function createConversation(agent: request.SuperAgentTest, title = "ICS Roundtable") {
+    const res = await agent.post("/api/protected/conversations").send({ title });
+    expect(res.status).toBe(201);
+    return res.body as { id: number; title: string };
+  }
+
+  beforeAll(async () => {
+    app = express();
+    app.use(express.json());
+    app.use(express.urlencoded({ extended: false }));
+    await registerRoutes(app);
+  });
+
+  beforeEach(() => {
+    mockProcessMessageTurnBased.mockReset();
+    mockProcessMessageTurnBased.mockResolvedValue(undefined);
+  });
+
+  it("returns 401 when not authenticated", async () => {
+    const res = await request(app).get("/api/protected/conversations/1/export.ics");
+    expect(res.status).toBe(401);
+  });
+
+  it("returns 404 for a non-existent conversation", async () => {
+    const agent = request.agent(app);
+    await registerAndLogin(agent, "icsMissing");
+    const res = await agent.get("/api/protected/conversations/999999/export.ics");
+    expect(res.status).toBe(404);
+  });
+
+  it("returns 404 when the conversation belongs to another user", async () => {
+    const owner = request.agent(app);
+    await registerAndLogin(owner, "icsOwner");
+    const convo = await createConversation(owner, "Owned Elsewhere");
+
+    const other = request.agent(app);
+    await registerAndLogin(other, "icsOther");
+
+    const res = await other.get(`/api/protected/conversations/${convo.id}/export.ics`);
+    expect(res.status).toBe(404);
+  });
+
+  it("returns 422 with the exact error for a conversation with nothing schedulable", async () => {
+    const agent = request.agent(app);
+    await registerAndLogin(agent, "icsEmpty");
+    const convo = await createConversation(agent, "No Plan Here");
+
+    const res = await agent.get(`/api/protected/conversations/${convo.id}/export.ics`);
+    expect(res.status).toBe(422);
+    expect(res.body).toEqual({
+      error: "No schedulable items found in this conversation. Ask an expert for a week-by-week plan first.",
+    });
+  });
+
+  it("returns 200 text/calendar starting with BEGIN:VCALENDAR for a table artifact", async () => {
+    const agent = request.agent(app);
+    await registerAndLogin(agent, "icsTable");
+    const convo = await createConversation(agent, "Soil; Plan & More");
+
+    await storage.createMessage({
+      conversationId: convo.id,
+      content: "plan in artifact only",
+      role: "expert",
+      artifacts: [tableArtifact()],
+    } as any);
+
+    const res = await agent.get(`/api/protected/conversations/${convo.id}/export.ics`);
+    expect(res.status).toBe(200);
+    expect(res.headers["content-type"]).toContain("text/calendar");
+    expect(res.headers["content-disposition"]).toContain('attachment; filename="roundtable-soil--plan---more-');
+    expect(res.headers["content-disposition"]).toContain('.ics"');
+
+    const body = res.text;
+    expect(body.startsWith("BEGIN:VCALENDAR\r\n")).toBe(true);
+    expect(body).toContain("VERSION:2.0\r\n");
+    expect(body).toContain("PRODID:");
+    expect(body).toContain("X-WR-CALNAME:Soil\\; Plan & More\r\n");
+    expect(body).toContain(`UID:${convo.id}-0@farmfriend-roundtable\r\n`);
+    expect(body).toContain(`UID:${convo.id}-1@farmfriend-roundtable\r\n`);
+    expect(body).toContain(`UID:${convo.id}-2@farmfriend-roundtable\r\n`);
+    expect(body.endsWith("END:VCALENDAR\r\n")).toBe(true);
+    // Every VEVENT carries a DTSTAMP
+    expect(body.match(/DTSTAMP:\d{8}T\d{6}Z\r\n/g)?.length).toBe(3);
+  });
+
+  it("honors an explicit ?start anchor with exclusive DTEND", async () => {
+    const agent = request.agent(app);
+    await registerAndLogin(agent, "icsStart");
+    const convo = await createConversation(agent, "Anchored");
+
+    await storage.createMessage({
+      conversationId: convo.id,
+      content: "",
+      role: "expert",
+      artifacts: [tableArtifact()],
+    } as any);
+
+    const res = await agent
+      .get(`/api/protected/conversations/${convo.id}/export.ics`)
+      .query({ start: "2026-04-06" });
+    expect(res.status).toBe(200);
+    expect(res.text).toContain("DTSTART;VALUE=DATE:20260406\r\n");
+    expect(res.text).toContain("DTEND;VALUE=DATE:20260407\r\n"); // exclusive +1 day
+    expect(res.text).toContain("DTSTART;VALUE=DATE:20260413\r\n"); // week 2
+    expect(res.text).toContain("DTSTART;VALUE=DATE:20260420\r\n"); // week 3
+  });
+
+  it("returns 422 for garbage ?start values", async () => {
+    const agent = request.agent(app);
+    await registerAndLogin(agent, "icsGarbage");
+    const convo = await createConversation(agent, "Garbage Anchor");
+
+    await storage.createMessage({
+      conversationId: convo.id,
+      content: "",
+      role: "expert",
+      artifacts: [tableArtifact()],
+    } as any);
+
+    for (const garbage of ["not-a-date", "2026-02-30", "2026-3-1", "04/06/2026"]) {
+      const res = await agent
+        .get(`/api/protected/conversations/${convo.id}/export.ics`)
+        .query({ start: garbage });
+      expect(res.status).toBe(422);
+    }
+  });
+
+  it("defaults the anchor to the next Monday (strictly after today)", async () => {
+    const agent = request.agent(app);
+    await registerAndLogin(agent, "icsMonday");
+    const convo = await createConversation(agent, "Next Monday");
+
+    await storage.createMessage({
+      conversationId: convo.id,
+      content: "",
+      role: "expert",
+      artifacts: [tableArtifact()],
+    } as any);
+
+    const expectedAnchor = nextMondayFrom(new Date());
+    const res = await agent.get(`/api/protected/conversations/${convo.id}/export.ics`);
+    expect(res.status).toBe(200);
+    expect(res.text).toContain(`DTSTART;VALUE=DATE:${expectedAnchor.replace(/-/g, "")}\r\n`);
+  });
+
+  it("exports Expert-generated .md plan files from disk", async () => {
+    const agent = request.agent(app);
+    await registerAndLogin(agent, "icsFiles");
+    const convo = await createConversation(agent, "Generated Plan");
+
+    await storage.createFile({
+      conversationId: convo.id,
+      filename: "nitrogen-plan.md",
+      fileUrl: "/tests/fixtures/nitrogen-plan.md",
+      fileType: "text/markdown",
+      uploadedBy: "Expert: File Creator",
+    } as any);
+
+    const res = await agent.get(`/api/protected/conversations/${convo.id}/export.ics`);
+    expect(res.status).toBe(200);
+    // Two week headings + one ISO date line in the fixture.
+    expect(res.text.match(/BEGIN:VEVENT\r\n/g)?.length).toBe(3);
+    expect(res.text).toContain("SUMMARY:nitrogen-plan — Week 1\r\n");
+    expect(res.text).toContain("DTSTART;VALUE=DATE:20260401\r\n");
+  });
+
+  it("user-uploaded .md files are never exported as events", async () => {
+    const agent = request.agent(app);
+    await registerAndLogin(agent, "icsUserFile");
+    const convo = await createConversation(agent, "User Upload Only");
+
+    await storage.createFile({
+      conversationId: convo.id,
+      filename: "my-notes.md",
+      fileUrl: "/tests/fixtures/nitrogen-plan.md",
+      fileType: "text/markdown",
+      uploadedBy: "User",
+    } as any);
+
+    const res = await agent.get(`/api/protected/conversations/${convo.id}/export.ics`);
+    expect(res.status).toBe(422);
   });
 });
