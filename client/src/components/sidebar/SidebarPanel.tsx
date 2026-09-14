@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Plus, RefreshCw, Download, Upload, FileDown, FileText, Image, ArrowRight } from "lucide-react";
+import { Plus, RefreshCw, Download, Upload, FileDown, FileText, Image, ArrowRight, CalendarDays } from "lucide-react";
 import { Insight, File as FileSchema, Conversation, Expert } from "@shared/schema";
 import { format } from "date-fns";
 
@@ -11,6 +11,8 @@ interface SidebarPanelProps {
   files: FileSchema[];
   onStartNewSession: () => void;
   onExportMarkdown: () => void;
+  onExportIcs: () => void;
+  canExportIcs?: boolean;
   onFileUpload: (file: File) => void;
   onSelectConversation: (id: number) => void;
   activeConversationId: number | null;
@@ -33,6 +35,8 @@ export default function SidebarPanel({
   files,
   onStartNewSession,
   onExportMarkdown,
+  onExportIcs,
+  canExportIcs = true,
   onFileUpload,
   onSelectConversation,
   activeConversationId,
@@ -85,6 +89,16 @@ export default function SidebarPanel({
           >
             <Download className="mr-2 h-4 w-4" />
             Export as Markdown
+          </Button>
+          <Button
+            variant="outline"
+            className="w-full mt-2 border-2 border-farm-green text-farm-green hover:bg-farm-green hover:text-white rounded-lg px-4 py-2.5 flex items-center justify-center transition-all duration-200 font-medium"
+            onClick={onExportIcs}
+            disabled={!canExportIcs}
+            title={canExportIcs ? "Export the week-by-week plan to your calendar (.ics)" : "No schedulable plan yet — ask an expert for a week-by-week plan, or upload files, first"}
+          >
+            <CalendarDays className="mr-2 h-4 w-4" />
+            Export .ics
           </Button>
         </div>
 
