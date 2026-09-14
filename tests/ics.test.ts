@@ -13,6 +13,7 @@ import {
   foldContentLine,
   addDaysIso,
   toIcsUtcStamp,
+  truncateChars,
   SUMMARY_MAX_CHARS,
 } from "../shared/ics";
 import {
@@ -279,6 +280,16 @@ describe("buildVCalendar", () => {
 // shared/schedule-extract.ts — parsing helpers
 // ═════════════════════════════════════════════════════════════════════════════
 
+describe("truncateChars", () => {
+  it("caps at max UTF-16 units and never leaves a lone high surrogate", () => {
+    const emojiTitle = "🌱".repeat(38); // 76 units; each emoji is a surrogate pair
+    const cut = truncateChars(emojiTitle, 75);
+    expect(cut.length).toBe(74); // backed off from the split pair
+    expect(cut).toBe("🌱".repeat(37));
+    expect(truncateChars("short", 75)).toBe("short");
+  });
+});
+
 describe("parseWeekCell", () => {
   it("parses W1 / Week 2 / bare 3", () => {
     expect(parseWeekCell("W1")).toBe(1);
@@ -291,6 +302,14 @@ describe("parseWeekCell", () => {
     expect(parseWeekCell("no digits")).toBeUndefined();
     expect(parseWeekCell("99")).toBeUndefined(); // outside 1..53
     expect(parseWeekCell("")).toBeUndefined();
+  });
+
+  it("rejects time-axis lookalikes (anchored match, not substring)", () => {
+    expect(parseWeekCell("Day 1")).toBeUndefined();
+    expect(parseWeekCell("10:30")).toBeUndefined();
+    expect(parseWeekCell("March 15")).toBeUndefined();
+    expect(parseWeekCell("Week 99")).toBeUndefined(); // outside 1..53
+    expect(parseWeekCell("Week 3 extra")).toBeUndefined(); // trailing junk
   });
 });
 
@@ -395,6 +414,51 @@ describe("extractScheduleRows — table artifacts", () => {
     };
     expect(extractScheduleRows([makeMessage([artifact])], [])).toEqual([]);
   });
+
+  it("ignores Day columns instead of misreading them as week numbers", () => {
+    const artifact: Artifact = {
+      type: "table",
+      title: "Soil Metrics",
+      content: "| Day | pH | Moisture |\n| --- | --- | --- |\n| Day 1 | 6.2 | 40 |\n| Day 2 | 6.4 | 45 |",
+    };
+    expect(extractScheduleRows([makeMessage([artifact])], [])).toEqual([]);
+  });
+
+  it("ignores Time and Month columns instead of misreading them as weeks", () => {
+    const time: Artifact = {
+      type: "table",
+      title: "Chat Log",
+      content: "| Time | Note |\n| --- | --- |\n| 10:30 | Irrigation on |",
+    };
+    const month: Artifact = {
+      type: "table",
+      title: "Season",
+      content: "| Month | Task |\n| --- | --- |\n| March 15 | Start seeds |",
+    };
+    expect(extractScheduleRows([makeMessage([time, month])], [])).toEqual([]);
+  });
+
+  it("still accepts Week columns (W1 / Week 2 / bare digits) and Date columns (ISO)", () => {
+    const artifact: Artifact = {
+      type: "table",
+      title: "Plan",
+      content:
+        "| Week | Date | Task |\n| --- | --- | --- |\n| W1 | 2026-05-04 | Soil test |\n| Week 2 | not-a-date | Side-dress |",
+    };
+    const rows = extractScheduleRows([makeMessage([artifact])], []);
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({ date: "2026-05-04", weekIndex: 1, description: "Soil test" });
+    expect(rows[1]).toMatchObject({ weekIndex: 2, description: "Side-dress" });
+  });
+
+  it("reads chart entries keyed by day/time/month as nothing", () => {
+    const artifact: Artifact = {
+      type: "chart",
+      title: "Soil",
+      content: JSON.stringify({ type: "line", data: [{ day: 1, ph: 6.2 }, { day: 2, ph: 6.4 }] }),
+    };
+    expect(extractScheduleRows([makeMessage([artifact])], [])).toEqual([]);
+  });
 });
 
 describe("extractScheduleRows — chart and json artifacts", () => {
@@ -491,7 +555,12 @@ describe("extractScheduleRows — Expert-generated .md files", () => {
   });
 
   it("caps the row list at 60 entries", () => {
-    const manyWeeks = Array.from({ length: 100 }, (_, i) => `## Week ${i + 1}`).join("\n");
+    // 55 valid week lines (cycling 1..53) + 10 valid date lines = 65 parseable
+    // rows, so the cap (not the source) is what limits the output.
+    const manyWeeks = [
+      ...Array.from({ length: 55 }, (_, i) => `## Week ${(i % 53) + 1}`),
+      ...Array.from({ length: 10 }, (_, i) => `2026-06-${String(i + 1).padStart(2, "0")} milestone`),
+    ].join("\n");
     const rows = extractScheduleRows([], [makeFile()], () => manyWeeks);
     expect(rows).toHaveLength(MAX_SCHEDULE_ROWS);
     expect(rows).toHaveLength(60);
@@ -506,6 +575,20 @@ describe("extractScheduleRows — no matches", () => {
       () => "just prose, no schedule",
     );
     expect(rows).toEqual([]);
+  });
+});
+
+describe("extractScheduleRows — .md phantom-event guard", () => {
+  it("does not emit events for week/date lines that fail to parse", () => {
+    const md = [
+      "# Plan",
+      "## Week 1: soil test",
+      "- Week 99: celebrate", // out of range -> not an event
+      "Due 2026-99-99 submit report", // impossible date -> not an event
+    ].join("\n");
+    const rows = extractScheduleRows([], [makeFile()], () => md);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ weekIndex: 1 });
   });
 });
 

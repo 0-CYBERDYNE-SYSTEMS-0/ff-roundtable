@@ -22,10 +22,14 @@ export interface ScheduleRow {
   description: string;
 }
 
-/** Week/date-ish header-key superset (superset of the chart-axis heuristic). */
-const WEEK_DATE_KEYS = new Set([
-  "week", "wk", "w", "date", "day", "period", "phase", "month", "stage", "time",
-]);
+/**
+ * Only week-ish headers may anchor a weekIndex and only "date" may anchor a
+ * real date. The broader chart-axis superset (day/time/month/stage/…) is
+ * deliberately excluded: treating "Day 2" as week 2 fabricated events a week
+ * apart, so non-week time axes are skipped entirely (never invent events).
+ */
+const WEEK_HEADER_KEYS = new Set(["week", "wk", "w"]);
+const DATE_HEADER_KEYS = new Set(["date"]);
 
 /** Hard cap on exported events. */
 export const MAX_SCHEDULE_ROWS = 60;
@@ -34,11 +38,13 @@ export const MAX_SCHEDULE_ROWS = 60;
 const MD_DESCRIPTION_MAX_CHARS = 200;
 
 /**
- * Parse a week cell such as "W1", "Week 2", "3". Returns undefined for
- * anything without a plausible 1..53 week number.
+ * Parse a week cell in one of the anchored forms "W1", "Week 2", "3" (and the
+ * bare digit form the .md line regex captures). Anchoring keeps ordinary
+ * time-axis values ("Day 1", "10:30", "March 15") from becoming week numbers.
+ * Returns undefined for anything else or outside 1..53.
  */
 export function parseWeekCell(cell: string): number | undefined {
-  const match = cell.match(/(\d{1,2})/);
+  const match = cell.trim().match(/^(?:(?:w|wk|week)\.?\s*)?(\d{1,2})$/i);
   if (!match) return undefined;
   const n = Number(match[1]);
   return n >= 1 && n <= 53 ? n : undefined;
@@ -107,16 +113,19 @@ function extractFromTable(artifact: Artifact, rows: ScheduleRow[]): void {
   const table = splitMarkdownTable(artifact.content);
   if (table.length < 2) return;
   const header = table[0];
-  const keyIndex = header.findIndex((cell) => WEEK_DATE_KEYS.has(cell.toLowerCase()));
-  if (keyIndex === -1) return;
+  const weekCol = header.findIndex((cell) => WEEK_HEADER_KEYS.has(cell.toLowerCase()));
+  const dateCol = header.findIndex((cell) => DATE_HEADER_KEYS.has(cell.toLowerCase()));
+  if (weekCol === -1 && dateCol === -1) return;
   const title = artifact.title || "Schedule";
   for (const row of table.slice(1)) {
-    const cell = row[keyIndex];
-    if (!cell) continue;
-    const weekIndex = parseWeekCell(cell);
-    const date = parseIsoDate(cell);
-    if (weekIndex === undefined && date === undefined) continue;
-    const description = row.filter((_, i) => i !== keyIndex).join(" — ");
+    const dateCell = dateCol !== -1 ? row[dateCol] : undefined;
+    const weekCell = weekCol !== -1 ? row[weekCol] : undefined;
+    const date = dateCell ? parseIsoDate(dateCell) : undefined;
+    const weekIndex = weekCell ? parseWeekCell(weekCell) : undefined;
+    if (date === undefined && weekIndex === undefined) continue;
+    const description = row
+      .filter((_, i) => i !== weekCol && i !== dateCol)
+      .join(" — ");
     rows.push({ weekIndex, date, title, description });
   }
 }
@@ -138,15 +147,19 @@ function extractObjectArray(source: unknown): Record<string, unknown>[] {
 
 function extractFromArrayData(data: Record<string, unknown>[], title: string, rows: ScheduleRow[]): void {
   for (const entry of data) {
-    const key = Object.keys(entry).find((k) => WEEK_DATE_KEYS.has(k.toLowerCase()));
-    if (!key) continue;
-    const raw = entry[key];
-    const cell = typeof raw === "string" ? raw : String(raw ?? "");
-    const weekIndex = parseWeekCell(cell);
-    const date = parseIsoDate(cell);
-    if (weekIndex === undefined && date === undefined) continue;
-    const description = Object.keys(entry)
-      .filter((k) => k !== key)
+    const keys = Object.keys(entry);
+    const weekKey = keys.find((k) => WEEK_HEADER_KEYS.has(k.toLowerCase()));
+    const dateKey = keys.find((k) => DATE_HEADER_KEYS.has(k.toLowerCase()));
+    if (!weekKey && !dateKey) continue;
+    const toCell = (key: string) => {
+      const raw = entry[key];
+      return typeof raw === "string" ? raw : String(raw ?? "");
+    };
+    const date = dateKey ? parseIsoDate(toCell(dateKey)) : undefined;
+    const weekIndex = weekKey ? parseWeekCell(toCell(weekKey)) : undefined;
+    if (date === undefined && weekIndex === undefined) continue;
+    const description = keys
+      .filter((k) => k !== weekKey && k !== dateKey)
       .map((k) => `${k}: ${String(entry[k] ?? "")}`)
       .join("; ");
     rows.push({ weekIndex, date, title, description });
@@ -182,13 +195,18 @@ function extractFromMarkdown(content: string, sourceTitle: string, rows: Schedul
         .trim();
       const descriptionParts: string[] = [];
       if (rest) descriptionParts.push(rest);
-      current = {
+      const row: ScheduleRow = {
         weekIndex: weekMatch ? parseWeekCell(weekMatch[1]) : undefined,
         date: dateMatch ? parseIsoDate(dateMatch[0]) : undefined,
         title: sourceTitle,
-        description: "",
+        description: descriptionParts.join(" "),
       };
-      current.description = descriptionParts.join(" ");
+      // A line that looked schedulable but parsed to neither a valid week nor
+      // a valid date ("Week 99", "Due 2026-99-99") must not become a phantom
+      // event anchored at Week 1.
+      if (row.weekIndex !== undefined || row.date !== undefined) {
+        current = row;
+      }
       continue;
     }
 

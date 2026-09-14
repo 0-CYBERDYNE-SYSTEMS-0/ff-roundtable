@@ -88,9 +88,16 @@ export function addDaysIso(iso: string, days: number): string {
   return dt.toISOString().slice(0, 10);
 }
 
-/** Truncate by UTF-16 code units (chars) to the cap. */
+/**
+ * Truncate by UTF-16 code units (chars) to the cap, backing off one unit when
+ * that would split a surrogate pair (emoji titles would end in U+FFFD otherwise).
+ */
 export function truncateChars(value: string, max: number): string {
-  return value.length <= max ? value : value.slice(0, max);
+  if (value.length <= max) return value;
+  let cut = value.slice(0, max);
+  const last = cut.charCodeAt(cut.length - 1);
+  if (last >= 0xd800 && last <= 0xdbff) cut = cut.slice(0, -1);
+  return cut;
 }
 
 /**

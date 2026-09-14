@@ -443,6 +443,40 @@ describe("honest vision failure", () => {
     );
     expect(noImage.content).toMatch(/^\(Error generating response for Terra:/);
   });
+
+  it("keeps rate limits generic even when the body echoes a vision-slug model name (429)", async () => {
+    const png = makeImageFile("photo.png", "bytes", new Date());
+    mockFetch.mockResolvedValueOnce(
+      errorResponse(429, "Rate limit exceeded for meta-llama/llama-3.2-11b-vision-instruct:free")
+    );
+    const result = await getExpertResponse(
+      makeImageryExpert(), [], "What is this?", [png], ["Imagery Specialist"]
+    );
+    expect(result.content).toMatch(/^\(Error generating response for Terra:/);
+    expect(result.content).not.toBe(HONEST_MSG);
+  });
+
+  it("recognizes a 200-wrapped provider error object (status-less) as a vision rejection", async () => {
+    const png = makeImageFile("photo.png", "bytes", new Date());
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ error: { message: "This model does not support image input" } }),
+    });
+    const result = await getExpertResponse(
+      makeImageryExpert("openai/gpt-3.5-turbo"), [], "What is this?", [png], ["Imagery Specialist"]
+    );
+    expect(result.content).toBe(HONEST_MSG);
+  });
+
+  it("treats a 413 payload overflow (images sent) as the honest vision failure", async () => {
+    const png = makeImageFile("photo.png", "bytes", new Date());
+    mockFetch.mockResolvedValueOnce(errorResponse(413, "Request Entity Too Large"));
+    const result = await getExpertResponse(
+      makeImageryExpert(), [], "What is this?", [png], ["Imagery Specialist"]
+    );
+    expect(result.content).toBe(HONEST_MSG);
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────

@@ -410,15 +410,38 @@ async function buildAttachedFilesContext(
 }
 
 /**
- * True when a provider error is a 4xx that looks image/vision/modality
- * related AND this turn actually sent image parts — i.e. the model rejected
- * the vision input itself rather than anything else going wrong.
+ * Vision-rejecting providers phrase the failure around the modality ("Image
+ * input is not supported by this model"). Requiring a rejection-shaped phrase
+ * near the keyword keeps lookalikes honest — e.g. a 429 body that merely echoes
+ * a model slug like "llama-3.2-11b-vision-instruct:free" is a rate limit, not a
+ * rejection.
+ */
+const VISION_REJECTION_RE = new RegExp(
+  "(?:image|vision|modalit|multimodal)[\\s\\S]{0,80}(?:not\\s+support|unsupport\\w*|reject\\w*|invalid|disabled|not\\s+allowed|can(?:not|'t)|unable)" +
+  "|" +
+  "(?:not\\s+support|unsupport\\w*|reject\\w*|invalid|disabled|not\\s+allowed|can(?:not|'t)|unable)[\\s\\S]{0,80}(?:image|vision|modalit|multimodal)",
+  "i",
+);
+
+/**
+ * True when a provider error looks like the model rejected the vision input
+ * itself AND this turn actually sent image parts.
+ *
+ * Status-bearing 4xx: only true modality rejections (400/404/422) qualify —
+ * 429/402 bodies commonly echo vision-slug model names, so rate-limit and
+ * payment failures keep the generic path. 413 counts too: with parts sent, the
+ * payload overflow was caused by the images. Status-less shapes (a 200 response
+ * wrapping {"error":{...}} surfaces as "OpenRouter/Local AI Provider Error: …")
+ * fall back to the phrase test alone.
  */
 function isVisionRejection(error: unknown, imageParts: ImagePart[]): boolean {
     if (imageParts.length === 0 || !(error instanceof Error)) return false;
-    const statusMatch = error.message.match(/\((4\d{2})\)/); // e.g. "OpenRouter API Error (400): ..."
-    if (!statusMatch) return false;
-    return /image|vision|modalit|multimodal/i.test(error.message);
+    const status = error.message.match(/\((4\d{2})\)/)?.[1];
+    if (status) {
+      if (status === "413") return true;
+      if (![400, 404, 422].includes(Number(status))) return false;
+    }
+    return VISION_REJECTION_RE.test(error.message);
 }
 
 /** Honest per-expert failure message for vision-rejecting models (SPEC §B4). */
