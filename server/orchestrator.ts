@@ -1,5 +1,6 @@
 import { storage } from "./storage";
 import { getExpertResponse, getExpertResponseStream, generateInsights, getModeratorNextSpeakerSuggestion } from "./ai";
+import { shouldStopForRedundancy, REDUNDANCY_STOP_SIMILARITY_THRESHOLD } from "./text-similarity";
 import type { InsertMessage, Expert, Message, File } from "@shared/schema";
 
 // Verbose per-turn tracing is opt-in (ORCH_DEBUG=1). The default flood slows
@@ -33,6 +34,11 @@ interface ConversationState {
     pausedFromMode: Exclude<InteractionMode, "idle" | "paused"> | null;
     // In-memory recovery guard for a loop that died between turns.
     lastProgressAt: number;
+    // Expert message contents of the CURRENT sequence (sequential round 1 +
+    // autonomous extension). Used by the F2 redundancy early-stop; reset when
+    // a new sequence starts, carried across the sequential→autonomous
+    // transition.
+    sequenceExpertContents: string[];
     // We might add turn limits, autonomous rounds etc. later
 }
 
@@ -48,7 +54,8 @@ function isUsableConversationState(state: ConversationState | undefined): state 
         state.activeExperts.length > 0 &&
         Number.isInteger(state.currentExpertIndex) &&
         ["idle", "processing_sequential", "paused", "autonomous"].includes(state.mode) &&
-        typeof state.lastProgressAt === "number"
+        typeof state.lastProgressAt === "number" &&
+        Array.isArray(state.sequenceExpertContents)
     );
 }
 
@@ -102,7 +109,8 @@ function initializeConversationState(conversationId: number, experts: Expert[], 
         totalAutonomousTurnsTaken: 0,
         wasInterrupted: false, // Initialize interrupted flag
         pausedFromMode: null,
-        lastProgressAt: Date.now()
+        lastProgressAt: Date.now(),
+        sequenceExpertContents: []
     };
     conversationStates.set(conversationId, initialState);
     debugLog(`Initialized state for ${conversationId}, Auto ON (max ${defaultMaxAutonomousTurns} turns)`);
@@ -149,12 +157,13 @@ export class InteractionOrchestrator {
             return;
         }
         
-        updateConversationState(this.conversationId, { 
+        updateConversationState(this.conversationId, {
             mode: "processing_sequential",
-            currentExpertIndex: -1, 
+            currentExpertIndex: -1,
             totalAutonomousTurnsTaken: 0, // Reset counter when new sequence starts
             wasInterrupted: false, // Reset interrupted flag
-            pausedFromMode: null
+            pausedFromMode: null,
+            sequenceExpertContents: [] // New sequence: redundancy history starts empty
         });
 
         debugLog(`Orchestrator starting processing sequence for conv ${this.conversationId}`);
@@ -198,6 +207,9 @@ export class InteractionOrchestrator {
 
         // 1. Determine the next expert index
         let nextExpertIndex = -1;
+        // Set when the just-completed autonomous turn was redundant (F2) and
+        // the sequence must stop early instead of scheduling another turn.
+        let redundancyStopDetected = false;
         const availableRoles = state.activeExperts.map(e => e.role);
 
         if (state.mode === "autonomous") {
@@ -318,6 +330,31 @@ export class InteractionOrchestrator {
                     message: storedExpertMessage,
                 });
                 debugLog(`Orchestrator broadcasted streamed response from ${currentExpert.name}`);
+
+                // --- F2 redundancy early-stop ---
+                // Track every real expert contribution of this sequence, and —
+                // in autonomous mode only (the sequential round is never cut) —
+                // flag the sequence for early stop when the new message is
+                // near-identical to a prior expert message. The stop itself is
+                // applied in "Decide Next Action" below with the same cleanup
+                // as a natural end. Interruptions/pauses take precedence.
+                const isRealExpertContent = storedExpertMessage.role === "assistant" &&
+                    !storedExpertMessage.content.startsWith("(Error");
+                const postTurnState = getConversationState(this.conversationId);
+                if (postTurnState && isRealExpertContent) {
+                    if (postTurnState.mode === "autonomous") {
+                        const decision = shouldStopForRedundancy(
+                            storedExpertMessage.content,
+                            postTurnState.sequenceExpertContents,
+                            REDUNDANCY_STOP_SIMILARITY_THRESHOLD
+                        );
+                        if (decision.stop) {
+                            redundancyStopDetected = true;
+                            console.log(`Orchestrator: Redundancy early-stop for ${this.conversationId} — turn from ${currentExpert.name} is ${Math.round(decision.maxSimilarity * 100)}% similar to a prior expert message in this sequence (threshold ${REDUNDANCY_STOP_SIMILARITY_THRESHOLD}). Ending the autonomous sequence early.`);
+                        }
+                    }
+                    postTurnState.sequenceExpertContents.push(storedExpertMessage.content);
+                }
             } catch (error) {
                  console.error(`Orchestrator: Error streaming expert ${currentExpert.name}:`, error);
                  // Persist the failure so it survives refetches — a cache-only
@@ -391,7 +428,13 @@ export class InteractionOrchestrator {
         } else if (currentState.mode === "autonomous") {
              debugLog("[DEBUG] Currently in Autonomous mode. Checking limits...");
              // Check limits *before* deciding to continue
-             if (currentState.totalAutonomousTurnsTaken >= currentState.maxAutonomousTurns) {
+             // F2: a redundant autonomous answer ends the sequence with the
+             // same cleanup as a natural end (idle + insights). An interrupt
+             // arriving during the turn wins — the queued message restarts.
+             if (redundancyStopDetected && !currentState.wasInterrupted) {
+                 debugLog("Orchestrator: Autonomous sequence stopped early (redundant answer). Setting mode to idle.");
+                 processingEndedNaturally = true;
+             } else if (currentState.totalAutonomousTurnsTaken >= currentState.maxAutonomousTurns) {
                  debugLog("Orchestrator: Reached max autonomous turns. Setting mode to idle."); // KEEP
                  processingEndedNaturally = true; 
                   debugLog("[DEBUG] Set processingEndedNaturally = true (Auto Limit Reached)");

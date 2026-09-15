@@ -17,6 +17,7 @@ import { buildVCalendar } from "@shared/ics";
 import { extractScheduleRows, parseIsoDate, nextMondayFrom, resolveRowStartDate, buildRowSummary } from "@shared/schedule-extract";
 import { generateComprehensiveMarkdown } from './export-utils';
 import { getWeatherForFarm, formatWeatherContext } from './weather';
+import { isDuplicateUserSubmission } from './text-similarity';
 import { format } from 'date-fns';
 import { TIERS, getTierLimits, isPaidModel } from './tiers';
 
@@ -721,9 +722,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
       
       let weather: string | null = null;
       if (profile && profile.lat && profile.lng) {
-        const weatherData = await getWeatherForFarm(profile.lat, profile.lng);
-        if (weatherData) {
-          weather = formatWeatherContext(weatherData);
+        const weatherResult = await getWeatherForFarm(profile.lat, profile.lng);
+        if (weatherResult.ok) {
+          weather = formatWeatherContext(weatherResult.data);
         }
       }
       
@@ -762,7 +763,18 @@ export async function registerRoutes(app: Express): Promise<Server> {
       
       const userId = req.user!.id;
       const { content } = req.body;
-      
+
+      // F2 duplicate-submission gate: an identical resend with nothing new
+      // (last message is this same user text, no new files) must not store a
+      // second copy or re-trigger the full expert fan-out. Everything else —
+      // including a repeat asked after expert replies — processes normally.
+      const existingMessages = await storage.getConversationMessages(conversationId);
+      const lastExistingMessage = existingMessages[existingMessages.length - 1] ?? null;
+      if (isDuplicateUserSubmission(content, lastExistingMessage, false)) {
+        console.log(`Duplicate user submission detected in conversation ${conversationId} — skipping processing.`);
+        return res.status(200).json(lastExistingMessage);
+      }
+
       // Store user message
       const userMessage: InsertMessage = {
         conversationId,
@@ -1237,14 +1249,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const { getWeather, formatWeatherForPrompt } = await import("./weather");
       const weather = await getWeather(profile.lat, profile.lng);
 
-      if (!weather) {
-        return res.json({ available: false, message: "Weather data unavailable. Check OWM_API_KEY or try again later." });
+      if (!weather.ok) {
+        return res.json({ available: false, reason: weather.reason, message: weather.message });
       }
 
       res.json({
         available: true,
-        summary: formatWeatherForPrompt(weather),
-        data: weather,
+        summary: formatWeatherForPrompt(weather.data),
+        data: weather.data,
       });
     } catch (error: any) {
       console.error("Weather fetch error:", error);

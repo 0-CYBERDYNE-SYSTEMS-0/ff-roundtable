@@ -8,7 +8,7 @@ import fs from "fs";
 import axios from "axios";
 import { randomBytes } from "crypto";
 import { getProvider } from "./ai-providers";
-import { collectImageParts, isImageFile, type ImagePart } from "./image-context";
+import { collectImageParts, isImageFile, MAX_IMAGE_PARTS, analyzedImageNote, makeAnalyzedBeforePredicate, type ImagePart } from "./image-context";
 
 const AI_REQUEST_TIMEOUT_MS = 120_000;
 const MAX_MODEL_MESSAGE_CHARS = 12_000;
@@ -359,20 +359,27 @@ async function readFileContent(file: File, maxLength = 2000): Promise<string | n
  * for the user message. Text files are inlined as before; image/* files are
  * listed as delivered-visually and their base64 image_url parts are returned
  * for appending to the user message content (SPEC §B2-B3).
+ *
+ * F2 analyze-image-once: user-uploaded images that have already been analyzed
+ * (an assistant message exists after the upload) are described by a one-line
+ * text note instead of re-embedding their base64 payload on every turn.
  */
 async function buildAttachedFilesContext(
-    files: File[]
+    files: File[],
+    history: Message[] = []
 ): Promise<{ context: string | null; imageParts: ImagePart[] }> {
     if (files.length === 0) {
         return { context: null, imageParts: [] };
     }
 
-    const { parts: imageParts, skipped: skippedImages } = await collectImageParts(files);
+    const analyzedBefore = makeAnalyzedBeforePredicate(history);
+    const { parts: imageParts, skipped: skippedImages, alreadyAnalyzed } =
+        await collectImageParts(files, MAX_IMAGE_PARTS, analyzedBefore);
 
     // Which image filenames actually produced a vision part? Mirror the
     // most-recent-first selection used by collectImageParts so the text
-    // listing never claims delivery for an image that was skipped or beyond
-    // the 2-part limit.
+    // listing never claims delivery for an image that was skipped,
+    // already analyzed, or beyond the 2-part limit.
     const deliveredImageNames = new Set<string>();
     let deliveredCount = 0;
     for (const file of files.filter(isImageFile).sort((a, b) => {
@@ -380,6 +387,7 @@ async function buildAttachedFilesContext(
         const tb = b.uploadedAt ? new Date(b.uploadedAt).getTime() : 0;
         return tb - ta;
     })) {
+        if (alreadyAnalyzed.includes(file.filename)) continue;
         if (deliveredCount >= imageParts.length) break;
         if (skippedImages.includes(file.filename)) continue;
         deliveredImageNames.add(file.filename);
@@ -392,6 +400,8 @@ async function buildAttachedFilesContext(
         if (isImageFile(file)) {
             if (deliveredImageNames.has(file.filename)) {
                 fileContextString += `[Image attached: ${file.filename} — delivered visually]\n`;
+            } else if (alreadyAnalyzed.includes(file.filename)) {
+                fileContextString += `${analyzedImageNote(file.filename)}\n`;
             } else if (skippedImages.includes(file.filename)) {
                 fileContextString += `[Image attached: ${file.filename} — not delivered (missing or over the 5 MB vision limit)]\n`;
             } else {
@@ -478,8 +488,8 @@ export async function getExpertResponseStream(
         if (profile.lat && profile.lng) {
           const { getWeatherForFarm, formatWeatherContext } = await import('./weather');
           const weather = await getWeatherForFarm(profile.lat, profile.lng);
-          if (weather) {
-            weatherContext = formatWeatherContext(weather);
+          if (weather.ok) {
+            weatherContext = formatWeatherContext(weather.data);
           }
         }
       }
@@ -489,12 +499,12 @@ export async function getExpertResponseStream(
   }
   
   const systemPrompt = generateSystemPrompt(expert, availableRoles, farmContext, weatherContext);
-  
+
   const messages: AIMessage[] = [
     { role: "system", content: systemPrompt }
   ];
 
-  const { context: fileContext, imageParts } = await buildAttachedFilesContext(files);
+  const { context: fileContext, imageParts } = await buildAttachedFilesContext(files, history);
   if (fileContext) {
      messages.push({ role: "system", content: fileContext });
   }
@@ -612,7 +622,7 @@ export async function getExpertResponse(
     { role: "system", content: systemPrompt }
   ];
 
-  const { context: fileContext, imageParts } = await buildAttachedFilesContext(files);
+  const { context: fileContext, imageParts } = await buildAttachedFilesContext(files, history);
   if (fileContext) {
      messages.push({
          role: "system",

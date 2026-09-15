@@ -11,6 +11,7 @@ import fs from "fs";
 import path from "path";
 import type { Artifact, File, Message } from "./schema";
 import { addDaysIso } from "./ics";
+import { stripMarkdownToText } from "./markdown";
 
 export interface ScheduleRow {
   /** 1-based week number (W1 -> 1). */
@@ -97,8 +98,32 @@ export function resolveRowStartDate(row: ScheduleRow, anchorIso: string): string
   return addDaysIso(anchorIso, (n - 1) * 7);
 }
 
-/** SUMMARY format: "<source title> — Week N" (or the explicit date). */
+/** Generic extractor label that carries no information for a calendar user. */
+const GENERIC_TABLE_TITLE_RE = /^Data Table \d+$/;
+
+/**
+ * SUMMARY format: "<source title> — Week N" (or the explicit date). When the
+ * source title is still the generic "Data Table N" label, compose the summary
+ * from the row's first meaningful description cell instead — "Soil test —
+ * Week 1" reads like an event, "Data Table 1 — Week 1" does not.
+ */
 export function buildRowSummary(row: ScheduleRow): string {
+  if (GENERIC_TABLE_TITLE_RE.test(row.title.trim())) {
+    const firstCell = row.description
+      .split(" — ")
+      .map((segment) =>
+        segment
+          .trim()
+          .replace(/^[—–:\s]+/, "")
+          .replace(/[—–:\s]+$/, ""),
+      )
+      .find((segment) => segment.length > 0);
+    if (firstCell) {
+      if (row.weekIndex !== undefined) return `${firstCell} — Week ${row.weekIndex}`;
+      if (row.date) return `${firstCell} — ${row.date}`;
+      return firstCell;
+    }
+  }
   if (row.weekIndex !== undefined) return `${row.title} — Week ${row.weekIndex}`;
   if (row.date) return `${row.title} — ${row.date}`;
   return row.title;
@@ -136,8 +161,12 @@ function extractFromTable(artifact: Artifact, rows: ScheduleRow[]): void {
     const date = dateCell ? parseIsoDate(dateCell) : undefined;
     const weekIndex = weekCell ? parseWeekCell(weekCell) : undefined;
     if (date === undefined && weekIndex === undefined) continue;
+    // .ics DESCRIPTION is plain text: strip markdown from each cell (the chat
+    // UI renders the artifact itself — this is the export path only).
     const description = row
       .filter((_, i) => i !== weekCol && i !== dateCol)
+      .map((cell) => stripMarkdownToText(cell))
+      .filter((cell) => cell.length > 0)
       .join(" — ");
     rows.push({ weekIndex, date, title, description });
   }
@@ -173,7 +202,7 @@ function extractFromArrayData(data: Record<string, unknown>[], title: string, ro
     if (date === undefined && weekIndex === undefined) continue;
     const description = keys
       .filter((k) => k !== weekKey && k !== dateKey)
-      .map((k) => `${k}: ${String(entry[k] ?? "")}`)
+      .map((k) => `${k}: ${stripMarkdownToText(String(entry[k] ?? ""))}`)
       .join("; ");
     rows.push({ weekIndex, date, title, description });
   }
@@ -200,9 +229,10 @@ function extractFromMarkdown(content: string, sourceTitle: string, rows: Schedul
     if (weekMatch || dateMatch) {
       flush();
       // Rest of the line (after the week prefix / date) describes the event.
-      const rest = (weekMatch
-        ? trimmed.slice(weekMatch[0].length)
-        : trimmed.replace(ISO_DATE_RE, "")
+      // Stripped to plaintext while emphasis pairs are still intact, then the
+      // leftover separator/prefix junk is trimmed.
+      const rest = stripMarkdownToText(
+        weekMatch ? trimmed.slice(weekMatch[0].length) : trimmed.replace(ISO_DATE_RE, ""),
       )
         .replace(/^[\s—–:*\-]+/, "")
         .trim();
@@ -224,9 +254,12 @@ function extractFromMarkdown(content: string, sourceTitle: string, rows: Schedul
     }
 
     if (current && trimmed) {
-      const sep = current.description ? "\n" : "";
-      if (current.description.length + sep.length + trimmed.length <= MD_DESCRIPTION_MAX_CHARS) {
-        current.description += sep + trimmed;
+      const line = stripMarkdownToText(trimmed);
+      if (line) {
+        const sep = current.description ? "\n" : "";
+        if (current.description.length + sep.length + line.length <= MD_DESCRIPTION_MAX_CHARS) {
+          current.description += sep + line;
+        }
       }
     }
   }

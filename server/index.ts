@@ -2,9 +2,22 @@ import "dotenv/config";
 import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { setupVite, serveStatic, log } from "./vite";
+import { describeOwmKey } from "./weather";
 import helmet from "helmet";
 import cors from "cors";
 import rateLimit from "express-rate-limit";
+
+// Startup sanity check for the OWM key — env-only, no boot-time network call.
+{
+  const owm = describeOwmKey(process.env.OWM_API_KEY);
+  if (!owm.present) {
+    log("OWM_API_KEY not set — weather features disabled (missing_key)");
+  } else if (owm.looksMalformed) {
+    log("OWM_API_KEY is set but does not look like an OWM key (expected 32 hex chars) — weather may 401 (auth)");
+  } else {
+    log("OWM_API_KEY present and well-formed (must also be enabled for One Call 3.0)");
+  }
+}
 
 const app = express();
 // Keep the raw body around so the Stripe webhook can verify signatures —

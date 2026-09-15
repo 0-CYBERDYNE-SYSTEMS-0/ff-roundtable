@@ -25,6 +25,7 @@ import {
   buildRowSummary,
   MAX_SCHEDULE_ROWS,
 } from "../shared/schedule-extract";
+import { stripMarkdownToText } from "../shared/markdown";
 import type { Artifact, File, Message } from "../shared/schema";
 
 // ── Route-test preamble (mirrors tests/conversations.test.ts) ──
@@ -370,6 +371,80 @@ describe("resolveRowStartDate / buildRowSummary", () => {
   });
 });
 
+describe("buildRowSummary — generic 'Data Table N' fallback", () => {
+  it("composes SUMMARY from the row's first meaningful description cell", () => {
+    expect(buildRowSummary({ weekIndex: 1, title: "Data Table 1", description: "Soil test — 10 kg" })).toBe("Soil test — Week 1");
+    expect(buildRowSummary({ date: "2026-04-01", title: "Data Table 2", description: "Bed prep — spread compost" })).toBe("Bed prep — 2026-04-01");
+    expect(buildRowSummary({ title: "Data Table 3", description: "  — — Spread lime " })).toBe("Spread lime");
+  });
+
+  it("keeps the generic label when the description has no usable cell", () => {
+    expect(buildRowSummary({ weekIndex: 1, title: "Data Table 1", description: "" })).toBe("Data Table 1 — Week 1");
+  });
+
+  it("leaves real (non-generic) source titles untouched", () => {
+    expect(buildRowSummary({ weekIndex: 2, title: "Nitrogen Plan", description: "Soil test" })).toBe("Nitrogen Plan — Week 2");
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// shared/markdown.ts — stripMarkdownToText
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe("stripMarkdownToText", () => {
+  it("strips bold markers", () => {
+    expect(stripMarkdownToText("**bold** text")).toBe("bold text");
+    expect(stripMarkdownToText("**bold with **nested** inside**")).toBe("bold with nested inside");
+    expect(stripMarkdownToText("__also bold__")).toBe("also bold");
+  });
+
+  it("strips italic, strikethrough and triple markers", () => {
+    expect(stripMarkdownToText("*italic* and _under_ and ~~gone~~")).toBe("italic and under and gone");
+    expect(stripMarkdownToText("***both***")).toBe("both");
+  });
+
+  it("leaves snake_case underscores alone", () => {
+    expect(stripMarkdownToText("check nitrogen_rate values")).toBe("check nitrogen_rate values");
+  });
+
+  it("strips heading hashes", () => {
+    expect(stripMarkdownToText("## Spring Plan")).toBe("Spring Plan");
+    expect(stripMarkdownToText("# Title\nbody")).toBe("Title\nbody");
+    expect(stripMarkdownToText("### **Decorated** heading")).toBe("Decorated heading");
+  });
+
+  it("converts links to their text and images to their alt text", () => {
+    expect(stripMarkdownToText("see [the guide](https://example.com/a?b=1) now")).toBe("see the guide now");
+    expect(stripMarkdownToText("![Soil chart](https://example.com/x.png)")).toBe("Soil chart");
+  });
+
+  it("drops inline-code backticks but keeps the content", () => {
+    expect(stripMarkdownToText("apply `10 kg` N")).toBe("apply 10 kg N");
+  });
+
+  it("converts table pipes to ' | ' separators", () => {
+    expect(stripMarkdownToText("Week|Task")).toBe("Week | Task");
+    expect(stripMarkdownToText("| **Week** | **Task** |")).toBe("| Week | Task |");
+  });
+
+  it("collapses runs of 3+ newlines to 2", () => {
+    expect(stripMarkdownToText("a\n\n\n\n\nb")).toBe("a\n\nb");
+  });
+
+  it("handles nested markdown combinations", () => {
+    expect(stripMarkdownToText("## **Week 1** — [Soil test](https://x.y)")).toBe("Week 1 — Soil test");
+    expect(stripMarkdownToText("**Bold `code` and [nested **deep** link](https://u.v)**")).toBe("Bold code and nested deep link");
+    expect(stripMarkdownToText("### _Soil_ test with ![img](https://i.png)")).toBe("Soil test with img");
+  });
+
+  it("is pure and safe on empty input", () => {
+    expect(stripMarkdownToText("")).toBe("");
+    const input = "**x** [y](z)";
+    stripMarkdownToText(input);
+    expect(input).toBe("**x** [y](z)");
+  });
+});
+
 // ═════════════════════════════════════════════════════════════════════════════
 // shared/schedule-extract.ts — extraction from artifacts and .md files
 // ═════════════════════════════════════════════════════════════════════════════
@@ -637,6 +712,69 @@ describe("extractScheduleRows — .md phantom-event guard", () => {
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
+// shared/schedule-extract.ts — DESCRIPTION plaintext (F3)
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe("extractScheduleRows — DESCRIPTION plaintext (F3)", () => {
+  it("strips markdown from table description cells", () => {
+    const artifact: Artifact = {
+      type: "table",
+      title: "Data Table 1",
+      content:
+        "| Week | Task | Rate |\n| --- | --- | --- |\n| W1 | **Soil test** — see [guide](https://x.y) | `10 kg` |",
+    };
+    const rows = extractScheduleRows([makeMessage([artifact])], []);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].description).toBe("Soil test — see guide — 10 kg");
+    expect(rows[0].description).not.toContain("**");
+    expect(rows[0].description).not.toContain("](");
+  });
+
+  it("strips markdown from chart/json description values", () => {
+    const artifact: Artifact = {
+      type: "json",
+      title: "Data Table 1",
+      content: JSON.stringify([
+        { week: "W1", task: "**Side-dress** with [compost tea](https://x.y)", note: "# shake well" },
+      ]),
+    };
+    const rows = extractScheduleRows([makeMessage([artifact])], []);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].description).toBe("task: Side-dress with compost tea; note: shake well");
+  });
+
+  it("strips markdown from .md event lines and body lines", () => {
+    const md = [
+      "## Week 1 — **Soil test** [guide](https://x.y)",
+      "Apply **10 kg N** per acre.",
+      "### Application window",
+      "### Week 2",
+      "- Side-dress ~~heavily~~ lightly",
+    ].join("\n");
+    const rows = extractScheduleRows([], [makeFile()], () => md);
+    expect(rows).toHaveLength(2);
+    expect(rows[0].description).toBe("Soil test guide\nApply 10 kg N per acre.\nApplication window");
+    expect(rows[1].description).toBe("- Side-dress heavily lightly");
+    for (const row of rows) {
+      expect(row.description).not.toContain("**");
+      expect(row.description).not.toContain("](");
+      expect(row.description).not.toMatch(/^#/);
+    }
+  });
+
+  it("buildRowSummary + stripped table cells yield a human SUMMARY for generic titles", () => {
+    const artifact: Artifact = {
+      type: "table",
+      title: "Data Table 1",
+      content:
+        "| Week | Task |\n| --- | --- |\n| W1 | **Pre-bloom soil application** |",
+    };
+    const rows = extractScheduleRows([makeMessage([artifact])], []);
+    expect(buildRowSummary(rows[0])).toBe("Pre-bloom soil application — Week 1");
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
 // Route: GET /api/protected/conversations/:id/export.ics
 // ═════════════════════════════════════════════════════════════════════════════
 
@@ -830,6 +968,38 @@ describe("GET /api/protected/conversations/:id/export.ics", () => {
     expect(res.text.match(/BEGIN:VEVENT\r\n/g)?.length).toBe(3);
     expect(res.text).toContain("SUMMARY:nitrogen-plan — Week 1\r\n");
     expect(res.text).toContain("DTSTART;VALUE=DATE:20260401\r\n");
+  });
+
+  it("generic 'Data Table N' sources get a human SUMMARY and plaintext DESCRIPTION", async () => {
+    const agent = request.agent(app);
+    await registerAndLogin(agent, "icsCosmetics");
+    const convo = await createConversation(agent, "Cosmetics");
+
+    await storage.createMessage({
+      conversationId: convo.id,
+      content: "",
+      role: "expert",
+      artifacts: [
+        {
+          type: "table",
+          title: "Data Table 1",
+          content: [
+            "| Week | **Task** | Amount |",
+            "| --- | --- | --- |",
+            "| W1 | **Soil test** — see [guide](https://x.y) | 10 kg |",
+          ].join("\n"),
+        } as Artifact,
+      ],
+    } as any);
+
+    const res = await agent.get(`/api/protected/conversations/${convo.id}/export.ics`);
+    expect(res.status).toBe(200);
+    // Unfold so tokens split by folding can still be matched.
+    const unfolded = unfold(res.text);
+    expect(unfolded).toContain("SUMMARY:Soil test — Week 1\r\n");
+    expect(unfolded).not.toContain("**");
+    expect(unfolded).not.toContain("](");
+    expect(unfolded).not.toMatch(/^#/m);
   });
 
   it("user-uploaded .md files are never exported as events", async () => {
