@@ -31,6 +31,19 @@ export interface ScheduleRow {
 const WEEK_HEADER_KEYS = new Set(["week", "wk", "w"]);
 const DATE_HEADER_KEYS = new Set(["date"]);
 
+/**
+ * The system prompt coaches emoji-decorated table headers ("| 🌱 Week |"), so
+ * header matching strips everything but letters: "🗓️ Week" -> "week".
+ */
+function normalizeHeader(cell: string): string {
+  return cell.toLowerCase().replace(/[^a-z]/g, "");
+}
+
+/** Strip markdown emphasis/emoji junk so "**Week 1**" parses as "Week 1". */
+function stripCellDecorations(cell: string): string {
+  return cell.replace(/[*_~]/g, "").trim();
+}
+
 /** Hard cap on exported events. */
 export const MAX_SCHEDULE_ROWS = 60;
 
@@ -44,7 +57,7 @@ const MD_DESCRIPTION_MAX_CHARS = 200;
  * Returns undefined for anything else or outside 1..53.
  */
 export function parseWeekCell(cell: string): number | undefined {
-  const match = cell.trim().match(/^(?:(?:w|wk|week)\.?\s*)?(\d{1,2})$/i);
+  const match = stripCellDecorations(cell).match(/^(?:(?:w|wk|week)\.?\s*)?(\d{1,2})$/i);
   if (!match) return undefined;
   const n = Number(match[1]);
   return n >= 1 && n <= 53 ? n : undefined;
@@ -113,13 +126,13 @@ function extractFromTable(artifact: Artifact, rows: ScheduleRow[]): void {
   const table = splitMarkdownTable(artifact.content);
   if (table.length < 2) return;
   const header = table[0];
-  const weekCol = header.findIndex((cell) => WEEK_HEADER_KEYS.has(cell.toLowerCase()));
-  const dateCol = header.findIndex((cell) => DATE_HEADER_KEYS.has(cell.toLowerCase()));
+  const weekCol = header.findIndex((cell) => WEEK_HEADER_KEYS.has(normalizeHeader(cell)));
+  const dateCol = header.findIndex((cell) => DATE_HEADER_KEYS.has(normalizeHeader(cell)));
   if (weekCol === -1 && dateCol === -1) return;
   const title = artifact.title || "Schedule";
   for (const row of table.slice(1)) {
-    const dateCell = dateCol !== -1 ? row[dateCol] : undefined;
-    const weekCell = weekCol !== -1 ? row[weekCol] : undefined;
+    const dateCell = dateCol !== -1 ? stripCellDecorations(row[dateCol]) : undefined;
+    const weekCell = weekCol !== -1 ? stripCellDecorations(row[weekCol]) : undefined;
     const date = dateCell ? parseIsoDate(dateCell) : undefined;
     const weekIndex = weekCell ? parseWeekCell(weekCell) : undefined;
     if (date === undefined && weekIndex === undefined) continue;
@@ -148,8 +161,8 @@ function extractObjectArray(source: unknown): Record<string, unknown>[] {
 function extractFromArrayData(data: Record<string, unknown>[], title: string, rows: ScheduleRow[]): void {
   for (const entry of data) {
     const keys = Object.keys(entry);
-    const weekKey = keys.find((k) => WEEK_HEADER_KEYS.has(k.toLowerCase()));
-    const dateKey = keys.find((k) => DATE_HEADER_KEYS.has(k.toLowerCase()));
+    const weekKey = keys.find((k) => WEEK_HEADER_KEYS.has(normalizeHeader(k)));
+    const dateKey = keys.find((k) => DATE_HEADER_KEYS.has(normalizeHeader(k)));
     if (!weekKey && !dateKey) continue;
     const toCell = (key: string) => {
       const raw = entry[key];

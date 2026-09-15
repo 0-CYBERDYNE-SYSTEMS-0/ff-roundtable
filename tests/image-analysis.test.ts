@@ -477,6 +477,23 @@ describe("honest vision failure", () => {
     );
     expect(result.content).toBe(HONEST_MSG);
   });
+
+  it("recognizes OpenRouter's real 404 no-image-endpoint rejection (seen live in dogfood)", async () => {
+    const png = makeImageFile("photo.png", "bytes", new Date());
+    mockFetch.mockResolvedValueOnce(
+      errorResponse(404, JSON.stringify({
+        error: {
+          message: "No endpoints found that support image input",
+          code: 404,
+          metadata: { routing_funnel: [{ step: "Initial Endpoints", endpoint_count: 1 }], failed_routing_step: "Filter by Image Support" },
+        },
+      }))
+    );
+    const result = await getExpertResponse(
+      makeImageryExpert(), [], "What is this?", [png], ["Imagery Specialist"]
+    );
+    expect(result.content).toBe(HONEST_MSG);
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────

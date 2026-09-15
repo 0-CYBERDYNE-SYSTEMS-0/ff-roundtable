@@ -459,6 +459,50 @@ describe("extractScheduleRows — table artifacts", () => {
     };
     expect(extractScheduleRows([makeMessage([artifact])], [])).toEqual([]);
   });
+
+  it("parses REAL model output: emoji-decorated headers and bold week cells", () => {
+    // Verbatim shapes produced by live models (system prompt coaches emoji
+    // headers and bold cells) — these must export, not 422.
+    const terraTable: Artifact = {
+      type: "table",
+      title: "Data Table 1",
+      content: [
+        "| 🌱 Week | 📋 Task | 💧 Rate (lbs N/acre) |",
+        "|--------|---------|----------------------|",
+        "| **1** | Soil sampling & baseline | 0 |",
+        "| **Week 2** | Broadcast compost | 20 |",
+      ].join("\n"),
+    };
+    const rows = extractScheduleRows([makeMessage([terraTable])], []);
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({ weekIndex: 1, title: "Data Table 1" });
+    expect(rows[1]).toMatchObject({ weekIndex: 2 });
+
+    const vegaTable: Artifact = {
+      type: "table",
+      title: "Data Table 1",
+      content: [
+        "| 🗓️ Week | 🌿 Task | 📐 Rate |",
+        "|---------|---------|---------|",
+        "| **Week 1** | 🌱 **Pre-bloom soil application** — Broadcast | 20 |",
+      ].join("\n"),
+    };
+    const vegaRows = extractScheduleRows([makeMessage([vegaTable])], []);
+    expect(vegaRows).toHaveLength(1);
+    expect(vegaRows[0]).toMatchObject({ weekIndex: 1 });
+
+    const vegaChart: Artifact = {
+      type: "chart",
+      title: "chart artifact",
+      content: JSON.stringify({
+        type: "bar",
+        data: [{ week: "Wk 1", apples: 20, cherries: 15 }, { week: "Wk 2", apples: 25, cherries: 18 }],
+      }),
+    };
+    const chartRows = extractScheduleRows([makeMessage([vegaChart])], []);
+    expect(chartRows).toHaveLength(2);
+    expect(chartRows[0]).toMatchObject({ weekIndex: 1, description: "apples: 20; cherries: 15" });
+  });
 });
 
 describe("extractScheduleRows — chart and json artifacts", () => {

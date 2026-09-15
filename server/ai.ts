@@ -419,7 +419,10 @@ async function buildAttachedFilesContext(
 const VISION_REJECTION_RE = new RegExp(
   "(?:image|vision|modalit|multimodal)[\\s\\S]{0,80}(?:not\\s+support|unsupport\\w*|reject\\w*|invalid|disabled|not\\s+allowed|can(?:not|'t)|unable)" +
   "|" +
-  "(?:not\\s+support|unsupport\\w*|reject\\w*|invalid|disabled|not\\s+allowed|can(?:not|'t)|unable)[\\s\\S]{0,80}(?:image|vision|modalit|multimodal)",
+  "(?:not\\s+support|unsupport\\w*|reject\\w*|invalid|disabled|not\\s+allowed|can(?:not|'t)|unable)[\\s\\S]{0,80}(?:image|vision|modalit|multimodal)" +
+  "|" +
+  // OpenRouter's real rejection shape: 404 "No endpoints found that support image input"
+  "(?:support|accept|allow|handle)\\s+(?:[\\w-]+\\s+){0,2}(?:image|vision|multimodal|modalit)",
   "i",
 );
 

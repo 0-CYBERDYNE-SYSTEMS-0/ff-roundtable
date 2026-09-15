@@ -16,8 +16,9 @@ app.use(express.json({
 }));
 app.use(express.urlencoded({ extended: false }));
 
-// Security headers
-app.use(helmet());
+// Security headers — CSP must be off in development: Vite's inline
+// react-refresh preamble and HMR websocket are blocked by script-src 'self'.
+app.use(helmet(app.get("env") === "development" ? { contentSecurityPolicy: false } : {}));
 
 // CORS - allow only the configured origin
 app.use(cors({
