@@ -9,9 +9,9 @@ import { encryptApiKey, decryptApiKey, maskApiKey } from "./crypto";
 import multer from "multer";
 import path from "path";
 import fs from "fs";
-import { randomBytes } from "crypto";
+import { createHmac, randomBytes, timingSafeEqual } from "crypto";
 import Stripe from "stripe";
-import { WebSocketServer } from "ws";
+import { WebSocketServer, type RawData } from "ws";
 import { InsertConversation, InsertExpert, InsertMessage, Message, insertFarmProfileSchema } from "@shared/schema";
 import { buildVCalendar } from "@shared/ics";
 import { extractScheduleRows, parseIsoDate, nextMondayFrom, resolveRowStartDate, buildRowSummary } from "@shared/schedule-extract";
@@ -68,12 +68,22 @@ function getSubscriptionClientSecret(subscription: Stripe.Subscription): string 
 // Development mode flag - uses NODE_ENV to determine dev vs production
 const DEVELOPMENT_MODE = process.env.NODE_ENV !== "production";
 
-// Extract the express-session id from a WS upgrade request's Cookie header.
-// The transitive `cookie` dependency ships no type declarations, so the one
-// cookie we need is parsed by hand. express-session signs the value as
-// `s:<sessionId>.<signature>` — both wrapper parts must be stripped before
-// the raw id can be looked up in the session store.
-function getSessionIdFromUpgradeRequest(req: { headers: { cookie?: string } }): string | null {
+// Extract and VERIFY the express-session id from a WS upgrade request's
+// Cookie header. express-session signs the value as `s:<sessionId>.<signature>`
+// where signature = base64(HMAC-SHA256(secret, sessionId)) with trailing "="
+// padding stripped (cookie-signature's sign()). The signature must be
+// verified, never merely stripped — a leaked or guessed raw session id must
+// not be enough to mint an authenticated socket. `cookie-signature` is a
+// transitive dep of express-session but ships no type declarations, so the
+// equivalent check is hand-rolled with node:crypto and compared with
+// timingSafeEqual. Mirrors cookie-signature's unsign(): the sid/signature
+// split happens at the LAST dot of the signed portion.
+function getVerifiedSessionIdFromUpgradeRequest(req: { headers: { cookie?: string } }): string | null {
+  const secret = process.env.SESSION_SECRET;
+  // No secret configured means express-session signed cookies with a random
+  // per-process string we cannot reproduce — fail closed.
+  if (!secret) return null;
+
   const cookieHeader = req.headers.cookie;
   if (!cookieHeader) return null;
   for (const part of cookieHeader.split(";")) {
@@ -88,8 +98,25 @@ function getSessionIdFromUpgradeRequest(req: { headers: { cookie?: string } }): 
       return null;
     }
     if (!value.startsWith("s:")) return null;
-    const sid = value.slice(2).split(".")[0];
-    return sid || null;
+    const signed = value.slice(2);
+    const dot = signed.lastIndexOf(".");
+    if (dot === -1) return null;
+    const sid = signed.slice(0, dot);
+    const providedSignature = signed.slice(dot + 1);
+    if (!sid || !providedSignature) return null;
+
+    const expectedSignature = createHmac("sha256", secret)
+      .update(sid)
+      .digest("base64")
+      .replace(/=+$/, "");
+    const expected = Buffer.from(expectedSignature);
+    const provided = Buffer.from(providedSignature);
+    // timingSafeEqual throws on length mismatch; unequal length is already a
+    // failed verification.
+    if (expected.length !== provided.length || !timingSafeEqual(expected, provided)) {
+      return null;
+    }
+    return sid;
   }
   return null;
 }
@@ -250,12 +277,27 @@ export async function registerRoutes(app: Express): Promise<Server> {
     // HTTP routes use. Without this, every connected socket receives every
     // conversation's streaming tokens.
     const rejectUnauthenticated = () => ws.close(4401, "Unauthenticated");
-    const sid = getSessionIdFromUpgradeRequest(req);
+    const sid = getVerifiedSessionIdFromUpgradeRequest(req);
 
     if (!sid) {
       rejectUnauthenticated();
       return;
     }
+
+    // Frames can arrive while the session-store lookup is still in flight —
+    // with the pg store that lookup is a real round-trip, and a subscribe
+    // sent immediately after the handshake would otherwise be dropped (no
+    // message listener attached yet). Queue every early frame and drain it
+    // in order once the socket is authenticated.
+    const earlyFrames: RawData[] = [];
+    let authenticatedMessageHandler: ((message: RawData) => void) | null = null;
+    ws.on("message", (message) => {
+      if (authenticatedMessageHandler) {
+        authenticatedMessageHandler(message);
+      } else {
+        earlyFrames.push(message);
+      }
+    });
 
     storage.sessionStore.get(sid, (err: any, session: any) => {
       // The socket may have closed while the store lookup was in flight.
@@ -276,7 +318,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         data: { status: "connected" }
       }));
 
-      ws.on("message", (message) => {
+      const handleMessage = (message: RawData) => {
         try {
           let parsed: any;
           try {
@@ -316,7 +358,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
         } catch (error) {
           console.error("Error processing WebSocket message:", error);
         }
-      });
+      };
+
+      authenticatedMessageHandler = handleMessage;
+      // Drain any frames that arrived during the session lookup, in order.
+      for (const frame of earlyFrames.splice(0)) {
+        handleMessage(frame);
+      }
     });
   });
   

@@ -202,7 +202,7 @@ describe("Orchestrator", () => {
     const assistantCount = () =>
       messages.filter((m) => m.conversationId === conversationId && m.role === "assistant").length;
 
-    return { waitForTurns, releaseNextTurn, drainToIdle, assistantCount };
+    return { waitForTurns, releaseNextTurn, drainToIdle, assistantCount, turnsStarted: () => turnsStarted };
   }
 
   // ─────────────────────────────────────────────────────────────────
@@ -985,6 +985,126 @@ describe("Orchestrator", () => {
 
       await drainToIdle();
       expect(getConversationState(conversationId)!.mode).toBe("idle");
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────
+  // B-review — red-team regressions
+  // ─────────────────────────────────────────────────────────────────
+
+  describe("B-review race conditions", () => {
+    it("does not double-drive the loop when pause()+resume() land mid-turn (single turn chain)", async () => {
+      const conversationId = nextConvId();
+      // Broadcast hook: on the first expert_stream_done (fired synchronously
+      // inside the loop, before its next-turn scheduling), call pause() then
+      // resume() back-to-back. That is exactly the window where resume()'s
+      // scheduled chain and the loop's own next-turn scheduling are both
+      // pending — two chains must not run concurrently.
+      let hookFired = false;
+      const hookedBroadcast = vi.fn((cid: number, data: any) => {
+        broadcastFn(cid, data);
+        if (cid === conversationId && data?.type === "expert_stream_done" && !hookFired) {
+          hookFired = true;
+          const orchestrator = new InteractionOrchestrator(conversationId);
+          orchestrator.pause();
+          orchestrator.resume();
+        }
+      });
+      const { waitForTurns, releaseNextTurn, drainToIdle, assistantCount, turnsStarted } =
+        setupGatedConversation(conversationId);
+
+      const userMessage = createMockMessage(1, "First question");
+      await processMessageTurnBased(userId, conversationId, userMessage, hookedBroadcast);
+      await waitForTurns(1); // first sequential turn is streaming
+
+      // Keep the sequence bounded at the sequential round.
+      new InteractionOrchestrator(conversationId).disableAutonomous();
+
+      // Alice's turn completes; the hook fires pause+resume inside the
+      // loop's own continuation.
+      await releaseNextTurn();
+      await waitForTurns(2); // exactly one follow-up turn (Bob) may start
+
+      // The duplicate chain (if any) would start Carol's turn while Bob is
+      // still gated — no third turn may begin before Bob is released.
+      await waitFor(60);
+      expect(turnsStarted()).toBe(2);
+
+      await releaseNextTurn(); // Bob
+      await waitForTurns(3); // Carol
+      await releaseNextTurn();
+
+      await drainToIdle();
+      expect(getConversationState(conversationId)!.mode).toBe("idle");
+      // Exactly one turn per expert: the pause/resume race must not
+      // double-drive the loop into concurrent chains.
+      expect(assistantCount()).toBe(3);
+      await waitFor(80); // a stray duplicate chain would surface as extra turns
+      expect(assistantCount()).toBe(3);
+      expect(turnsStarted()).toBe(3);
+    });
+
+    it("resume after autonomous was disabled while paused ends the sequence without running another expert turn", async () => {
+      const conversationId = nextConvId();
+      const { waitForTurns, releaseNextTurn, assistantCount } =
+        setupGatedConversation(conversationId);
+
+      const userMessage = createMockMessage(1, "First question");
+      await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn);
+
+      // Complete the sequential round; park on the first autonomous turn.
+      await waitForTurns(1);
+      await releaseNextTurn();
+      await waitForTurns(2);
+      await releaseNextTurn();
+      await waitForTurns(3);
+      await releaseNextTurn();
+      await waitForMode(conversationId, "autonomous");
+      await waitForTurns(4);
+
+      const orchestrator = new InteractionOrchestrator(conversationId);
+      orchestrator.pause();
+      await releaseNextTurn(); // the in-flight autonomous turn completes
+      await waitFor(30);
+      expect(getConversationState(conversationId)!.mode).toBe("paused"); // parked
+
+      // Auto off while parked, then resume: the documented G2 contract is
+      // "the sequence ends naturally once the current expert finishes" —
+      // with no expert streaming, resume must not bill one more turn.
+      orchestrator.disableAutonomous();
+      orchestrator.resume();
+
+      await waitForMode(conversationId, "idle");
+      expect(assistantCount()).toBe(4); // 3 sequential + 1 autonomous, nothing more
+      expect(mockGenerateInsights).toHaveBeenCalledWith(conversationId, expect.any(Function));
+    });
+
+    it("finishes the sequential round and ends at idle (never autonomous) when autonomous is disabled mid-sequential-round", async () => {
+      const conversationId = nextConvId();
+      const { waitForTurns, releaseNextTurn, drainToIdle, assistantCount } =
+        setupGatedConversation(conversationId);
+
+      const userMessage = createMockMessage(1, "First question");
+      await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn);
+      await waitForTurns(1); // Alice is streaming
+
+      new InteractionOrchestrator(conversationId).disableAutonomous();
+      expect(getConversationState(conversationId)!.isAutonomousEnabled).toBe(false);
+
+      await releaseNextTurn(); // Alice finishes
+      await waitForTurns(2); // Bob
+      await releaseNextTurn();
+      // Mid-round check: still sequential — the disable must not wedge or
+      // transition the phase.
+      expect(getConversationState(conversationId)!.mode).toBe("processing_sequential");
+      await waitForTurns(3); // Carol
+      await releaseNextTurn();
+
+      await drainToIdle();
+      const state = getConversationState(conversationId)!;
+      expect(state.mode).toBe("idle");
+      expect(assistantCount()).toBe(3); // sequential round is never cut
+      expect(mockGenerateInsights).toHaveBeenCalledWith(conversationId, expect.any(Function));
     });
   });
 });

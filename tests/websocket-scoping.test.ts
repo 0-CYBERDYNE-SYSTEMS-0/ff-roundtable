@@ -54,6 +54,7 @@ vi.mock("../server/ai", () => ({
 
 import { registerRoutes } from "../server/routes";
 import { getConversationState } from "../server/orchestrator";
+import { storage } from "../server/storage";
 
 // ── Helpers ──
 function waitFor(ms: number): Promise<void> {
@@ -343,6 +344,49 @@ describe("WebSocket scoping (G3)", () => {
       expect(typeof replay.maxAutonomousTurns).toBe("number");
     } finally {
       clientA2.ws.close(1000, "test done");
+    }
+  });
+
+  it("closes 4401 on a cookie with a valid session id but a forged signature", async () => {
+    // Capture a REAL session cookie by registering a user, then tamper only
+    // the HMAC. Stripping the signature must not be enough to authenticate.
+    const cookie = await registerUser(baseUrl, "wsscoping-forged");
+    const signed = cookie.replace("connect.sid=", "");
+    const dot = signed.lastIndexOf(".");
+    expect(dot).toBeGreaterThan(0);
+    const forged = `connect.sid=${signed.slice(0, dot + 1)}FORGED_SIGNATURE`;
+
+    const client = await connect(wsUrl, forged);
+    const closed = await closeOf(client.ws);
+    expect(closed.code).toBe(4401);
+    expect(closed.reason).toBe("Unauthenticated");
+    expect(client.received).toEqual([]);
+  });
+
+  it("processes a subscribe that arrives before the session lookup completes (async store)", async () => {
+    // The pg-backed session store resolves its lookup on a later tick. A
+    // client that subscribes immediately after the handshake sends its frame
+    // before the server attached the authenticated message handler — the
+    // frame must be buffered and honored, not dropped.
+    const originalGet = storage.sessionStore.get.bind(storage.sessionStore);
+    (storage.sessionStore as any).get = (sid: string, cb: (err: any, session: any) => void) => {
+      setTimeout(() => originalGet(sid, cb), 25);
+    };
+    try {
+      const client = await connect(wsUrl, cookieA);
+      try {
+        // Sent while the (delayed) lookup is still in flight.
+        client.ws.send(JSON.stringify({ type: "subscribe", conversationId: convoA1.id }));
+        const ack = await nextMessage(
+          client,
+          (m) => m.type === "subscribed" && m.conversationId === convoA1.id,
+        );
+        expect(ack.conversationId).toBe(convoA1.id);
+      } finally {
+        client.ws.close(1000, "test done");
+      }
+    } finally {
+      (storage.sessionStore as any).get = originalGet;
     }
   });
 });

@@ -36,6 +36,12 @@ interface ConversationState {
     // pause() can land mid-turn; this is the only reliable "is a turn
     // actually streaming" signal for the paused-interrupt path.
     turnInFlight: boolean;
+    // Internal (never broadcast): a processNextTurn chain is scheduled but
+    // has not fired yet. Exactly one chain may drive a conversation at a
+    // time — pause() followed immediately by resume() can otherwise leave
+    // two setImmediate chains pending (one from the loop's own next-turn
+    // scheduling, one from resume), double-driving turns and insights.
+    turnChainScheduled: boolean;
     // In-memory recovery guard for a loop that died between turns.
     lastProgressAt: number;
     // Expert message contents of the CURRENT sequence (sequential round 1 +
@@ -114,6 +120,7 @@ function initializeConversationState(conversationId: number, experts: Expert[], 
         wasInterrupted: false, // Initialize interrupted flag
         pausedFromMode: null,
         turnInFlight: false,
+        turnChainScheduled: false,
         lastProgressAt: Date.now(),
         sequenceExpertContents: []
     };
@@ -172,6 +179,8 @@ export class InteractionOrchestrator {
         });
 
         debugLog(`Orchestrator starting processing sequence for conv ${this.conversationId}`);
+        // Mark that exactly one turn chain is scheduled for this conversation.
+        updateConversationState(this.conversationId, { turnChainScheduled: true });
         // Use setImmediate to avoid blocking the initial request and handle potential immediate pause
         setImmediate(() => {
             this.processNextTurn().catch(err => {
@@ -183,7 +192,25 @@ export class InteractionOrchestrator {
 
     // Processes a single turn and triggers the next one if applicable
     private async processNextTurn(): Promise<void> {
+        // Single-chain guard: claim the scheduled slot. Any second pending
+        // chain (pause()+resume() racing the loop's own scheduling, a stale
+        // chain from before an interrupted restart, ...) bows out here
+        // instead of double-driving the loop.
+        if (!getConversationState(this.conversationId)?.turnChainScheduled) {
+            debugLog(`Orchestrator: duplicate turn chain for ${this.conversationId} bowing out.`);
+            return;
+        }
+        updateConversationState(this.conversationId, { turnChainScheduled: false });
+
         let state = getConversationState(this.conversationId);
+        // A turn is still streaming (resume() landing mid-turn schedules a
+        // chain while the paused turn is in flight). The chain that owns the
+        // in-flight turn continues the round from its own "Decide Next
+        // Action" — starting a turn here would run two experts concurrently.
+        if (state?.turnInFlight) {
+            debugLog(`Orchestrator: turn still in flight for ${this.conversationId} — chain bowing out.`);
+            return;
+        }
         // Initial checks for stopping conditions
         if (!state || state.mode === "paused" || state.wasInterrupted) {
             const reason = !state ? "state missing" : state.mode === "paused" ? "paused" : "interrupted";
@@ -207,6 +234,24 @@ export class InteractionOrchestrator {
         }
         if (state.mode !== "processing_sequential" && state.mode !== "autonomous") {
             debugLog(`Orchestrator stopping for ${this.conversationId}. Unexpected Mode: ${state.mode}`);
+            return;
+        }
+
+        // G2 follow-up: autonomous was disabled while no turn was streaming
+        // (e.g. disabled while paused-from-autonomous, then resumed; or
+        // disabled between two scheduled turns). The contract is "the
+        // sequence ends naturally once the current expert finishes" — with
+        // no expert streaming, end immediately instead of billing one more
+        // turn the user explicitly turned off.
+        if (state.mode === "autonomous" && !state.isAutonomousEnabled) {
+            debugLog(`Orchestrator: autonomous disabled before turn start for ${this.conversationId} — ending sequence naturally.`);
+            updateConversationState(this.conversationId, {
+                mode: "idle",
+                currentExpertIndex: -1,
+                totalAutonomousTurnsTaken: 0,
+                pausedFromMode: null
+            });
+            generateInsights(this.conversationId, state.broadcastFn).catch(console.error);
             return;
         }
 
@@ -480,6 +525,8 @@ export class InteractionOrchestrator {
          debugLog(`[DEBUG] Final check before scheduling: continueProcessing=${continueProcessing}, finalMode=${finalStateCheck?.mode}, finalInterrupted=${finalStateCheck?.wasInterrupted}`);
         if (continueProcessing && finalStateCheck && finalStateCheck.mode !== "paused" && !finalStateCheck.wasInterrupted) {
             debugLog("[DEBUG] Scheduling next turn via setImmediate.");
+            // Claim the single scheduled-chain slot before yielding.
+            updateConversationState(this.conversationId, { turnChainScheduled: true });
             setImmediate(() => {
                  this.processNextTurn().catch(err => {
                      console.error(`Orchestrator: Unhandled error in processNextTurn recursion for ${this.conversationId}:`, err);
@@ -532,8 +579,8 @@ export class InteractionOrchestrator {
             const resumeToMode = state.pausedFromMode ||
                 (state.totalAutonomousTurnsTaken > 0 ? "autonomous" : "processing_sequential");
                                 
-            updateConversationState(this.conversationId, { mode: resumeToMode, pausedFromMode: null });
-            
+            updateConversationState(this.conversationId, { mode: resumeToMode, pausedFromMode: null, turnChainScheduled: true });
+
             // Trigger the next turn processing immediately
             setImmediate(() => {
                 this.processNextTurn().catch(err => {
