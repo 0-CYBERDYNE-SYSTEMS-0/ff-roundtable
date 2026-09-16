@@ -1,4 +1,4 @@
-import { pgTable, text, serial, integer, boolean, timestamp, json } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, integer, boolean, timestamp, json, jsonb } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -43,6 +43,10 @@ export const messages = pgTable("messages", {
   expertName: text("expert_name"),
   expertRole: text("expert_role"),
   artifacts: json("artifacts").default([]),
+  // G4: roles @-tagged in this message, parsed once on creation (user
+  // messages in routes.ts, expert messages in ai.ts) and routed on by the
+  // orchestrator. Nullable: legacy rows have no value.
+  mentions: jsonb("mentions").$type<string[]>(),
   timestamp: timestamp("timestamp").defaultNow(),
 });
 
@@ -153,10 +157,16 @@ export type Conversation = typeof conversations.$inferSelect;
 export type InsertExpert = z.infer<typeof insertExpertSchema>;
 export type Expert = typeof experts.$inferSelect;
 
-export type InsertMessage = z.infer<typeof insertMessageSchema>;
+// drizzle-zod's inferred jsonb shape does not line up with the column's
+// $type<string[]> on the insert path — pin mentions to the canonical type.
+export type InsertMessage = Omit<z.infer<typeof insertMessageSchema>, 'mentions'> & {
+  mentions?: string[] | null;
+};
 // Extend Message type to properly type artifacts as Artifact[]
-export type Message = Omit<typeof messages.$inferSelect, 'artifacts'> & {
+// (and keep the nullable G4 mentions column optional for object literals)
+export type Message = Omit<typeof messages.$inferSelect, 'artifacts' | 'mentions'> & {
   artifacts?: Artifact[];
+  mentions?: string[] | null;
 };
 
 export type InsertFile = z.infer<typeof insertFileSchema>;

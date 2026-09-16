@@ -2,6 +2,7 @@ import { storage } from "./storage";
 // Import shared DB types
 import type { InsertMessage, Expert, InsertFile, Message, File, Artifact, FarmProfile } from "@shared/schema"; 
 import { extractArtifacts } from "./artifact-extractor";
+import { extractMentions } from "@shared/mentions";
 import OpenAI from "openai";
 import path from "path";
 import fs from "fs";
@@ -76,7 +77,7 @@ You are part of a team of experts: [${availableRoles?.join(', ') || 'various rol
   }
 
   const interactionPrompt = `During discussion, actively engage with other experts. Reference their points and ask clarifying questions.
-If you want to direct a comment or question to a specific expert, use '@[Role Name]' (e.g., '@Soil Scientist').
+You can direct the discussion: if you write @[Role Name], that expert will be asked to speak next. Tag only when their expertise is genuinely needed; otherwise speak to the whole table.
 Be concise and clear in your responses.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -577,7 +578,7 @@ export async function getExpertResponseStream(
     }
     
     const { artifacts, cleanContent } = extractArtifacts(response.message.content);
-    
+
     return {
       conversationId: expert.conversationId,
       expertId: expert.id,
@@ -586,7 +587,11 @@ export async function getExpertResponseStream(
       role: "assistant",
       expertName: expert.name,
       expertRole: expert.role,
-      artifacts: artifacts
+      artifacts: artifacts,
+      // G4: parse the @-tags the model actually wrote so the orchestrator
+      // can route on them (and the client can render chips) without
+      // re-parsing the stored content.
+      mentions: extractMentions(cleanContent, availableRoles)
     };
 
   } catch (error) {
@@ -694,7 +699,7 @@ export async function getExpertResponse(
     }
     
     const { artifacts, cleanContent } = extractArtifacts(response.message.content);
-    
+
     return {
       conversationId: expert.conversationId,
       expertId: expert.id,
@@ -703,7 +708,11 @@ export async function getExpertResponse(
       role: "assistant",
       expertName: expert.name,
       expertRole: expert.role,
-      artifacts: artifacts
+      artifacts: artifacts,
+      // G4: parse the @-tags the model actually wrote so the orchestrator
+      // can route on them (and the client can render chips) without
+      // re-parsing the stored content.
+      mentions: extractMentions(cleanContent, availableRoles)
     };
 
   } catch (error) {

@@ -49,6 +49,15 @@ interface ConversationState {
     // a new sequence starts, carried across the sequential→autonomous
     // transition.
     sequenceExpertContents: string[];
+    // G4: experts speaking in THIS sequential round. Defaults to the full
+    // active roster; a user message carrying valid mentions narrows it to the
+    // addressed experts (roster order). The autonomous extension always runs
+    // over the FULL activeExperts.
+    roundExperts: Expert[];
+    // G4 ping-pong guard: the unordered role pair ("A<B", sorted) of the last
+    // mention-routed turn plus how many consecutive mention-routed turns that
+    // pair has logged. null whenever the previous turn was not mention-routed.
+    mentionPairStreak: { key: string; count: number } | null;
     // We might add turn limits, autonomous rounds etc. later
 }
 
@@ -65,8 +74,19 @@ function isUsableConversationState(state: ConversationState | undefined): state 
         Number.isInteger(state.currentExpertIndex) &&
         ["idle", "processing_sequential", "paused", "autonomous"].includes(state.mode) &&
         typeof state.lastProgressAt === "number" &&
-        Array.isArray(state.sequenceExpertContents)
+        Array.isArray(state.sequenceExpertContents) &&
+        Array.isArray(state.roundExperts)
     );
+}
+
+// G4: the experts that speak in THIS sequential round. Defaults to the full
+// active roster; a user message with valid mentions narrows it to the
+// addressed experts in roster order (selective wake). Stale/unknown mentions
+// that filter to nothing fall back to the full roster.
+function selectRoundExperts(activeExperts: Expert[], mentions?: string[] | null): Expert[] {
+    if (!mentions || mentions.length === 0) return activeExperts;
+    const narrowed = activeExperts.filter(e => mentions.includes(e.role));
+    return narrowed.length > 0 ? narrowed : activeExperts;
 }
 
 // Export this helper function
@@ -122,7 +142,9 @@ function initializeConversationState(conversationId: number, experts: Expert[], 
         turnInFlight: false,
         turnChainScheduled: false,
         lastProgressAt: Date.now(),
-        sequenceExpertContents: []
+        sequenceExpertContents: [],
+        roundExperts: selectRoundExperts(experts, userMessage.mentions),
+        mentionPairStreak: null
     };
     conversationStates.set(conversationId, initialState);
     debugLog(`Initialized state for ${conversationId}, Auto ON (max ${defaultMaxAutonomousTurns} turns)`);
@@ -175,7 +197,14 @@ export class InteractionOrchestrator {
             totalAutonomousTurnsTaken: 0, // Reset counter when new sequence starts
             wasInterrupted: false, // Reset interrupted flag
             pausedFromMode: null,
-            sequenceExpertContents: [] // New sequence: redundancy history starts empty
+            sequenceExpertContents: [], // New sequence: redundancy history starts empty
+            // G4: narrow this sequential round to the experts the triggering
+            // user message addressed (lastUserMessage). The interrupted-
+            // restart and paused-restart paths both flow back through
+            // processMessageTurnBased → here, so steering messages re-narrow
+            // the round the same way.
+            roundExperts: selectRoundExperts(state.activeExperts, state.lastUserMessage?.mentions),
+            mentionPairStreak: null // New sequence: mention pair streak starts fresh
         });
 
         debugLog(`Orchestrator starting processing sequence for conv ${this.conversationId}`);
@@ -263,27 +292,72 @@ export class InteractionOrchestrator {
         const availableRoles = state.activeExperts.map(e => e.role);
 
         if (state.mode === "autonomous") {
-            const moderator = state.activeExperts.find(e => e.role === 'Moderator');
-            let suggestedRole: string | null = null;
-            if (moderator) {
-                 const history = await storage.getConversationMessages(this.conversationId);
-                 suggestedRole = await getModeratorNextSpeakerSuggestion(moderator, history.slice(-6), availableRoles);
-            }
-            if (suggestedRole && suggestedRole !== 'RoundRobin') {
-                const startIndex = (state.currentExpertIndex + 1) % state.activeExperts.length;
-                for (let i = 0; i < state.activeExperts.length; i++) {
-                    const checkIndex = (startIndex + i) % state.activeExperts.length;
-                    if (state.activeExperts[checkIndex].role === suggestedRole) {
-                        nextExpertIndex = checkIndex;
+            // G4 mention routing (autonomous only): the just-finished expert's
+            // stored message may tag a colleague — that colleague speaks next,
+            // ahead of the Moderator. Priority within the mentions list is
+            // order of first appearance; self-mentions and roles outside the
+            // active roster are skipped. Legacy rows without a mentions field
+            // simply fall through to the Moderator/round-robin below.
+            let mentionRouted = false;
+            const history = await storage.getConversationMessages(this.conversationId);
+            const lastExpertMessage = history.slice().reverse().find(m => m.role === 'assistant' && !m.content.startsWith("(Error generating response"));
+            const lastMentions = lastExpertMessage && Array.isArray(lastExpertMessage.mentions)
+                ? lastExpertMessage.mentions
+                : [];
+            if (lastMentions.length > 0 && lastExpertMessage?.expertRole) {
+                const speakerRole = lastExpertMessage.expertRole;
+                for (const mentionedRole of lastMentions) {
+                    if (mentionedRole === speakerRole) continue;
+                    const mentionedIndex = state.activeExperts.findIndex(e => e.role === mentionedRole);
+                    if (mentionedIndex === -1) continue;
+                    // Ping-pong guard: two experts trading mentions back and
+                    // forth would burn the whole autonomous budget on one
+                    // exchange. On the route that would make it 3 consecutive
+                    // mention-routed turns for the same unordered pair, skip
+                    // to the Moderator/round-robin instead.
+                    const pairKey = [speakerRole, mentionedRole].sort().join("<");
+                    const streak = state.mentionPairStreak;
+                    if (streak && streak.key === pairKey && streak.count >= 2) {
+                        debugLog(`Orchestrator: mention ping-pong guard tripped for ${this.conversationId} (pair "${pairKey}" at ${streak.count} consecutive routed turns) — deferring to moderator/round-robin.`);
                         break;
                     }
+                    nextExpertIndex = mentionedIndex;
+                    mentionRouted = true;
+                    updateConversationState(this.conversationId, {
+                        mentionPairStreak: streak && streak.key === pairKey
+                            ? { key: pairKey, count: streak.count + 1 }
+                            : { key: pairKey, count: 1 }
+                    });
+                    debugLog(`Orchestrator: mention-routed next speaker for ${this.conversationId}: ${mentionedRole}`);
+                    break;
                 }
-                 if (nextExpertIndex === -1) {
-                     console.warn(`Moderator suggested role ${suggestedRole} not found, falling back to round robin.`);
+            }
+            if (!mentionRouted && state.mentionPairStreak) {
+                // Any turn not routed by a mention breaks the pair streak.
+                updateConversationState(this.conversationId, { mentionPairStreak: null });
+            }
+            const moderator = state.activeExperts.find(e => e.role === 'Moderator');
+            let suggestedRole: string | null = null;
+            if (!mentionRouted && moderator) {
+                 suggestedRole = await getModeratorNextSpeakerSuggestion(moderator, history.slice(-6), availableRoles);
+            }
+            if (!mentionRouted) {
+                if (suggestedRole && suggestedRole !== 'RoundRobin') {
+                    const startIndex = (state.currentExpertIndex + 1) % state.activeExperts.length;
+                    for (let i = 0; i < state.activeExperts.length; i++) {
+                        const checkIndex = (startIndex + i) % state.activeExperts.length;
+                        if (state.activeExperts[checkIndex].role === suggestedRole) {
+                            nextExpertIndex = checkIndex;
+                            break;
+                        }
+                    }
+                     if (nextExpertIndex === -1) {
+                         console.warn(`Moderator suggested role ${suggestedRole} not found, falling back to round robin.`);
+                         nextExpertIndex = (state.currentExpertIndex + 1) % state.activeExperts.length;
+                     }
+                } else {
                      nextExpertIndex = (state.currentExpertIndex + 1) % state.activeExperts.length;
-                 }
-            } else {
-                 nextExpertIndex = (state.currentExpertIndex + 1) % state.activeExperts.length;
+                }
             }
         } else { // processing_sequential
             nextExpertIndex = state.currentExpertIndex + 1;
@@ -291,7 +365,10 @@ export class InteractionOrchestrator {
 
         // 2. Check if processing should stop based on index or limits
         let endOfProcessing = false;
-        if (state.mode === "processing_sequential" && nextExpertIndex >= state.activeExperts.length) {
+        // G4: sequential rounds iterate roundExperts (the addressed subset
+        // when the user @-tagged experts); autonomous turns iterate the FULL
+        // activeExperts (council-wide extension).
+        if (state.mode === "processing_sequential" && nextExpertIndex >= state.roundExperts.length) {
             debugLog("End of sequential round detected.");
             endOfProcessing = true; // Will decide transition/stop later
             nextExpertIndex = -1; // Signal end of round
@@ -303,7 +380,9 @@ export class InteractionOrchestrator {
 
         // 3. Process Expert Turn (if not stopping and index is valid)
         if (nextExpertIndex !== -1) {
-            const currentExpert = state.activeExperts[nextExpertIndex]; // Guaranteed to exist now
+            const currentExpert = state.mode === "processing_sequential"
+                ? state.roundExperts[nextExpertIndex]
+                : state.activeExperts[nextExpertIndex]; // Guaranteed to exist now
             
             // --- Update State for the Current Turn --- 
             const turnsTakenUpdate = state.mode === "autonomous" 

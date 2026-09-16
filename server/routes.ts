@@ -13,6 +13,7 @@ import { createHmac, randomBytes, timingSafeEqual } from "crypto";
 import Stripe from "stripe";
 import { WebSocketServer, type RawData } from "ws";
 import { InsertConversation, InsertExpert, InsertMessage, Message, insertFarmProfileSchema } from "@shared/schema";
+import { extractMentions } from "@shared/mentions";
 import { buildVCalendar } from "@shared/ics";
 import { extractScheduleRows, parseIsoDate, nextMondayFrom, resolveRowStartDate, buildRowSummary } from "@shared/schedule-extract";
 import { generateComprehensiveMarkdown } from './export-utils';
@@ -918,13 +919,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(200).json(lastExistingMessage);
       }
 
-      // Store user message
+      // Store user message — G4: parse @-mentions once against this
+      // conversation's expert roles and persist them on the message. The
+      // orchestrator reads the stored field (selective wake for the
+      // sequential round); the field rides every broadcast so the client
+      // never re-parses.
+      const conversationExperts = await storage.getConversationExperts(conversationId);
+      const knownRoles = conversationExperts.map(e => e.role);
       const userMessage: InsertMessage = {
         conversationId,
         userId,
         expertId: null,
         content,
-        role: "user"
+        role: "user",
+        mentions: extractMentions(content, knownRoles)
       };
       const storedMessage: Message = await storage.createMessage(userMessage);
 

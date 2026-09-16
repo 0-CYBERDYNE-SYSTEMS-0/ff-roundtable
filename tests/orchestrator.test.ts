@@ -64,6 +64,7 @@ function createMockMessage(
   content: string,
   role: string = "user",
   expertId?: number,
+  mentions?: string[],
 ): Message {
   return {
     id,
@@ -75,6 +76,7 @@ function createMockMessage(
     expertName: null,
     expertRole: null,
     artifacts: [],
+    mentions: mentions ?? null,
     timestamp: new Date(),
   };
 }
@@ -1105,6 +1107,291 @@ describe("Orchestrator", () => {
       expect(state.mode).toBe("idle");
       expect(assistantCount()).toBe(3); // sequential round is never cut
       expect(mockGenerateInsights).toHaveBeenCalledWith(conversationId, expect.any(Function));
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────
+  // G4 — Mention mechanics: routing, selective wake, ping-pong guard
+  // ─────────────────────────────────────────────────────────────────
+
+  describe("G4 mention mechanics", () => {
+    // Gated conversation whose expert messages carry G4 mentions: the
+    // resolver decides which roles each speaker tags. Everything else
+    // mirrors setupGatedConversation above (unique content per turn keeps
+    // the redundancy early-stop out of play).
+    function setupGatedMentionConversation(
+      conversationId: number,
+      roster: Expert[],
+      mentionsFor: (expert: Expert) => string[],
+    ) {
+      const myExperts = roster.map((e) => ({ ...e, conversationId }));
+      mockGetConversationExperts.mockResolvedValue(myExperts);
+      mockGetConversationFiles.mockResolvedValue([]);
+
+      const messages: Message[] = [];
+      let messageId = 20_000 + conversationId * 50;
+      mockGetConversationMessages.mockImplementation((cid: number) =>
+        Promise.resolve(messages.filter((m) => m.conversationId === cid)),
+      );
+      mockCreateMessage.mockImplementation((msg: Partial<Message>) => {
+        const stored = { ...msg, id: messageId++, timestamp: new Date() } as Message;
+        messages.push(stored);
+        return Promise.resolve(stored);
+      });
+
+      const gates: Array<() => void> = [];
+      const startedNames: string[] = [];
+      let contentCounter = 0;
+      mockGetExpertResponseStream.mockImplementation((expert: Expert) => {
+        if (expert.conversationId !== conversationId) {
+          return new Promise(() => {}); // park foreign chains forever
+        }
+        startedNames.push(expert.name);
+        return new Promise((resolve) => {
+          const content = `Distinct answer ${++contentCounter} from ${expert.name}`;
+          gates.push(() =>
+            resolve({
+              conversationId: expert.conversationId,
+              expertId: expert.id,
+              userId: null,
+              content,
+              role: "assistant",
+              expertName: expert.name,
+              expertRole: expert.role,
+              artifacts: [],
+              mentions: mentionsFor(expert),
+            }),
+          );
+        });
+      });
+
+      const waitForTurns = async (n: number) => {
+        const deadline = Date.now() + 5000;
+        while (startedNames.length < n) {
+          if (Date.now() > deadline) {
+            throw new Error(`Timed out waiting for ${n} turns to start (got ${startedNames.length})`);
+          }
+          await waitFor(5);
+        }
+      };
+
+      const releaseNextTurn = async () => {
+        const deadline = Date.now() + 5000;
+        while (gates.length === 0) {
+          if (Date.now() > deadline) throw new Error("Timed out waiting for a turn to release");
+          await waitFor(5);
+        }
+        gates.shift()!();
+      };
+
+      // Release turns until the sequence returns to idle.
+      const drainToIdle = async () => {
+        for (let i = 0; i < 25; i++) {
+          const s = getConversationState(conversationId);
+          if (!s || s.mode === "idle") return;
+          if (gates.length > 0) gates.shift()!();
+          await waitFor(10);
+        }
+      };
+
+      return { waitForTurns, releaseNextTurn, drainToIdle, turnNames: () => [...startedNames] };
+    }
+
+    it("mention-routes the next autonomous speaker without asking the Moderator", async () => {
+      const conversationId = nextConvId();
+      const roster = [
+        createMockExpert(1, "Alice", "Agronomist"),
+        createMockExpert(2, "Bob", "Soil Scientist"),
+        createMockExpert(3, "Carol", "Weather Expert"),
+        createMockExpert(4, "Matt", "Moderator"),
+      ];
+      // Only the Moderator tags anyone: his closing sequential message hands
+      // the floor to the Soil Scientist.
+      const { waitForTurns, releaseNextTurn, drainToIdle, turnNames } =
+        setupGatedMentionConversation(conversationId, roster, (e) =>
+          e.role === "Moderator" ? ["Soil Scientist"] : [],
+        );
+
+      const userMessage = createMockMessage(1, "Plan my week");
+      await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn);
+
+      // Full sequential round: Alice, Bob, Carol, Matt (Moderator speaks last).
+      for (let i = 1; i <= 4; i++) {
+        await waitForTurns(i);
+        await releaseNextTurn();
+      }
+
+      await waitForMode(conversationId, "autonomous");
+      await waitForTurns(5);
+
+      // Mention-routed: Matt tagged the Soil Scientist, so Bob speaks next —
+      // round-robin would have picked Alice (index 0) — and the Moderator
+      // mock was never consulted for the routing decision.
+      expect(turnNames()[4]).toBe("Bob");
+      expect(mockGetModeratorNextSpeakerSuggestion).not.toHaveBeenCalled();
+
+      await releaseNextTurn();
+      await drainToIdle();
+      expect(getConversationState(conversationId)!.mode).toBe("idle");
+    });
+
+    it("falls back to round-robin when the same pair trades mentions a third consecutive time", async () => {
+      const conversationId = nextConvId();
+      const roster = [
+        createMockExpert(1, "Alice", "Agronomist"),
+        createMockExpert(2, "Bob", "Soil Scientist"),
+        createMockExpert(3, "Carol", "Weather Expert"),
+      ];
+      // Carol always tags Bob and Bob always tags Carol — a pure ping-pong.
+      const { waitForTurns, releaseNextTurn, drainToIdle, turnNames } =
+        setupGatedMentionConversation(conversationId, roster, (e) =>
+          e.role === "Weather Expert"
+            ? ["Soil Scientist"]
+            : e.role === "Soil Scientist"
+              ? ["Weather Expert"]
+              : [],
+        );
+
+      const userMessage = createMockMessage(1, "Discuss drainage");
+      await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn);
+
+      // Sequential round is mention-blind: Alice, Bob, Carol in roster order.
+      for (let i = 1; i <= 3; i++) {
+        await waitForTurns(i);
+        expect(turnNames()[i - 1]).toBe(["Alice", "Bob", "Carol"][i - 1]);
+        await releaseNextTurn();
+      }
+
+      await waitForMode(conversationId, "autonomous");
+      await waitForTurns(4); // auto #1: Carol's message tags Soil Scientist → Bob (route 1)
+      expect(turnNames()[3]).toBe("Bob");
+      await releaseNextTurn();
+      await waitForTurns(5); // auto #2: Bob tags Weather Expert → Carol (route 2, same pair)
+      expect(turnNames()[4]).toBe("Carol");
+      await releaseNextTurn();
+      await waitForTurns(6); // auto #3: guard trips → round-robin → Alice, NOT Bob again
+      expect(turnNames()[5]).toBe("Alice");
+
+      await releaseNextTurn();
+      await drainToIdle();
+      expect(getConversationState(conversationId)!.mode).toBe("idle");
+    });
+
+    it("narrows the sequential round to the addressed experts and keeps the autonomous extension council-wide", async () => {
+      const conversationId = nextConvId();
+      const roster = [
+        createMockExpert(1, "Alice", "Agronomist"),
+        createMockExpert(2, "Bob", "Soil Scientist"),
+        createMockExpert(3, "Carol", "Weather Expert"),
+      ];
+      const { waitForTurns, releaseNextTurn, drainToIdle, turnNames } =
+        setupGatedMentionConversation(conversationId, roster, () => []);
+
+      const userMessage = createMockMessage(
+        1,
+        "@[Weather Expert] and @[Soil Scientist] please weigh in",
+        "user",
+        undefined,
+        // NOT roster order on purpose — the round must run in roster order.
+        ["Weather Expert", "Soil Scientist"],
+      );
+      await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn);
+
+      // Only the addressed experts speak, in roster order (Bob before Carol).
+      await waitForTurns(1);
+      expect(turnNames()[0]).toBe("Bob");
+      await releaseNextTurn();
+      await waitForTurns(2);
+      expect(turnNames()[1]).toBe("Carol");
+      await releaseNextTurn();
+
+      // Autonomous extension runs over the FULL council: Alice — not
+      // addressed by the user — takes the first autonomous turn.
+      await waitForMode(conversationId, "autonomous");
+      await waitForTurns(3);
+      expect(turnNames()[2]).toBe("Alice");
+
+      await releaseNextTurn();
+      await drainToIdle();
+      expect(getConversationState(conversationId)!.mode).toBe("idle");
+    });
+
+    it("runs the full round when the user mentions only stale/unknown roles", async () => {
+      const conversationId = nextConvId();
+      const roster = [
+        createMockExpert(1, "Alice", "Agronomist"),
+        createMockExpert(2, "Bob", "Soil Scientist"),
+        createMockExpert(3, "Carol", "Weather Expert"),
+      ];
+      const { waitForTurns, releaseNextTurn, drainToIdle, turnNames } =
+        setupGatedMentionConversation(conversationId, roster, () => []);
+
+      const userMessage = createMockMessage(
+        1,
+        "@[Rocket Scientist] thoughts?",
+        "user",
+        undefined,
+        ["Rocket Scientist"], // not in the roster — must fall back to all
+      );
+      await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn);
+
+      await waitForTurns(1);
+      expect(turnNames()[0]).toBe("Alice");
+      await releaseNextTurn();
+      await waitForTurns(2);
+      expect(turnNames()[1]).toBe("Bob");
+      await releaseNextTurn();
+      await waitForTurns(3);
+      expect(turnNames()[2]).toBe("Carol");
+      await releaseNextTurn();
+
+      await drainToIdle();
+      expect(getConversationState(conversationId)!.mode).toBe("idle");
+    });
+
+    it("re-narrows the round when a steering message carries new mentions (interrupted restart inherits them)", async () => {
+      const conversationId = nextConvId();
+      const roster = [
+        createMockExpert(1, "Alice", "Agronomist"),
+        createMockExpert(2, "Bob", "Soil Scientist"),
+        createMockExpert(3, "Carol", "Weather Expert"),
+      ];
+      const { waitForTurns, releaseNextTurn, drainToIdle, turnNames } =
+        setupGatedMentionConversation(conversationId, roster, () => []);
+
+      const userMessage1 = createMockMessage(1, "First question"); // no mentions → full round
+      await processMessageTurnBased(userId, conversationId, userMessage1, broadcastFn);
+      await waitForTurns(1); // Alice streaming
+      await releaseNextTurn();
+      await waitForTurns(2); // Bob streaming
+
+      // Steer mid-round with a message that addresses one expert only.
+      const userMessage2 = createMockMessage(
+        2,
+        "@[Weather Expert] actually just you",
+        "user",
+        undefined,
+        ["Weather Expert"],
+      );
+      await processMessageTurnBased(userId, conversationId, userMessage2, broadcastFn);
+      expect(broadcastFn).toHaveBeenCalledWith(conversationId, { type: "steering" });
+
+      await releaseNextTurn(); // Bob (in-flight) finishes
+      await waitForMode(conversationId, "processing_sequential");
+
+      // The restarted round contains ONLY the addressed expert.
+      await waitForTurns(3);
+      expect(turnNames()[2]).toBe("Carol");
+      await releaseNextTurn();
+
+      // Round of one ends; the autonomous extension is council-wide again.
+      await waitForMode(conversationId, "autonomous");
+      await waitForTurns(4);
+      expect(turnNames()[3]).toBe("Alice");
+
+      await releaseNextTurn();
+      await drainToIdle();
+      expect(getConversationState(conversationId)!.mode).toBe("idle");
     });
   });
 });
