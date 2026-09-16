@@ -11,7 +11,7 @@ import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { Expert, Message, Insight, File as FileType, Conversation, FarmProfile } from "@shared/schema";
 import FarmProfileModal from "@/components/farm/FarmProfileModal";
-import { useWebSocket } from "@/lib/websocket-utils";
+import { useWebSocket, sendWebSocketSubscription, sendWebSocketUnsubscription } from "@/lib/websocket-utils";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ZapIcon, ZapOffIcon, Menu, PauseIcon, PlayIcon } from "lucide-react";
@@ -536,6 +536,36 @@ export default function HomePage() {
     setIsSteering(false);
   }, [socketStatus, activeConversation]);
   
+  // === WebSocket Conversation Subscription (G3) ===
+  // The server only broadcasts to sockets that subscribed to the conversation.
+  // The useWebSocket hook creates a NEW WebSocket object on every reconnect,
+  // so re-running this effect (socket change) re-subscribes the new socket.
+  useEffect(() => {
+    if (!socket || !activeConversation) return;
+    const conversationId = activeConversation;
+    let subscribed = false;
+
+    const subscribe = () => {
+      sendWebSocketSubscription(socket, conversationId);
+      subscribed = true;
+    };
+
+    if (socket.readyState === WebSocket.OPEN) {
+      subscribe();
+    } else {
+      socket.addEventListener("open", subscribe, { once: true });
+    }
+
+    // On conversation switch: unsubscribe the previous conversation. On socket
+    // change/unmount the old socket is gone (the unsubscribe is a no-op there).
+    return () => {
+      socket.removeEventListener("open", subscribe);
+      if (subscribed) {
+        sendWebSocketUnsubscription(socket, conversationId);
+      }
+    };
+  }, [socket, activeConversation]);
+
   // === WebSocket Message Handling ===
   useEffect(() => {
     if (!socket || !activeConversation) return;
@@ -699,6 +729,21 @@ export default function HomePage() {
           // Handle other types like connection confirmation, file updates etc. if needed
           case "connection":
             console.log("WebSocket: Connection confirmed.");
+            break;
+
+          case "subscribed":
+            // Acknowledgment only; a state_update replay follows separately
+            // when orchestrator state exists for the conversation.
+            break;
+
+          case "subscribe_denied":
+            // The server refused the subscription (not the owner or the
+            // conversation no longer exists) — broadcasts will not arrive.
+            console.warn("WebSocket: Subscription denied for conversation", parsedData.conversationId);
+            toast({
+              title: "Couldn't subscribe to conversation updates",
+              variant: "destructive",
+            });
             break;
 
           default:

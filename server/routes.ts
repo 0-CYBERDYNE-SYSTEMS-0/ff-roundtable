@@ -68,6 +68,32 @@ function getSubscriptionClientSecret(subscription: Stripe.Subscription): string 
 // Development mode flag - uses NODE_ENV to determine dev vs production
 const DEVELOPMENT_MODE = process.env.NODE_ENV !== "production";
 
+// Extract the express-session id from a WS upgrade request's Cookie header.
+// The transitive `cookie` dependency ships no type declarations, so the one
+// cookie we need is parsed by hand. express-session signs the value as
+// `s:<sessionId>.<signature>` — both wrapper parts must be stripped before
+// the raw id can be looked up in the session store.
+function getSessionIdFromUpgradeRequest(req: { headers: { cookie?: string } }): string | null {
+  const cookieHeader = req.headers.cookie;
+  if (!cookieHeader) return null;
+  for (const part of cookieHeader.split(";")) {
+    const eq = part.indexOf("=");
+    if (eq === -1) continue;
+    const name = part.slice(0, eq).trim();
+    if (name !== "connect.sid") continue;
+    let value: string;
+    try {
+      value = decodeURIComponent(part.slice(eq + 1).trim());
+    } catch {
+      return null;
+    }
+    if (!value.startsWith("s:")) return null;
+    const sid = value.slice(2).split(".")[0];
+    return sid || null;
+  }
+  return null;
+}
+
 export async function registerRoutes(app: Express): Promise<Server> {
   // Setup authentication routes
   setupAuth(app);
@@ -209,36 +235,96 @@ export async function registerRoutes(app: Express): Promise<Server> {
   
   console.log("WebSocket server initialized on path: /ws");
   
-  wss.on("connection", (ws) => {
+  wss.on("connection", (ws, req) => {
     console.log("WebSocket client connected");
-    
-    // Send an initial connection confirmation
-    ws.send(JSON.stringify({
-      type: "connection", 
-      data: { status: "connected" }
-    }));
-    
-    ws.on("message", (message) => {
-      try {
-        console.log("Received WebSocket message:", message.toString());
-      } catch (error) {
-        console.error("Error processing WebSocket message:", error);
-      }
-    });
-    
+
     ws.on("error", (error) => {
       console.error("WebSocket error:", error);
     });
-    
+
     ws.on("close", () => {
       console.log("WebSocket client disconnected");
     });
+
+    // G3: authenticate the upgrade against the same express-session store the
+    // HTTP routes use. Without this, every connected socket receives every
+    // conversation's streaming tokens.
+    const rejectUnauthenticated = () => ws.close(4401, "Unauthenticated");
+    const sid = getSessionIdFromUpgradeRequest(req);
+
+    if (!sid) {
+      rejectUnauthenticated();
+      return;
+    }
+
+    storage.sessionStore.get(sid, (err: any, session: any) => {
+      // The socket may have closed while the store lookup was in flight.
+      if (ws.readyState !== 1) return;
+
+      const userId = session?.passport?.user;
+      if (err || userId == null) {
+        rejectUnauthenticated();
+        return;
+      }
+
+      (ws as any).userId = userId;
+      (ws as any).subscriptions = new Set<number>();
+
+      // Send an initial connection confirmation
+      ws.send(JSON.stringify({
+        type: "connection",
+        data: { status: "connected" }
+      }));
+
+      ws.on("message", (message) => {
+        try {
+          let parsed: any;
+          try {
+            parsed = JSON.parse(message.toString());
+          } catch {
+            return; // Not JSON — ignore silently.
+          }
+
+          if (parsed?.type === "subscribe" && Number.isInteger(parsed.conversationId)) {
+            const conversationId = parsed.conversationId;
+            storage.getConversation(conversationId).then((conversation) => {
+              if (conversation && conversation.userId === (ws as any).userId) {
+                (ws as any).subscriptions.add(conversationId);
+                ws.send(JSON.stringify({ type: "subscribed", conversationId }));
+                // Replay the current orchestrator state so reconnects restore
+                // the mode badge without a refetch.
+                const state = getConversationState(conversationId);
+                if (state) {
+                  ws.send(JSON.stringify({
+                    type: "state_update",
+                    conversationId,
+                    mode: state.mode,
+                    isAutonomousEnabled: state.isAutonomousEnabled,
+                    maxAutonomousTurns: state.maxAutonomousTurns
+                  }));
+                }
+              } else {
+                ws.send(JSON.stringify({ type: "subscribe_denied", conversationId }));
+              }
+            }).catch((error) => {
+              console.error("Error handling WebSocket subscribe:", error);
+            });
+          } else if (parsed?.type === "unsubscribe" && Number.isInteger(parsed.conversationId)) {
+            (ws as any).subscriptions.delete(parsed.conversationId);
+          }
+          // Everything else is ignored silently.
+        } catch (error) {
+          console.error("Error processing WebSocket message:", error);
+        }
+      });
+    });
   });
   
-  // Create a broadcast function
+  // Create a broadcast function. G3: send only to sockets that subscribed to
+  // this conversation (ownership was verified at subscribe time).
   const broadcastToConversation = (conversationId: number, data: any) => {
     wss.clients.forEach((client) => {
-      if (client.readyState === 1) { // OPEN
+      if (client.readyState === 1 && (client as any).subscriptions?.has(conversationId)) { // OPEN
         try {
           // Handle state_update messages (mode, autonomous status)
           if (data.type === "state_update") {
