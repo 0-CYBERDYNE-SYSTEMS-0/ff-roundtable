@@ -283,6 +283,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
               conversationId
             }));
           }
+          // Handle steering acknowledgments: a message arrived during an
+          // active sequence; the current expert finishes, then the round
+          // restarts on the new message.
+          else if (data.type === "steering") {
+            client.send(JSON.stringify({
+              type: "steering",
+              conversationId
+            }));
+          }
           // Handle error messages
           else if (data.type === "message_error") {
             // Prefer the persisted error message (survives refetch); fall back

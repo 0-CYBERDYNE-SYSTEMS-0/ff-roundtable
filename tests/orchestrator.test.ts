@@ -112,6 +112,99 @@ describe("Orchestrator", () => {
     await waitFor(500);
   });
 
+  // Wait (bounded) until the conversation state reaches the given mode.
+  async function waitForMode(conversationId: number, mode: string, timeoutMs = 5000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const s = getConversationState(conversationId);
+      if (s && s.mode === mode) return;
+      await waitFor(10);
+    }
+    throw new Error(`Timed out waiting for mode "${mode}" on conversation ${conversationId}`);
+  }
+
+  // Deterministic turn gating for the G1/G2 regression tests: every expert
+  // turn of `conversationId` parks until the test releases it, so pause and
+  // steering can be exercised at exact points in the loop. Turns for other
+  // conversations (leftover chains from earlier tests) park forever and can
+  // never interfere.
+  function setupGatedConversation(conversationId: number) {
+    const myExperts = experts.map((e) => ({ ...e, conversationId }));
+    mockGetConversationExperts.mockResolvedValue(myExperts);
+    mockGetConversationFiles.mockResolvedValue([]);
+
+    const messages: Message[] = [];
+    let messageId = 10_000 + conversationId * 50;
+    mockGetConversationMessages.mockImplementation((cid: number) =>
+      Promise.resolve(messages.filter((m) => m.conversationId === cid)),
+    );
+    mockCreateMessage.mockImplementation((msg: Partial<Message>) => {
+      const stored = { ...msg, id: messageId++, timestamp: new Date() } as Message;
+      messages.push(stored);
+      return Promise.resolve(stored);
+    });
+
+    const gates: Array<() => void> = [];
+    let turnsStarted = 0;
+    let contentCounter = 0;
+    mockGetExpertResponseStream.mockImplementation((expert: Expert) => {
+      if (expert.conversationId !== conversationId) {
+        return new Promise(() => {}); // park foreign chains forever
+      }
+      turnsStarted++;
+      return new Promise((resolve) => {
+        // Unique content per turn keeps the redundancy early-stop out of play.
+        const content = `Distinct answer ${++contentCounter} from ${expert.name}`;
+        gates.push(() =>
+          resolve({
+            conversationId: expert.conversationId,
+            expertId: expert.id,
+            userId: null,
+            content,
+            role: "assistant",
+            expertName: expert.name,
+            expertRole: expert.role,
+            artifacts: [],
+          }),
+        );
+      });
+    });
+
+    const waitForTurns = async (n: number) => {
+      const deadline = Date.now() + 5000;
+      while (turnsStarted < n) {
+        if (Date.now() > deadline) {
+          throw new Error(`Timed out waiting for ${n} turns to start (got ${turnsStarted})`);
+        }
+        await waitFor(5);
+      }
+    };
+
+    const releaseNextTurn = async () => {
+      const deadline = Date.now() + 5000;
+      while (gates.length === 0) {
+        if (Date.now() > deadline) throw new Error("Timed out waiting for a turn to release");
+        await waitFor(5);
+      }
+      gates.shift()!();
+    };
+
+    // Release turns until the sequence returns to idle.
+    const drainToIdle = async () => {
+      for (let i = 0; i < 25; i++) {
+        const s = getConversationState(conversationId);
+        if (!s || s.mode === "idle") return;
+        if (gates.length > 0) gates.shift()!();
+        await waitFor(10);
+      }
+    };
+
+    const assistantCount = () =>
+      messages.filter((m) => m.conversationId === conversationId && m.role === "assistant").length;
+
+    return { waitForTurns, releaseNextTurn, drainToIdle, assistantCount };
+  }
+
   // ─────────────────────────────────────────────────────────────────
   // State Machine: idle → processing_sequential
   // ─────────────────────────────────────────────────────────────────
@@ -686,6 +779,211 @@ describe("Orchestrator", () => {
 
       // 3 sequential + maxAutonomousTurns (3 experts * 2 = 6) — never cut early.
       expect(assistantTurns(conversationId)).toBe(9);
+      expect(getConversationState(conversationId)!.mode).toBe("idle");
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────
+  // G1 — Steering: send immediately, server-side interrupt
+  // ─────────────────────────────────────────────────────────────────
+
+  describe("G1 steering", () => {
+    it("broadcasts {type:'steering'} when a message arrives mid-autonomous, finishes the current expert, and restarts the round on the new message", async () => {
+      const conversationId = nextConvId();
+      const { waitForTurns, releaseNextTurn, drainToIdle, assistantCount } =
+        setupGatedConversation(conversationId);
+
+      const userMessage1 = createMockMessage(1, "First question");
+      await processMessageTurnBased(userId, conversationId, userMessage1, broadcastFn);
+
+      // Run the sequential round (Alice, Bob, Carol) to completion.
+      await waitForTurns(1);
+      await releaseNextTurn();
+      await waitForTurns(2);
+      await releaseNextTurn();
+      await waitForTurns(3);
+      await releaseNextTurn();
+
+      // Autonomous phase: wait for its first turn to be in flight.
+      await waitForMode(conversationId, "autonomous");
+      await waitForTurns(4);
+
+      // Steering: a new message arrives mid-autonomous-turn.
+      const userMessage2 = createMockMessage(2, "Steering question");
+      await processMessageTurnBased(userId, conversationId, userMessage2, broadcastFn);
+
+      // Interrupt flagged, newest message stored, steering broadcast sent.
+      let state = getConversationState(conversationId);
+      expect(state!.wasInterrupted).toBe(true);
+      expect(state!.lastUserMessage!.content).toBe("Steering question");
+      expect(broadcastFn).toHaveBeenCalledWith(conversationId, { type: "steering" });
+
+      const assistantAtInterrupt = assistantCount();
+
+      // The in-flight expert finishes, then a fresh sequential round starts.
+      await releaseNextTurn();
+      await waitForMode(conversationId, "processing_sequential");
+
+      const eventsAfterSteering = (type: string) => {
+        const all = broadcastFn.mock.calls.filter((c) => c[0] === conversationId);
+        const idx = all.findIndex((c) => c[1]?.type === "steering");
+        expect(idx).toBeGreaterThanOrEqual(0);
+        return all.slice(idx + 1).filter((c) => c[1]?.type === type).map((c) => c[1]);
+      };
+
+      // The streaming expert completed after the steering signal...
+      expect(eventsAfterSteering("expert_stream_done").length).toBeGreaterThanOrEqual(1);
+
+      // ...and the restarted round runs the full sequential roster on the new message.
+      await waitForTurns(5); // Alice (restart)
+      await releaseNextTurn();
+      await waitForTurns(6); // Bob
+      await releaseNextTurn();
+      await waitForTurns(7); // Carol
+      await releaseNextTurn();
+
+      expect(eventsAfterSteering("expert_stream_start").map((e) => e.expertName)).toEqual([
+        "Alice",
+        "Bob",
+        "Carol",
+      ]);
+
+      // A full fresh sequential round ran on the steering message, plus the
+      // autonomous turn that was allowed to finish first.
+      expect(assistantCount()).toBe(assistantAtInterrupt + 4);
+
+      // Drain the autonomous extension; the sequence ends idle.
+      await drainToIdle();
+      expect(getConversationState(conversationId)!.mode).toBe("idle");
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────
+  // G2 — Disable Auto mid-round ends naturally (never pauses)
+  // ─────────────────────────────────────────────────────────────────
+
+  describe("G2 disableAutonomous", () => {
+    it("ends the sequence naturally at idle with insights (no paused state) when autonomous is disabled mid-round", async () => {
+      const conversationId = nextConvId();
+      const { waitForTurns, releaseNextTurn, assistantCount } =
+        setupGatedConversation(conversationId);
+
+      const userMessage = createMockMessage(1, "First question");
+      await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn);
+
+      await waitForTurns(1);
+      await releaseNextTurn();
+      await waitForTurns(2);
+      await releaseNextTurn();
+      await waitForTurns(3);
+      await releaseNextTurn();
+      await waitForMode(conversationId, "autonomous");
+      await waitForTurns(4);
+
+      new InteractionOrchestrator(conversationId).disableAutonomous();
+
+      // No pause: the round keeps running so the current expert can finish.
+      let state = getConversationState(conversationId);
+      expect(state!.mode).toBe("autonomous");
+      expect(state!.isAutonomousEnabled).toBe(false);
+
+      await releaseNextTurn(); // the in-flight turn completes
+
+      await waitForMode(conversationId, "idle");
+      state = getConversationState(conversationId);
+      expect(state!.mode).toBe("idle");
+      expect(state!.pausedFromMode).toBeNull();
+      // The current expert finished; no further autonomous turns ran.
+      expect(assistantCount()).toBe(4);
+      expect(mockGenerateInsights).toHaveBeenCalledWith(conversationId, expect.any(Function));
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────
+  // G2 — Message while paused = implicit resume-and-restart
+  // ─────────────────────────────────────────────────────────────────
+
+  describe("G2 paused deadlock", () => {
+    it("restarts the sequence on a new message while paused with no turn in flight", async () => {
+      const conversationId = nextConvId();
+      const { waitForTurns, releaseNextTurn, drainToIdle, assistantCount } =
+        setupGatedConversation(conversationId);
+
+      const userMessage1 = createMockMessage(1, "First question");
+      await processMessageTurnBased(userId, conversationId, userMessage1, broadcastFn);
+      await waitForTurns(1); // first sequential turn is streaming
+
+      const orchestrator = new InteractionOrchestrator(conversationId);
+      orchestrator.pause();
+      expect(getConversationState(conversationId)!.mode).toBe("paused");
+
+      // The in-flight turn completes and the loop parks — no next turn.
+      await releaseNextTurn();
+      await waitFor(30);
+      let state = getConversationState(conversationId);
+      expect(state!.mode).toBe("paused");
+      expect(state!.turnInFlight).toBe(false);
+
+      // A message while parked brings the council back to life immediately.
+      const userMessage2 = createMockMessage(2, "Wake back up");
+      await processMessageTurnBased(userId, conversationId, userMessage2, broadcastFn);
+
+      state = getConversationState(conversationId);
+      expect(state!.mode).toBe("idle"); // reset synchronously before the restart is scheduled
+
+      // The restart re-processes the new message: a fresh sequential round runs.
+      await waitForMode(conversationId, "processing_sequential");
+      await waitForTurns(2); // Alice
+      await releaseNextTurn();
+      await waitForTurns(3); // Bob
+      await releaseNextTurn();
+      await waitForTurns(4); // Carol
+      await releaseNextTurn();
+      expect(assistantCount()).toBe(4); // parked-round turn + full restarted round
+
+      await drainToIdle();
+      expect(getConversationState(conversationId)!.mode).toBe("idle");
+    });
+
+    it("interrupts after the in-flight turn and restarts on the new message when a message arrives while paused mid-turn", async () => {
+      const conversationId = nextConvId();
+      const { waitForTurns, releaseNextTurn, drainToIdle, assistantCount } =
+        setupGatedConversation(conversationId);
+
+      const userMessage1 = createMockMessage(1, "First question");
+      await processMessageTurnBased(userId, conversationId, userMessage1, broadcastFn);
+      await waitForTurns(1); // first sequential turn is streaming
+
+      const orchestrator = new InteractionOrchestrator(conversationId);
+      orchestrator.pause();
+
+      // Message arrives while the turn is STILL streaming.
+      const userMessage2 = createMockMessage(2, "Change of plans");
+      await processMessageTurnBased(userId, conversationId, userMessage2, broadcastFn);
+
+      let state = getConversationState(conversationId);
+      expect(state!.mode).toBe("paused"); // the running loop owns the transition
+      expect(state!.turnInFlight).toBe(true);
+      expect(state!.wasInterrupted).toBe(true);
+      expect(state!.lastUserMessage!.content).toBe("Change of plans");
+
+      // The in-flight turn finishes; the loop resets to idle and restarts on
+      // the new message.
+      await releaseNextTurn();
+      await waitForMode(conversationId, "processing_sequential");
+      state = getConversationState(conversationId);
+      expect(state!.wasInterrupted).toBe(false);
+      expect(state!.lastUserMessage!.content).toBe("Change of plans");
+
+      await waitForTurns(2); // Alice
+      await releaseNextTurn();
+      await waitForTurns(3); // Bob
+      await releaseNextTurn();
+      await waitForTurns(4); // Carol
+      await releaseNextTurn();
+      expect(assistantCount()).toBe(4);
+
+      await drainToIdle();
       expect(getConversationState(conversationId)!.mode).toBe("idle");
     });
   });

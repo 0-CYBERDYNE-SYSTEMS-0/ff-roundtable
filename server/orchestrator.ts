@@ -32,6 +32,10 @@ interface ConversationState {
     wasInterrupted: boolean;
     // Preserve the active phase while a sequence is paused.
     pausedFromMode: Exclude<InteractionMode, "idle" | "paused"> | null;
+    // Internal (never broadcast): a turn is actively streaming right now.
+    // pause() can land mid-turn; this is the only reliable "is a turn
+    // actually streaming" signal for the paused-interrupt path.
+    turnInFlight: boolean;
     // In-memory recovery guard for a loop that died between turns.
     lastProgressAt: number;
     // Expert message contents of the CURRENT sequence (sequential round 1 +
@@ -109,6 +113,7 @@ function initializeConversationState(conversationId: number, experts: Expert[], 
         totalAutonomousTurnsTaken: 0,
         wasInterrupted: false, // Initialize interrupted flag
         pausedFromMode: null,
+        turnInFlight: false,
         lastProgressAt: Date.now(),
         sequenceExpertContents: []
     };
@@ -310,6 +315,9 @@ export class InteractionOrchestrator {
                     expertRole: currentExpert.role,
                 });
                 
+                // Mark the turn as in-flight: pause()/steering can land while
+                // this await is pending. Cleared in the finally below.
+                updateConversationState(this.conversationId, { turnInFlight: true });
                 const expertResponse: InsertMessage = await getExpertResponseStream(
                     currentExpert, history, referenceMessageContent, files, availableRoles,
                     (token) => {
@@ -394,6 +402,9 @@ export class InteractionOrchestrator {
                     }
                 }
                 return;
+            } finally {
+                // The turn (or its failure) is fully handled — no longer in flight.
+                updateConversationState(this.conversationId, { turnInFlight: false });
             }
         } // End if(nextExpertIndex !== -1)
 
@@ -428,10 +439,17 @@ export class InteractionOrchestrator {
         } else if (currentState.mode === "autonomous") {
              debugLog("[DEBUG] Currently in Autonomous mode. Checking limits...");
              // Check limits *before* deciding to continue
+             // G2: autonomous disabled mid-round ends the sequence with the
+             // same cleanup as a natural end (idle + insights). The current
+             // expert's turn always finishes; disableAutonomous() never pauses.
+             if (!currentState.isAutonomousEnabled) {
+                 debugLog("Autonomous disabled mid-round — ending sequence naturally.");
+                 processingEndedNaturally = true;
+             }
              // F2: a redundant autonomous answer ends the sequence with the
              // same cleanup as a natural end (idle + insights). An interrupt
              // arriving during the turn wins — the queued message restarts.
-             if (redundancyStopDetected && !currentState.wasInterrupted) {
+             else if (redundancyStopDetected && !currentState.wasInterrupted) {
                  debugLog("Orchestrator: Autonomous sequence stopped early (redundant answer). Setting mode to idle.");
                  processingEndedNaturally = true;
              } else if (currentState.totalAutonomousTurnsTaken >= currentState.maxAutonomousTurns) {
@@ -551,17 +569,16 @@ export class InteractionOrchestrator {
         const state = getConversationState(this.conversationId);
         if (!state) return;
         
-        debugLog(`Orchestrator disabling autonomous mode for ${this.conversationId}`);
+        debugLog(`Orchestrator disabling autonomous mode for ${this.conversationId} — any running sequence ends naturally after the current expert.`);
         updateConversationState(this.conversationId, { 
             isAutonomousEnabled: false,
             // Optionally reset maxAutonomousTurns to 0 or keep the value?
             // maxAutonomousTurns: 0 
         });
-        // If currently in autonomous mode, pausing might be safer than directly setting to idle
-        if (state.mode === "autonomous") {
-             debugLog("Currently in autonomous mode, pausing processing.");
-             this.pause();
-        }
+        // Never pause here: pausing mid-round wedged the conversation (a
+        // paused state had nothing to resume it). "Decide Next Action" in
+        // processNextTurn ends the sequence naturally once the current
+        // expert finishes (idle + insights).
     }
 
 }
@@ -605,6 +622,9 @@ export async function processMessageTurnBased(
                      activeExperts: experts, // Update experts list potentially
                      lastUserMessage: userMessage // Store newest user message
                  });
+                 // Tell the client its message was accepted as steering: the
+                 // current expert finishes, then the round restarts on it.
+                 broadcastFn(conversationId, { type: "steering" });
                  return;
             } else {
                 // If not busy (idle or paused), just update state normally
@@ -614,6 +634,34 @@ export async function processMessageTurnBased(
                     wasInterrupted: false // Ensure flag is clear if we were idle/paused
                 });
                 state = getConversationState(conversationId)!; // Re-fetch state
+
+                // A message while paused is an implicit resume-and-restart: a
+                // parked conversation comes back to life the moment the farmer
+                // speaks. The user message itself was already persisted by
+                // routes.ts before this call.
+                if (state.mode === "paused") {
+                    if (state.turnInFlight) {
+                        // A turn is still streaming. Flag the interrupt; the
+                        // running loop's final check resets to idle and
+                        // re-processes this message once the turn finishes.
+                        updateConversationState(conversationId, { wasInterrupted: true });
+                        debugLog(`Message arrived while paused mid-turn for ${conversationId}. Interrupting after the current expert.`);
+                    } else {
+                        // Parked between turns: reset and restart immediately
+                        // on the new message.
+                        updateConversationState(conversationId, {
+                            mode: "idle",
+                            wasInterrupted: false,
+                            currentExpertIndex: -1,
+                            totalAutonomousTurnsTaken: 0,
+                            pausedFromMode: null,
+                            lastUserMessage: null
+                        });
+                        debugLog(`Message arrived while paused for ${conversationId}. Restarting sequence on the new message.`);
+                        scheduleInterruptedMessage(state, userMessage);
+                    }
+                    return; // Never fall through to the idle start below.
+                }
             }
         }
 
@@ -622,7 +670,8 @@ export async function processMessageTurnBased(
             const orchestrator = new InteractionOrchestrator(conversationId);
             await orchestrator.startProcessingSequence(); 
         } else {
-            // This can happen if the state was paused when the message arrived
+            // Defensive: paused now restarts via the implicit-resume path
+            // above; this branch should not be reachable.
             debugLog(`Orchestrator for ${conversationId} is not idle (mode: ${state.mode}). New message queued in state.`);
         }
 

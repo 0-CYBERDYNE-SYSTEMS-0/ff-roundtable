@@ -14,7 +14,7 @@ import FarmProfileModal from "@/components/farm/FarmProfileModal";
 import { useWebSocket } from "@/lib/websocket-utils";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { ZapIcon, ZapOffIcon, Menu } from "lucide-react";
+import { ZapIcon, ZapOffIcon, Menu, PauseIcon, PlayIcon } from "lucide-react";
 
 // Define the type for interaction modes matching the backend
 type InteractionMode = 
@@ -41,9 +41,10 @@ export default function HomePage() {
   // We might also want to store maxAutonomousTurns if we allow setting it from UI
   // const [maxAutonomousTurns, setMaxAutonomousTurns] = useState<number>(0);
 
-  // Message queue state for continuous input
-  const [pendingMessages, setPendingMessages] = useState<string[]>([]);
-  const [isQueueProcessing, setIsQueueProcessing] = useState(false);
+  // Steering: a message sent mid-sequence is handled by the server's
+  // interrupt path — the current expert finishes, then the round restarts on
+  // the new message. The banner clears on the next processing state_update.
+  const [isSteering, setIsSteering] = useState<boolean>(false);
 
   // Streaming state
   const [streamingMessages, setStreamingMessages] = useState<Map<number, { content: string; expertName: string; expertRole: string }>>(new Map());
@@ -257,31 +258,13 @@ export default function HomePage() {
     },
   });
 
-  // Queue-aware send message handler
+  // Send immediately — always. A message typed during an active sequence is
+  // accepted by the server as steering (it finishes the current expert and
+  // restarts the round on the newest message). Double-click safety is covered
+  // server-side by the duplicate-submission gate.
   const handleSendMessage = (content: string) => {
-    if (isProcessing || sendMessageMutation.isPending) {
-      // Queue the message instead of blocking
-      setPendingMessages(prev => [...prev, content]);
-    } else {
-      // Send immediately if idle
-      sendMessageMutation.mutate(content);
-    }
+    sendMessageMutation.mutate(content);
   };
-
-  // Queue processor - auto-process queued messages when system is idle
-  useEffect(() => {
-    if (!isProcessing &&
-        !sendMessageMutation.isPending &&
-        pendingMessages.length > 0 &&
-        !isQueueProcessing) {
-      setIsQueueProcessing(true);
-      const nextMessage = pendingMessages[0];
-      setPendingMessages(prev => prev.slice(1));
-      sendMessageMutation.mutate(nextMessage, {
-        onSettled: () => setIsQueueProcessing(false)
-      });
-    }
-  }, [isProcessing, sendMessageMutation.isPending, pendingMessages, isQueueProcessing]);
 
   // Upload file mutation
   const uploadFileMutation = useMutation({
@@ -388,6 +371,41 @@ export default function HomePage() {
       });
     },
   });
+
+  // Pause the running round — the current expert finishes, then the council
+  // parks. A paused round is escapable via Resume or by sending a message.
+  const pauseMutation = useMutation({
+    mutationFn: async () => {
+      if (!activeConversation) throw new Error("No active conversation");
+      const res = await apiRequest("POST", `/api/protected/conversations/${activeConversation}/pause`);
+      return await res.json();
+    },
+    // No success toast: the paused state arrives via WebSocket state_update.
+    onError: (error: Error) => {
+      toast({
+        title: "Failed to pause",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
+  });
+
+  // Resume a parked round.
+  const resumeMutation = useMutation({
+    mutationFn: async () => {
+      if (!activeConversation) throw new Error("No active conversation");
+      const res = await apiRequest("POST", `/api/protected/conversations/${activeConversation}/resume`);
+      return await res.json();
+    },
+    // No success toast: the resumed state arrives via WebSocket state_update.
+    onError: (error: Error) => {
+      toast({
+        title: "Failed to resume",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
+  });
   
   // Export conversation as markdown
   const exportMarkdown = () => {
@@ -464,12 +482,11 @@ export default function HomePage() {
 
   const handleSelectConversation = (conversationId: number) => {
     setActiveConversation(conversationId);
-    setPendingMessages([]);
-    setIsQueueProcessing(false);
     setStreamingMessages(new Map());
     setTypingExpertIds(new Set());
     setInteractionMode("idle");
     setIsProcessing(false);
+    setIsSteering(false);
     setSidebarOpen(false);
   };
   
@@ -516,6 +533,7 @@ export default function HomePage() {
     setTypingExpertIds(new Set());
     setIsProcessing(false);
     setInteractionMode("idle");
+    setIsSteering(false);
   }, [socketStatus, activeConversation]);
   
   // === WebSocket Message Handling ===
@@ -582,6 +600,10 @@ export default function HomePage() {
               setInteractionMode(parsedData.mode as InteractionMode);
               // Set isProcessing to true when entering processing_sequential or autonomous mode
               setIsProcessing(parsedData.mode === "processing_sequential" || parsedData.mode === "autonomous");
+              // A (re)started or finished round resolves any pending steering.
+              if (parsedData.mode === "processing_sequential" || parsedData.mode === "idle") {
+                setIsSteering(false);
+              }
               // Clear streaming state when returning to idle
               if (parsedData.mode === "idle") {
                 setStreamingMessages(new Map());
@@ -592,6 +614,13 @@ export default function HomePage() {
               console.log(`[UI State] Setting isAutonomousEnabled to: ${parsedData.isAutonomousEnabled}`);
               setIsAutonomousEnabled(parsedData.isAutonomousEnabled);
             }
+            break;
+
+          case "steering":
+            // The server accepted a mid-sequence message; it will restart the
+            // round on it once the current expert finishes.
+            console.log("WebSocket: Steering acknowledged");
+            setIsSteering(true);
             break;
 
           // --- Streaming message handlers ---
@@ -664,6 +693,7 @@ export default function HomePage() {
             setTypingExpertIds(new Set());
             setIsProcessing(false);
             setInteractionMode("idle");
+            setIsSteering(false);
             break;
 
           // Handle other types like connection confirmation, file updates etc. if needed
@@ -764,6 +794,15 @@ export default function HomePage() {
                 {reconnectAttempts > 0 && <span className="text-xs">Attempt {reconnectAttempts}</span>}
               </div>
             )}
+            {isSteering && (
+              <div
+                role="status"
+                aria-live="polite"
+                className="flex flex-wrap items-center gap-2 px-4 py-2 text-sm bg-farm-yellow/20 text-yellow-900 border-b border-farm-yellow/40"
+              >
+                <span>Steering — the council takes this after the current expert finishes.</span>
+              </div>
+            )}
             {/* === Interaction Control Bar (Positioned at the top of this column) === */}
             {activeConversation && (
                  <div className="flex-shrink-0 flex items-center justify-between px-6 py-3 border-b border-farm-tan/30 bg-gradient-to-r from-farm-powder/20 to-white shadow-sm">
@@ -791,14 +830,38 @@ export default function HomePage() {
                                 className={`${isAutonomousEnabled ? 'bg-farm-blue/20 text-farm-blue border-farm-blue' : 'bg-neutral-200 text-neutral-600'} font-medium`}>
                              {isAutonomousEnabled ? 'Enabled' : 'Disabled'}
                          </Badge>
-                         {pendingMessages.length > 0 && (
-                           <Badge variant="outline" className="ml-2 bg-farm-yellow/20 text-yellow-800 border-farm-yellow font-medium">
-                             {pendingMessages.length} queued
-                           </Badge>
-                         )}
                      </div>
                      <div className="flex items-center gap-3">
-                          {/* Buttons moved here, removed pause/resume */}
+                          {/* Pause the running round — the current expert finishes, then the council parks */}
+                          {(interactionMode === "processing_sequential" || interactionMode === "autonomous") && (
+                            <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => pauseMutation.mutate()}
+                                disabled={pauseMutation.isPending}
+                                aria-label="Pause the roundtable"
+                                className="border-farm-yellow text-yellow-800 hover:bg-farm-yellow hover:text-neutral-900 transition-all duration-200 font-medium"
+                            >
+                                <PauseIcon className="h-4 w-4 mr-1.5" />
+                                Pause
+                            </Button>
+                          )}
+
+                          {/* Resume a paused round */}
+                          {interactionMode === "paused" && (
+                            <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => resumeMutation.mutate()}
+                                disabled={resumeMutation.isPending}
+                                aria-label="Resume the roundtable"
+                                className="border-farm-green text-farm-green hover:bg-farm-green hover:text-white transition-all duration-200 font-medium"
+                            >
+                                <PlayIcon className="h-4 w-4 mr-1.5" />
+                                Resume
+                            </Button>
+                          )}
+
                           {/* Conditionally Render Disable Button */}
                          {isAutonomousEnabled && (
                             <Button
