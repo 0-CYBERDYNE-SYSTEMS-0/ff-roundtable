@@ -30,6 +30,9 @@ export interface IStorage {
   createConversation(conversation: InsertConversation): Promise<Conversation>;
   getConversation(id: number): Promise<Conversation | undefined>;
   getUserConversations(userId: number): Promise<Conversation[]>;
+  // Partial update (G6): only provided keys change. `charter: null` clears
+  // the charter; an omitted charter key leaves it untouched.
+  updateConversation(id: number, updates: Partial<Pick<Conversation, "title" | "charter">>): Promise<Conversation | undefined>;
   
   // Expert operations
   createExpert(expert: InsertExpert): Promise<Expert>;
@@ -226,6 +229,7 @@ export class MemStorage implements IStorage {
       ...insertConversation,
       id,
       title: insertConversation.title ?? "New Conversation",
+      charter: insertConversation.charter ?? null,
       createdAt: now,
     };
     this.conversations.set(id, conversation);
@@ -240,6 +244,22 @@ export class MemStorage implements IStorage {
     return Array.from(this.conversations.values())
       .filter(conversation => conversation.userId === userId)
       .sort((a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0));
+  }
+
+  async updateConversation(id: number, updates: Partial<Pick<Conversation, "title" | "charter">>): Promise<Conversation | undefined> {
+    const conversation = this.conversations.get(id);
+    if (!conversation) return undefined;
+
+    // Explicit undefined-checks (not a plain spread) so an omitted key keeps
+    // its current value while `charter: null` clears it.
+    const updated: Conversation = {
+      ...conversation,
+      ...(updates.title !== undefined && { title: updates.title }),
+      ...(updates.charter !== undefined && { charter: updates.charter }),
+    };
+
+    this.conversations.set(id, updated);
+    return updated;
   }
   
   // Expert operations
@@ -530,6 +550,24 @@ export class PostgresStorage implements IStorage {
       .from(conversations)
       .where(eq(conversations.userId, userId))
       .orderBy(desc(conversations.createdAt));
+  }
+
+  async updateConversation(id: number, updates: Partial<Pick<Conversation, "title" | "charter">>): Promise<Conversation | undefined> {
+    // Only allow updating title and charter. Explicit undefined-checks (not a
+    // plain spread) so an omitted key stays untouched while `charter: null`
+    // clears the column.
+    const allowed: Partial<Pick<Conversation, "title" | "charter">> = {
+      ...(updates.title !== undefined && { title: updates.title }),
+      ...(updates.charter !== undefined && { charter: updates.charter }),
+    };
+
+    const result = await this.db
+      .update(conversations)
+      .set(allowed)
+      .where(eq(conversations.id, id))
+      .returning();
+
+    return result[0];
   }
 
   // ── Expert operations ──────────────────────────────────────────────────────

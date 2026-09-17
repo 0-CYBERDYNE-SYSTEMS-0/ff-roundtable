@@ -13,6 +13,7 @@ import { createHmac, randomBytes, timingSafeEqual } from "crypto";
 import Stripe from "stripe";
 import { WebSocketServer, type RawData } from "ws";
 import { InsertConversation, InsertExpert, InsertMessage, Message, insertFarmProfileSchema } from "@shared/schema";
+import { z } from "zod";
 import { extractMentions } from "@shared/mentions";
 import { buildVCalendar } from "@shared/ics";
 import { extractScheduleRows, parseIsoDate, nextMondayFrom, resolveRowStartDate, buildRowSummary } from "@shared/schedule-extract";
@@ -68,6 +69,15 @@ function getSubscriptionClientSecret(subscription: Stripe.Subscription): string 
 
 // Development mode flag - uses NODE_ENV to determine dev vs production
 const DEVELOPMENT_MODE = process.env.NODE_ENV !== "production";
+
+// G6: body for PUT /api/protected/conversations/:id — update title and/or the
+// council charter. Strict: unknown fields are rejected, not silently dropped.
+// Title caps at 500 chars (the length the create path already accepts);
+// charter caps hard at 2,000 chars.
+const updateConversationSchema = z.object({
+  title: z.string().trim().min(1, "Title cannot be empty").max(500, "Title must be at most 500 characters").optional(),
+  charter: z.string().max(2000, "Charter must be at most 2,000 characters").nullable().optional(),
+});
 
 // Extract and VERIFY the express-session id from a WS upgrade request's
 // Cookie header. express-session signs the value as `s:<sessionId>.<signature>`
@@ -740,12 +750,43 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const conversationId = parseInt(req.params.id);
       const conversation = await storage.getConversation(conversationId);
-      
+
       if (!conversation || conversation.userId !== req.user!.id) {
         return res.status(404).json({ message: "Conversation not found" });
       }
-      
+
       res.json(conversation);
+    } catch (error: any) {
+      res.status(500).json({ message: error.message });
+    }
+  });
+
+  // Update a conversation's title and/or council charter (G6). Ownership is
+  // enforced exactly like the sibling protected conversation routes (a
+  // mismatched or missing conversation is a 404 — no existence leak).
+  app.put("/api/protected/conversations/:id", async (req, res) => {
+    try {
+      const conversationId = parseInt(req.params.id);
+      const conversation = await storage.getConversation(conversationId);
+
+      if (!conversation || conversation.userId !== req.user!.id) {
+        return res.status(404).json({ message: "Conversation not found" });
+      }
+
+      const parsed = updateConversationSchema.strict().safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ message: "Invalid conversation update", errors: parsed.error.flatten() });
+      }
+      if (Object.keys(parsed.data).length === 0) {
+        return res.status(400).json({ message: "Nothing to update: provide a title and/or charter" });
+      }
+
+      const updatedConversation = await storage.updateConversation(conversationId, parsed.data);
+      if (!updatedConversation) {
+        return res.status(404).json({ message: "Conversation not found" });
+      }
+
+      res.json(updatedConversation);
     } catch (error: any) {
       res.status(500).json({ message: error.message });
     }

@@ -47,12 +47,14 @@ export interface AIModelResponse {
 }
 
 // Generate a system prompt for an expert
-// Pass availableRoles separately, plus optional farm context and weather
+// Pass availableRoles separately, plus optional farm context, weather, and the
+// conversation's council charter (G6 — governs every expert when present).
 export function generateSystemPrompt(
-  expert: Expert, 
+  expert: Expert,
   availableRoles?: string[],
   farmContext?: string,
-  weatherContext?: string
+  weatherContext?: string,
+  charter?: string | null
 ): string {
   let basePrompt = `You are an AI expert in the role of ${expert.role} participating in a roundtable discussion on agricultural topics.
 As a ${expert.role}, your expertise is highly valued, and you should focus on providing insights specific to your domain.
@@ -64,6 +66,12 @@ You are part of a team of experts: [${availableRoles?.join(', ') || 'various rol
   // Inject farmer's custom instructions for this expert if present
   if (expert.customInstructions?.trim()) {
     basePrompt += `\n📌 CUSTOM INSTRUCTIONS FROM THE FARMER (follow these closely):\n${expert.customInstructions.trim()}\n`;
+  }
+
+  // G6: inject the farmer's council charter. It governs the whole roundtable
+  // (goal, depth, stop criteria), so it sits above per-farm context.
+  if (charter?.trim()) {
+    basePrompt += `\n📜 COUNCIL CHARTER (governs this roundtable — all experts):\n${charter.trim()}\nAll experts follow this charter.\n`;
   }
 
   // Inject farm profile context if available
@@ -500,7 +508,7 @@ export async function getExpertResponseStream(
     }
   }
   
-  const systemPrompt = generateSystemPrompt(expert, availableRoles, farmContext, weatherContext);
+  const systemPrompt = generateSystemPrompt(expert, availableRoles, farmContext, weatherContext, conversation?.charter ?? null);
 
   const messages: AIMessage[] = [
     { role: "system", content: systemPrompt }
@@ -622,7 +630,10 @@ export async function getExpertResponse(
   availableRoles: string[] 
 ): Promise<InsertMessage> { 
   console.log(`Generating response for expert: ${expert.name} (${expert.role})`);
-  const systemPrompt = generateSystemPrompt(expert, availableRoles); 
+  // G6: fetch the conversation for its council charter (farm/weather context
+  // is only wired into the streaming path).
+  const conversation = await storage.getConversation(expert.conversationId);
+  const systemPrompt = generateSystemPrompt(expert, availableRoles, undefined, undefined, conversation?.charter ?? null);
   
   const messages: AIMessage[] = [
     { role: "system", content: systemPrompt }
@@ -798,8 +809,15 @@ export async function getModeratorNextSpeakerSuggestion(
         return null;
     }
     console.log("Asking Moderator for next speaker suggestion...");
-    const moderatorSystemPrompt = generateSystemPrompt(moderatorExpert, availableRoles);
-    const queryPrompt = `Based on the recent conversation history, which expert should speak next to best advance the discussion towards resolution or new insights? The available expert roles are: [${availableRoles.join(', ')}]. If the discussion has already run its course — the question is resolved and another turn would only repeat the table — answer 'Conclude' instead. Respond only with the role name, 'Conclude', or 'RoundRobin'.`;
+    // G6: the speak-next / conclude judgment is charter-aware — the Moderator
+    // weighs the charter's goal and stop criteria.
+    const conversation = await storage.getConversation(moderatorExpert.conversationId);
+    const charter = conversation?.charter ?? null;
+    const moderatorSystemPrompt = generateSystemPrompt(moderatorExpert, availableRoles, undefined, undefined, charter);
+    let queryPrompt = `Based on the recent conversation history, which expert should speak next to best advance the discussion towards resolution or new insights? The available expert roles are: [${availableRoles.join(', ')}]. If the discussion has already run its course — the question is resolved and another turn would only repeat the table — answer 'Conclude' instead. Respond only with the role name, 'Conclude', or 'RoundRobin'.`;
+    if (charter?.trim()) {
+      queryPrompt += ` The council charter in your instructions states this roundtable's goal and stop criteria — factor them into the decision.`;
+    }
 
     const messages: AIMessage[] = [
         { role: "system", content: moderatorSystemPrompt },
@@ -836,8 +854,9 @@ export async function getModeratorNextSpeakerSuggestion(
  * throws — provider failures store an honest "(Error generating response …)"
  * assistant message (still flagged isSynthesis) and broadcast done.
  *
- * G6 seam: charter/goal awareness will be threaded into the prompts here once
- * charters land; deliberately not part of this change.
+ * G6: charter-aware — the conversation's council charter is injected into the
+ * Moderator's system prompt and the closing prompt, so the summary honors the
+ * charter's goal and stop criteria.
  */
 export async function generateClosingSynthesis(
   conversationId: number,
@@ -849,14 +868,16 @@ export async function generateClosingSynthesis(
     const history = await storage.getConversationMessages(conversationId);
     const experts = await storage.getConversationExperts(conversationId);
     const availableRoles = experts.map(e => e.role);
-    const systemPrompt = generateSystemPrompt(moderatorExpert, availableRoles);
+    const conversation = await storage.getConversation(conversationId);
+    const charter = conversation?.charter ?? null;
+    const systemPrompt = generateSystemPrompt(moderatorExpert, availableRoles, undefined, undefined, charter);
 
     const closingPrompt = `The discussion has run its course and the council is closing. Write the council's closing synthesis for the farmer:
 - Summarize the consensus the council reached and the concrete decisions made.
 - Name the open disagreements or unanswered questions, if any remain.
 - List the concrete next actions for the farmer, in order.
 - Name the experts who contributed key points.
-Be brief — a farmer should be able to act on this in one read.`;
+Be brief — a farmer should be able to act on this in one read.` + (charter?.trim() ? `\nMeasure the summary against the council charter: state how the outcome fulfills its goal and stop criteria.` : ``);
 
     const messages: AIMessage[] = [
       { role: "system", content: systemPrompt },

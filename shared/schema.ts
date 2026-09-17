@@ -19,6 +19,11 @@ export const conversations = pgTable("conversations", {
   id: serial("id").primaryKey(),
   userId: integer("user_id").notNull().references(() => users.id),
   title: text("title").default("New Conversation"),
+  // G6: farmer-authored council charter (goal, depth, stop criteria) that
+  // governs the whole roundtable — injected into every expert, Moderator,
+  // and synthesis prompt. Nullable: optional. Hard-capped at 2,000 chars
+  // on write (API-level).
+  charter: text("charter"),
   createdAt: timestamp("created_at").defaultNow(),
 });
 
