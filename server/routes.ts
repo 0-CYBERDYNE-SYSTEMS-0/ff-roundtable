@@ -427,6 +427,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
               conversationId
             }));
           }
+          // Handle G5 conclusion: the Moderator ended the round; the closing
+          // synthesis turn streams next.
+          else if (data.type === "concluding") {
+            client.send(JSON.stringify({
+              type: "concluding",
+              conversationId
+            }));
+          }
           // Handle error messages
           else if (data.type === "message_error") {
             // Prefer the persisted error message (survives refetch); fall back

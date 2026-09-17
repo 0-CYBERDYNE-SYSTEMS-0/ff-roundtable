@@ -47,6 +47,9 @@ export const messages = pgTable("messages", {
   // messages in routes.ts, expert messages in ai.ts) and routed on by the
   // orchestrator. Nullable: legacy rows have no value.
   mentions: jsonb("mentions").$type<string[]>(),
+  // G5: true for the Moderator's closing synthesis message that ends a
+  // roundtable ('Conclude'). Nullable: legacy rows have no value.
+  isSynthesis: boolean("is_synthesis"),
   timestamp: timestamp("timestamp").defaultNow(),
 });
 
@@ -159,14 +162,17 @@ export type Expert = typeof experts.$inferSelect;
 
 // drizzle-zod's inferred jsonb shape does not line up with the column's
 // $type<string[]> on the insert path — pin mentions to the canonical type.
-export type InsertMessage = Omit<z.infer<typeof insertMessageSchema>, 'mentions'> & {
+export type InsertMessage = Omit<z.infer<typeof insertMessageSchema>, 'mentions' | 'isSynthesis'> & {
   mentions?: string[] | null;
+  // G5: pinned like mentions so object literals can omit the nullable flag.
+  isSynthesis?: boolean | null;
 };
 // Extend Message type to properly type artifacts as Artifact[]
-// (and keep the nullable G4 mentions column optional for object literals)
-export type Message = Omit<typeof messages.$inferSelect, 'artifacts' | 'mentions'> & {
+// (and keep the nullable G4/G5 columns optional for object literals)
+export type Message = Omit<typeof messages.$inferSelect, 'artifacts' | 'mentions' | 'isSynthesis'> & {
   artifacts?: Artifact[];
   mentions?: string[] | null;
+  isSynthesis?: boolean | null;
 };
 
 export type InsertFile = z.infer<typeof insertFileSchema>;

@@ -1,5 +1,5 @@
 import { storage } from "./storage";
-import { getExpertResponse, getExpertResponseStream, generateInsights, getModeratorNextSpeakerSuggestion } from "./ai";
+import { getExpertResponse, getExpertResponseStream, generateInsights, getModeratorNextSpeakerSuggestion, generateClosingSynthesis } from "./ai";
 import { shouldStopForRedundancy, REDUNDANCY_STOP_SIMILARITY_THRESHOLD } from "./text-similarity";
 import type { InsertMessage, Expert, Message, File } from "@shared/schema";
 
@@ -289,6 +289,12 @@ export class InteractionOrchestrator {
         // Set when the just-completed autonomous turn was redundant (F2) and
         // the sequence must stop early instead of scheduling another turn.
         let redundancyStopDetected = false;
+        // G5: set when the Moderator answered 'Conclude' and the closing
+        // synthesis turn has already been streamed inline below. The sequence
+        // then ends through the natural-end cleanup. The synthesis is not a
+        // normal turn: it never increments totalAutonomousTurnsTaken and
+        // never touches currentExpertIndex/turnInFlight.
+        let concludeSynthesisDelivered = false;
         const availableRoles = state.activeExperts.map(e => e.role);
 
         if (state.mode === "autonomous") {
@@ -342,7 +348,22 @@ export class InteractionOrchestrator {
                  suggestedRole = await getModeratorNextSpeakerSuggestion(moderator, history.slice(-6), availableRoles);
             }
             if (!mentionRouted) {
-                if (suggestedRole && suggestedRole !== 'RoundRobin') {
+                if (suggestedRole === 'Conclude' && moderator) {
+                    // G5 semantic conclusion: the Moderator called the round.
+                    // The closing synthesis runs as one full streamed turn,
+                    // inline in this chain (no new scheduling site — the
+                    // turnChainScheduled flag is untouched). 'Conclude' can
+                    // only reach this point from the autonomous branch:
+                    // suggestedRole is never computed in
+                    // processing_sequential, so the sequential round is never
+                    // cut. An interrupt/pause landing mid-synthesis is
+                    // resolved in "Decide Next Action" below, exactly like
+                    // the natural-end branch handles it.
+                    debugLog(`Orchestrator: Moderator concluded the discussion for ${this.conversationId} — streaming the closing synthesis.`);
+                    state.broadcastFn(this.conversationId, { type: "concluding", conversationId: this.conversationId });
+                    await generateClosingSynthesis(this.conversationId, moderator, state.broadcastFn);
+                    concludeSynthesisDelivered = true;
+                } else if (suggestedRole && suggestedRole !== 'RoundRobin') {
                     const startIndex = (state.currentExpertIndex + 1) % state.activeExperts.length;
                     for (let i = 0; i < state.activeExperts.length; i++) {
                         const checkIndex = (startIndex + i) % state.activeExperts.length;
@@ -575,6 +596,15 @@ export class InteractionOrchestrator {
              // arriving during the turn wins — the queued message restarts.
              else if (redundancyStopDetected && !currentState.wasInterrupted) {
                  debugLog("Orchestrator: Autonomous sequence stopped early (redundant answer). Setting mode to idle.");
+                 processingEndedNaturally = true;
+             }
+             // G5: the closing synthesis turn already ran inline; end the
+             // sequence with the same cleanup as a natural end (idle +
+             // insights). An interrupt arriving during the synthesis stream
+             // wins — the queued message restarts through the shared
+             // interrupted path below, exactly like the redundancy case.
+             else if (concludeSynthesisDelivered && !currentState.wasInterrupted) {
+                 debugLog("Orchestrator: Closing synthesis delivered — ending sequence naturally.");
                  processingEndedNaturally = true;
              } else if (currentState.totalAutonomousTurnsTaken >= currentState.maxAutonomousTurns) {
                  debugLog("Orchestrator: Reached max autonomous turns. Setting mode to idle."); // KEEP

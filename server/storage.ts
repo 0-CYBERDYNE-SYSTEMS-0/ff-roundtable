@@ -295,6 +295,8 @@ export class MemStorage implements IStorage {
       artifacts: Array.isArray(insertMessage.artifacts) ? insertMessage.artifacts as Message["artifacts"] : [],
       // G4 mentions: pass the parsed @-tag list through (null when unset).
       mentions: Array.isArray(insertMessage.mentions) ? insertMessage.mentions : null,
+      // G5 synthesis: pass the closing-synthesis flag through (null when unset).
+      isSynthesis: insertMessage.isSynthesis ?? null,
       timestamp: now,
     };
     this.messages.set(id, message);
@@ -572,8 +574,9 @@ export class PostgresStorage implements IStorage {
   // ── Message operations ─────────────────────────────────────────────────────
 
   async createMessage(insertMessage: InsertMessage): Promise<Message> {
-    // The spread carries every column (incl. the G4 mentions jsonb) through
-    // the camelCase -> snake_case mapping; unset optional columns are omitted.
+    // The spread carries every column (incl. the G4 mentions jsonb and the
+    // G5 is_synthesis flag) through the camelCase -> snake_case mapping;
+    // unset optional columns are omitted.
     const values = { ...insertMessage, artifacts: insertMessage.artifacts || [] };
     const result = await this.db.insert(messages).values(values).returning();
     const raw = result[0];

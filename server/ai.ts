@@ -226,8 +226,9 @@ When appropriate, explain how weather conditions impact farming decisions and ri
 Uploaded images are delivered to you directly as native vision input — describe and analyze what you actually see in them.`;
       break;
     case "Moderator":
-      roleInstructions = `Facilitate the discussion, summarize key points, ensure all experts contribute, and manage conversation flow. 
-      When asked who should speak next, analyze the last few messages and the overall goal. Respond ONLY with the role name of the expert who should speak next (e.g., 'Crop Specialist'). Do not add any other text. If unsure, suggest 'RoundRobin'.`;
+      roleInstructions = `Facilitate the discussion, summarize key points, ensure all experts contribute, and manage conversation flow.
+      When asked who should speak next, analyze the last few messages and the overall goal. Respond ONLY with the role name of the expert who should speak next (e.g., 'Crop Specialist'). Do not add any other text.
+      G5: you may also end the roundtable — if the discussion has run its course (the farmer's question is answered, decisions are made, and further turns would only repeat the table), respond ONLY with 'Conclude' and the council will close with a final synthesis from you. If unsure, suggest 'RoundRobin'.`;
       break;
     default:
       roleInstructions = `Provide insights based on your general agricultural knowledge.`;
@@ -798,7 +799,7 @@ export async function getModeratorNextSpeakerSuggestion(
     }
     console.log("Asking Moderator for next speaker suggestion...");
     const moderatorSystemPrompt = generateSystemPrompt(moderatorExpert, availableRoles);
-    const queryPrompt = `Based on the recent conversation history, which expert should speak next to best advance the discussion towards resolution or new insights? The available expert roles are: [${availableRoles.join(', ')}]. Respond only with the role name or 'RoundRobin'.`;
+    const queryPrompt = `Based on the recent conversation history, which expert should speak next to best advance the discussion towards resolution or new insights? The available expert roles are: [${availableRoles.join(', ')}]. If the discussion has already run its course — the question is resolved and another turn would only repeat the table — answer 'Conclude' instead. Respond only with the role name, 'Conclude', or 'RoundRobin'.`;
 
     const messages: AIMessage[] = [
         { role: "system", content: moderatorSystemPrompt },
@@ -813,7 +814,7 @@ export async function getModeratorNextSpeakerSuggestion(
         const response = await callOpenRouterAPI(messages, moderatorExpert.model || 'mistralai/mistral-7b-instruct'); 
         const suggestedRole = response.message.content.trim().replace(/\.$/, '');
         
-        if (availableRoles.includes(suggestedRole) || suggestedRole === 'RoundRobin') {
+        if (availableRoles.includes(suggestedRole) || suggestedRole === 'RoundRobin' || suggestedRole === 'Conclude') {
              console.log(`Moderator suggested next speaker: ${suggestedRole}`);
             return suggestedRole;
         } else {
@@ -824,4 +825,114 @@ export async function getModeratorNextSpeakerSuggestion(
         console.error("Error querying Moderator for next speaker:", error);
         return null;
     }
+}
+
+/**
+ * G5 semantic conclusion: after the Moderator answers 'Conclude', stream the
+ * council's closing synthesis as one full Moderator turn. Broadcasts the same
+ * lifecycle as a normal expert turn (expert_stream_start → tokens →
+ * expert_stream_done with the stored message) and persists the message with
+ * isSynthesis: true so the client (and history) can tell it apart. Never
+ * throws — provider failures store an honest "(Error generating response …)"
+ * assistant message (still flagged isSynthesis) and broadcast done.
+ *
+ * G6 seam: charter/goal awareness will be threaded into the prompts here once
+ * charters land; deliberately not part of this change.
+ */
+export async function generateClosingSynthesis(
+  conversationId: number,
+  moderatorExpert: Expert,
+  broadcastFn: (convId: number, data: any) => void
+): Promise<void> {
+  console.log(`[SYNTHESIS] Generating closing synthesis for conversation ${conversationId}`);
+  try {
+    const history = await storage.getConversationMessages(conversationId);
+    const experts = await storage.getConversationExperts(conversationId);
+    const availableRoles = experts.map(e => e.role);
+    const systemPrompt = generateSystemPrompt(moderatorExpert, availableRoles);
+
+    const closingPrompt = `The discussion has run its course and the council is closing. Write the council's closing synthesis for the farmer:
+- Summarize the consensus the council reached and the concrete decisions made.
+- Name the open disagreements or unanswered questions, if any remain.
+- List the concrete next actions for the farmer, in order.
+- Name the experts who contributed key points.
+Be brief — a farmer should be able to act on this in one read.`;
+
+    const messages: AIMessage[] = [
+      { role: "system", content: systemPrompt },
+      ...history.map(msg => ({
+        role: mapDbRoleToApiRole(msg.role),
+        content: truncateForModel(msg.content)
+      })).slice(-15),
+      { role: "user", content: closingPrompt }
+    ];
+
+    broadcastFn(conversationId, {
+      type: "expert_stream_start",
+      expertId: moderatorExpert.id,
+      expertName: moderatorExpert.name,
+      expertRole: "Moderator",
+    });
+
+    const response = await callOpenRouterAPIStream(messages, moderatorExpert.model || 'mistralai/mistral-7b-instruct', (token) => {
+      broadcastFn(conversationId, {
+        type: "expert_stream_token",
+        expertId: moderatorExpert.id,
+        token,
+      });
+    });
+    const content = response.message.content;
+
+    const storedMessage = await storage.createMessage({
+      conversationId,
+      expertId: moderatorExpert.id,
+      userId: null,
+      content,
+      role: "assistant",
+      expertName: moderatorExpert.name,
+      expertRole: "Moderator",
+      isSynthesis: true,
+      mentions: extractMentions(content, availableRoles),
+    });
+    broadcastFn(conversationId, {
+      type: "expert_stream_done",
+      expertId: moderatorExpert.id,
+      message: storedMessage,
+    });
+    console.log(`[SYNTHESIS] Closing synthesis stored and broadcast for conversation ${conversationId}`);
+  } catch (error) {
+    console.error(`[SYNTHESIS] Error generating closing synthesis for conversation ${conversationId}:`, error);
+    // Honest-error convention: persist the failure (survives refetches), keep
+    // the synthesis flag, and still close the stream so the client is never
+    // left with a spinner. Re-throw nothing — the orchestrator chain continues
+    // into the natural-end cleanup.
+    const errorMsg = `(Error generating response from ${moderatorExpert.name}: ${error instanceof Error ? error.message : String(error)})`;
+    broadcastFn(conversationId, {
+      type: "expert_stream_token",
+      expertId: moderatorExpert.id,
+      token: errorMsg,
+    });
+    let storedMessage: Message | undefined;
+    try {
+      storedMessage = await storage.createMessage({
+        conversationId,
+        expertId: moderatorExpert.id,
+        userId: null,
+        content: errorMsg,
+        role: "assistant",
+        expertName: moderatorExpert.name,
+        expertRole: "Moderator",
+        isSynthesis: true,
+      });
+    } catch (storeError) {
+      console.error("[SYNTHESIS] Failed to store synthesis error message:", storeError);
+    }
+    if (storedMessage) {
+      broadcastFn(conversationId, {
+        type: "expert_stream_done",
+        expertId: moderatorExpert.id,
+        message: storedMessage,
+      });
+    }
+  }
 }

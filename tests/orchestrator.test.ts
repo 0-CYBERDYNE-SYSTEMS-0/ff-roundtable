@@ -7,6 +7,8 @@
  *  - Orchestrator stops at end of round
  *  - Interruption flag is set on new user message during processing
  *  - Pause/resume
+ *  - G5: semantic conclusion (Moderator 'Conclude' → closing synthesis,
+ *    budget untouched, inert in sequential mode, interrupts still win)
  *
  * Uses vitest with vi.mock for storage and AI dependencies.
  * Each test uses a unique conversationId to avoid module-level state pollution.
@@ -23,6 +25,7 @@ const mockCreateMessage = vi.hoisted(() => vi.fn());
 const mockGetExpertResponseStream = vi.hoisted(() => vi.fn());
 const mockGenerateInsights = vi.hoisted(() => vi.fn());
 const mockGetModeratorNextSpeakerSuggestion = vi.hoisted(() => vi.fn());
+const mockGenerateClosingSynthesis = vi.hoisted(() => vi.fn());
 
 vi.mock("../server/storage", () => ({
   storage: {
@@ -37,6 +40,7 @@ vi.mock("../server/ai", () => ({
   getExpertResponseStream: mockGetExpertResponseStream,
   generateInsights: mockGenerateInsights,
   getModeratorNextSpeakerSuggestion: mockGetModeratorNextSpeakerSuggestion,
+  generateClosingSynthesis: mockGenerateClosingSynthesis,
 }));
 
 import {
@@ -1390,6 +1394,368 @@ describe("Orchestrator", () => {
       expect(turnNames()[3]).toBe("Alice");
 
       await releaseNextTurn();
+      await drainToIdle();
+      expect(getConversationState(conversationId)!.mode).toBe("idle");
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────
+  // G5 — Semantic conclusion: Moderator 'Conclude' + closing synthesis
+  // ─────────────────────────────────────────────────────────────────
+
+  describe("G5 semantic conclusion", () => {
+    // Gated conversation whose roster includes a Moderator: the autonomous
+    // extension consults the (mocked) Moderator for the next speaker, so a
+    // 'Conclude' verdict can be exercised at an exact point in the loop.
+    // Everything else mirrors setupGatedConversation above (unique content
+    // per turn keeps the redundancy early-stop out of play).
+    function setupGatedModeratorConversation(conversationId: number) {
+      const roster: Expert[] = [
+        createMockExpert(1, "Alice", "Agronomist"),
+        createMockExpert(2, "Bob", "Soil Scientist"),
+        createMockExpert(3, "Carol", "Weather Expert"),
+        createMockExpert(4, "Matt", "Moderator"),
+      ];
+      const myExperts = roster.map((e) => ({ ...e, conversationId }));
+      mockGetConversationExperts.mockResolvedValue(myExperts);
+      mockGetConversationFiles.mockResolvedValue([]);
+
+      const messages: Message[] = [];
+      let messageId = 30_000 + conversationId * 50;
+      mockGetConversationMessages.mockImplementation((cid: number) =>
+        Promise.resolve(messages.filter((m) => m.conversationId === cid)),
+      );
+      mockCreateMessage.mockImplementation((msg: Partial<Message>) => {
+        const stored = { ...msg, id: messageId++, timestamp: new Date() } as Message;
+        messages.push(stored);
+        return Promise.resolve(stored);
+      });
+
+      const gates: Array<() => void> = [];
+      const startedNames: string[] = [];
+      let contentCounter = 0;
+      mockGetExpertResponseStream.mockImplementation((expert: Expert) => {
+        if (expert.conversationId !== conversationId) {
+          return new Promise(() => {}); // park foreign chains forever
+        }
+        startedNames.push(expert.name);
+        return new Promise((resolve) => {
+          const content = `Distinct answer ${++contentCounter} from ${expert.name}`;
+          gates.push(() =>
+            resolve({
+              conversationId: expert.conversationId,
+              expertId: expert.id,
+              userId: null,
+              content,
+              role: "assistant",
+              expertName: expert.name,
+              expertRole: expert.role,
+              artifacts: [],
+            }),
+          );
+        });
+      });
+
+      const waitForTurns = async (n: number) => {
+        const deadline = Date.now() + 5000;
+        while (startedNames.length < n) {
+          if (Date.now() > deadline) {
+            throw new Error(`Timed out waiting for ${n} turns to start (got ${startedNames.length})`);
+          }
+          await waitFor(5);
+        }
+      };
+
+      const releaseNextTurn = async () => {
+        const deadline = Date.now() + 5000;
+        while (gates.length === 0) {
+          if (Date.now() > deadline) throw new Error("Timed out waiting for a turn to release");
+          await waitFor(5);
+        }
+        gates.shift()!();
+      };
+
+      // Release turns until the sequence returns to idle.
+      const drainToIdle = async () => {
+        for (let i = 0; i < 25; i++) {
+          const s = getConversationState(conversationId);
+          if (!s || s.mode === "idle") return;
+          if (gates.length > 0) gates.shift()!();
+          await waitFor(10);
+        }
+      };
+
+      const assistantCount = () =>
+        messages.filter((m) => m.conversationId === conversationId && m.role === "assistant").length;
+      const synthesisMessages = () =>
+        messages.filter((m) => m.conversationId === conversationId && m.isSynthesis === true);
+      const events = () =>
+        broadcastFn.mock.calls.filter((c) => c[0] === conversationId).map((c) => c[1]);
+
+      // Wait (bounded) for a broadcast of the given type. Mode can flip
+      // autonomous → idle within a few microtasks when every mock resolves
+      // immediately, so event signals are the reliable synchronization point.
+      const waitForEvent = async (type: string, timeoutMs = 5000) => {
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+          if (broadcastFn.mock.calls.some((c) => c[0] === conversationId && c[1]?.type === type)) return;
+          await waitFor(5);
+        }
+        throw new Error(`Timed out waiting for a "${type}" broadcast on conversation ${conversationId}`);
+      };
+
+      return {
+        roster,
+        waitForTurns,
+        releaseNextTurn,
+        drainToIdle,
+        turnNames: () => [...startedNames],
+        assistantCount,
+        synthesisMessages,
+        events,
+        waitForEvent,
+      };
+    }
+
+    // Emulates the real generateClosingSynthesis contract at the orchestrator
+    // boundary: broadcast expert_stream_start → tokens → store an isSynthesis
+    // message → expert_stream_done. `onStream` runs mid-stream (after start,
+    // before the tokens) so tests can land interrupts at an exact point.
+    function mockSynthesisTurn(conversationId: number, onStream?: () => Promise<void> | void) {
+      mockGenerateClosingSynthesis.mockImplementation(
+        async (cid: number, moderator: Expert, broadcast: (c: number, data: any) => void) => {
+          if (cid !== conversationId) return;
+          broadcast(cid, {
+            type: "expert_stream_start",
+            expertId: moderator.id,
+            expertName: moderator.name,
+            expertRole: "Moderator",
+          });
+          if (onStream) await onStream();
+          for (const token of ["Consensus: lime in spring. ", "Next: retest the soil. "]) {
+            broadcast(cid, { type: "expert_stream_token", expertId: moderator.id, token });
+          }
+          const stored = await mockCreateMessage({
+            conversationId: cid,
+            expertId: moderator.id,
+            userId: null,
+            content: "Consensus: lime in spring. Next: retest the soil.",
+            role: "assistant",
+            expertName: moderator.name,
+            expertRole: "Moderator",
+            isSynthesis: true,
+            mentions: [],
+          });
+          broadcast(cid, { type: "expert_stream_done", expertId: moderator.id, message: stored });
+        },
+      );
+    }
+
+    it("streams a closing synthesis when the Moderator says 'Conclude' and ends the sequence at idle", async () => {
+      const conversationId = nextConvId();
+      const { waitForTurns, releaseNextTurn, drainToIdle, turnNames, assistantCount, synthesisMessages, events, waitForEvent } =
+        setupGatedModeratorConversation(conversationId);
+      mockGetModeratorNextSpeakerSuggestion.mockResolvedValue("Conclude");
+      mockSynthesisTurn(conversationId);
+
+      const userMessage = createMockMessage(1, "Plan my week");
+      await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn);
+
+      // Full sequential round: Alice, Bob, Carol, Matt (Moderator speaks last).
+      for (let i = 1; i <= 4; i++) {
+        await waitForTurns(i);
+        await releaseNextTurn();
+      }
+
+      // First autonomous decision: the Moderator concludes — no 5th expert
+      // turn ever starts; the synthesis streams and the sequence ends.
+      await waitForEvent("concluding");
+      await waitForMode(conversationId, "idle");
+
+      // The concluding signal was broadcast...
+      expect(broadcastFn).toHaveBeenCalledWith(conversationId, { type: "concluding", conversationId });
+
+      // ...the synthesis turn streamed under the Moderator's identity
+      // (start → tokens → done) after the concluding signal...
+      const allEvents = events();
+      const concludingIdx = allEvents.findIndex((e) => e.type === "concluding");
+      expect(concludingIdx).toBeGreaterThanOrEqual(0);
+      const startsBeforeConcluding = allEvents
+        .slice(0, concludingIdx)
+        .filter((e) => e.type === "expert_stream_start");
+      expect(startsBeforeConcluding).toHaveLength(4); // the sequential round only
+      const synthesisStart = allEvents
+        .slice(concludingIdx + 1)
+        .find((e) => e.type === "expert_stream_start");
+      expect(synthesisStart).toMatchObject({ expertId: 4, expertName: "Matt", expertRole: "Moderator" });
+      const synthesisTokens = allEvents
+        .slice(concludingIdx + 1)
+        .filter((e) => e.type === "expert_stream_token" && e.expertId === 4);
+      expect(synthesisTokens.length).toBeGreaterThanOrEqual(1);
+      const synthesisDone = allEvents
+        .slice(concludingIdx + 1)
+        .find((e) => e.type === "expert_stream_done");
+      expect(synthesisDone?.message?.isSynthesis).toBe(true);
+
+      // ...the synthesis message is stored flagged as synthesis...
+      const stored = synthesisMessages();
+      expect(stored).toHaveLength(1);
+      expect(stored[0].role).toBe("assistant");
+      expect(stored[0].expertRole).toBe("Moderator");
+      expect(stored[0].isSynthesis).toBe(true);
+
+      // ...exactly the sequential round ran (no extra expert turn)...
+      expect(turnNames()).toEqual(["Alice", "Bob", "Carol", "Matt"]);
+      expect(assistantCount()).toBe(5); // 4 expert turns + 1 synthesis
+
+      // ...and the sequence ended through the natural-end cleanup.
+      const state = getConversationState(conversationId)!;
+      expect(state.mode).toBe("idle");
+      expect(state.currentExpertIndex).toBe(-1);
+      expect(state.totalAutonomousTurnsTaken).toBe(0);
+      expect(mockGenerateInsights).toHaveBeenCalledWith(conversationId, expect.any(Function));
+
+      await drainToIdle();
+      expect(getConversationState(conversationId)!.mode).toBe("idle");
+    });
+
+    it("does not let the closing synthesis consume the autonomous turn budget", async () => {
+      const conversationId = nextConvId();
+      const { waitForTurns, releaseNextTurn, drainToIdle, turnNames, assistantCount, synthesisMessages } =
+        setupGatedModeratorConversation(conversationId);
+      // The Moderator routes the first autonomous turn to Alice, then calls
+      // the round on the next decision.
+      mockGetModeratorNextSpeakerSuggestion
+        .mockResolvedValueOnce("Agronomist")
+        .mockResolvedValue("Conclude");
+
+      // Snapshot the budget at the moment the synthesis streams: one real
+      // autonomous turn (Alice) must have been billed, the synthesis none.
+      let counterAtSynthesis: number | null = null;
+      mockSynthesisTurn(conversationId, () => {
+        counterAtSynthesis = getConversationState(conversationId)!.totalAutonomousTurnsTaken;
+      });
+
+      const userMessage = createMockMessage(1, "Plan my week");
+      await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn);
+      // Tight cap: one autonomous turn fits before the Moderator concludes.
+      new InteractionOrchestrator(conversationId).enableAutonomous(2);
+
+      // Sequential round (4 turns), then autonomous turn #1 (Alice).
+      for (let i = 1; i <= 4; i++) {
+        await waitForTurns(i);
+        await releaseNextTurn();
+      }
+      await waitForMode(conversationId, "autonomous");
+      await waitForTurns(5);
+      await releaseNextTurn();
+
+      // Next decision: the Moderator concludes while the budget shows one
+      // used turn of two — the synthesis must not bill a second.
+      await waitForMode(conversationId, "idle");
+
+      expect(counterAtSynthesis).toBe(1);
+      expect(synthesisMessages()).toHaveLength(1);
+      // 4 sequential + 1 autonomous expert turn + 1 synthesis. A synthesis
+      // billed against the cap would have pushed the loop to the cap first.
+      expect(turnNames()).toEqual(["Alice", "Bob", "Carol", "Matt", "Alice"]);
+      expect(assistantCount()).toBe(6);
+      const state = getConversationState(conversationId)!;
+      expect(state.mode).toBe("idle");
+      expect(state.totalAutonomousTurnsTaken).toBe(0);
+
+      await drainToIdle();
+      expect(getConversationState(conversationId)!.mode).toBe("idle");
+    });
+
+    it("ignores 'Conclude' in sequential mode — the round completes fully", async () => {
+      const conversationId = nextConvId();
+      const { waitForTurns, releaseNextTurn, drainToIdle, turnNames, assistantCount, synthesisMessages, events } =
+        setupGatedModeratorConversation(conversationId);
+      // Would conclude if the Moderator were ever consulted — he must not be.
+      mockGetModeratorNextSpeakerSuggestion.mockResolvedValue("Conclude");
+      mockSynthesisTurn(conversationId);
+
+      const userMessage = createMockMessage(1, "Plan my week");
+      await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn);
+      // Autonomous off: the sequence ends after the sequential round.
+      new InteractionOrchestrator(conversationId).disableAutonomous();
+
+      for (let i = 1; i <= 4; i++) {
+        await waitForTurns(i);
+        await releaseNextTurn();
+      }
+      await waitForMode(conversationId, "idle");
+
+      // The Moderator was never asked, no conclusion was signalled, and no
+      // synthesis was streamed or stored.
+      expect(mockGetModeratorNextSpeakerSuggestion).not.toHaveBeenCalled();
+      expect(mockGenerateClosingSynthesis).not.toHaveBeenCalled();
+      expect(events().some((e) => e.type === "concluding")).toBe(false);
+      expect(synthesisMessages()).toHaveLength(0);
+      expect(turnNames()).toEqual(["Alice", "Bob", "Carol", "Matt"]);
+      expect(assistantCount()).toBe(4);
+      expect(getConversationState(conversationId)!.mode).toBe("idle");
+
+      await drainToIdle();
+      expect(getConversationState(conversationId)!.mode).toBe("idle");
+    });
+
+    it("lets an interrupt landing during the closing synthesis win — the queued message restarts a fresh round", async () => {
+      const conversationId = nextConvId();
+      const { waitForTurns, releaseNextTurn, drainToIdle, turnNames, assistantCount, synthesisMessages, waitForEvent } =
+        setupGatedModeratorConversation(conversationId);
+      mockGetModeratorNextSpeakerSuggestion.mockResolvedValue("Conclude");
+
+      // A user message arrives while the synthesis is streaming: the
+      // interrupt must win over the conclude — the synthesis message stays,
+      // and the queued message restarts a full sequential round.
+      let interruptFired = false;
+      mockSynthesisTurn(conversationId, async () => {
+        if (interruptFired) return;
+        interruptFired = true;
+        await processMessageTurnBased(
+          userId,
+          conversationId,
+          createMockMessage(2, "Wait — one more thing"),
+          broadcastFn,
+        );
+      });
+
+      const userMessage = createMockMessage(1, "Plan my week");
+      await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn);
+
+      for (let i = 1; i <= 4; i++) {
+        await waitForTurns(i);
+        await releaseNextTurn();
+      }
+
+      // Synthesis streams, the interrupt lands mid-stream (its steering
+      // broadcast is the synchronization point), the sequence ends and
+      // restarts on the queued message.
+      await waitForEvent("steering");
+      await waitForMode(conversationId, "processing_sequential");
+      let state = getConversationState(conversationId)!;
+      expect(state.wasInterrupted).toBe(false); // consumed by the restart
+      expect(state.lastUserMessage!.content).toBe("Wait — one more thing");
+      expect(synthesisMessages()).toHaveLength(1); // the interrupted synthesis is kept
+
+      // The restarted round runs the full roster on the new message.
+      for (let i = 5; i <= 8; i++) {
+        await waitForTurns(i);
+        await releaseNextTurn();
+      }
+
+      // Round 2 ends into its autonomous extension, where the Moderator
+      // concludes again (no interrupt this time) — the sequence ends idle.
+      await waitForMode(conversationId, "idle");
+      state = getConversationState(conversationId)!;
+      expect(state.mode).toBe("idle");
+      expect(state.wasInterrupted).toBe(false);
+      expect(synthesisMessages()).toHaveLength(2); // one per concluded round
+      expect(turnNames()).toEqual(["Alice", "Bob", "Carol", "Matt", "Alice", "Bob", "Carol", "Matt"]);
+      expect(assistantCount()).toBe(10); // 8 expert turns + 2 syntheses
+
       await drainToIdle();
       expect(getConversationState(conversationId)!.mode).toBe("idle");
     });
