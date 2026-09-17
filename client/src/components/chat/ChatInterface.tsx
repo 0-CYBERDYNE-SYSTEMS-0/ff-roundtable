@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { AtSign, Paperclip, Send, Loader2, Users } from "lucide-react";
+import { AtSign, Paperclip, Send, Loader2, Users, ScrollText } from "lucide-react";
 import { Message, Expert, User } from "@shared/schema";
 import { format } from "date-fns";
 import ReactMarkdown from "react-markdown";
@@ -654,8 +654,17 @@ export default function ChatInterface({
                       </div>
                       <div className="max-w-[85%] space-y-2">
                         <div className={`${getExpertBubbleColor(message.expertId)} rounded-xl p-4 border shadow-sm`}>
-                          <div className="flex items-center justify-between mb-2">
-                            <p className="text-sm font-semibold text-farm-blue">{expert.name} <span className="text-neutral-600 font-normal">({expert.role})</span></p>
+                          <div className="flex items-center justify-between gap-2 mb-2">
+                            <div className="flex items-center gap-2 min-w-0">
+                              <p className="text-sm font-semibold text-farm-blue">{expert.name} <span className="text-neutral-600 font-normal">({expert.role})</span></p>
+                              {/* G5: the Moderator's closing synthesis of the roundtable */}
+                              {message.isSynthesis && (
+                                <span className="inline-flex items-center gap-1 rounded-full border border-amber-300/60 bg-amber-100 px-2 py-0.5 text-xs font-medium leading-none text-amber-800 flex-shrink-0">
+                                  <ScrollText className="h-3 w-3" />
+                                  Closing summary
+                                </span>
+                              )}
+                            </div>
                             <ModelBadge modelId={expert.model} size="sm" />
                           </div>
                           <MentionChips mentions={message.mentions} experts={experts} className="mb-2" />

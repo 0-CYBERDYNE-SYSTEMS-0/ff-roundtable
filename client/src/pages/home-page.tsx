@@ -5,6 +5,7 @@ import Header from "@/components/layout/Header";
 import SidebarPanel from "@/components/sidebar/SidebarPanel";
 import ChatInterface from "@/components/chat/ChatInterface";
 import ExpertSelector from "@/components/roundtable/ExpertSelector";
+import CharterDialog from "@/components/roundtable/CharterDialog";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { queryClient } from "@/lib/queryClient";
 import { apiRequest } from "@/lib/queryClient";
@@ -14,7 +15,7 @@ import FarmProfileModal from "@/components/farm/FarmProfileModal";
 import { useWebSocket, sendWebSocketSubscription, sendWebSocketUnsubscription } from "@/lib/websocket-utils";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { ZapIcon, ZapOffIcon, Menu, PauseIcon, PlayIcon } from "lucide-react";
+import { ZapIcon, ZapOffIcon, Menu, PauseIcon, PlayIcon, ScrollText, XIcon } from "lucide-react";
 
 // Define the type for interaction modes matching the backend
 type InteractionMode = 
@@ -45,6 +46,21 @@ export default function HomePage() {
   // interrupt path — the current expert finishes, then the round restarts on
   // the new message. The banner clears on the next processing state_update.
   const [isSteering, setIsSteering] = useState<boolean>(false);
+
+  // G5: the Moderator decided the discussion is done and is delivering the
+  // closing synthesis. Cleared alongside the other transient flags.
+  const [isConcluding, setIsConcluding] = useState<boolean>(false);
+
+  // G6: council charter editor + one-time nudge. The dismissal is persisted
+  // so the nudge never comes back once dismissed.
+  const [charterDialogOpen, setCharterDialogOpen] = useState<boolean>(false);
+  const [charterNudgeDismissed, setCharterNudgeDismissed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("ffCharterNudgeDismissed") === "1";
+    } catch {
+      return false;
+    }
+  });
 
   // Streaming state
   const [streamingMessages, setStreamingMessages] = useState<Map<number, { content: string; expertName: string; expertRole: string }>>(new Map());
@@ -425,6 +441,29 @@ export default function HomePage() {
   // Enabled only when the conversation has artifacts or files to schedule from.
   const hasSchedulableSource =
     (messages ?? []).some((m) => (m.artifacts?.length ?? 0) > 0) || (files ?? []).length > 0;
+
+  // The active conversation's record from the list query (title, charter).
+  const activeConversationData =
+    conversations?.find((conversation) => conversation.id === activeConversation) ?? null;
+
+  // Charter badge/nudge: a blank string counts as "no charter".
+  const activeHasCharter = !!activeConversationData?.charter;
+  const showCharterNudge =
+    !charterNudgeDismissed &&
+    !isLoadingConversations &&
+    !charterDialogOpen &&
+    !!activeConversationData &&
+    (experts ?? []).length > 0 &&
+    !activeHasCharter;
+
+  const handleDismissCharterNudge = () => {
+    setCharterNudgeDismissed(true);
+    try {
+      localStorage.setItem("ffCharterNudgeDismissed", "1");
+    } catch {
+      // Persistence is best-effort; the nudge stays hidden for this session.
+    }
+  };
   const exportIcs = () => {
     if (!activeConversation) {
       toast({
@@ -487,6 +526,7 @@ export default function HomePage() {
     setInteractionMode("idle");
     setIsProcessing(false);
     setIsSteering(false);
+    setIsConcluding(false);
     setSidebarOpen(false);
   };
   
@@ -534,6 +574,7 @@ export default function HomePage() {
     setIsProcessing(false);
     setInteractionMode("idle");
     setIsSteering(false);
+    setIsConcluding(false);
   }, [socketStatus, activeConversation]);
   
   // === WebSocket Conversation Subscription (G3) ===
@@ -630,9 +671,11 @@ export default function HomePage() {
               setInteractionMode(parsedData.mode as InteractionMode);
               // Set isProcessing to true when entering processing_sequential or autonomous mode
               setIsProcessing(parsedData.mode === "processing_sequential" || parsedData.mode === "autonomous");
-              // A (re)started or finished round resolves any pending steering.
+              // A (re)started or finished round resolves any pending steering,
+              // and a finished or restarted round ends the concluding window.
               if (parsedData.mode === "processing_sequential" || parsedData.mode === "idle") {
                 setIsSteering(false);
+                setIsConcluding(false);
               }
               // Clear streaming state when returning to idle
               if (parsedData.mode === "idle") {
@@ -651,6 +694,12 @@ export default function HomePage() {
             // round on it once the current expert finishes.
             console.log("WebSocket: Steering acknowledged");
             setIsSteering(true);
+            break;
+
+          case "concluding":
+            // G5: the Moderator decided the discussion is done. The closing
+            // synthesis message follows through the normal stream flow.
+            setIsConcluding(true);
             break;
 
           // --- Streaming message handlers ---
@@ -724,6 +773,7 @@ export default function HomePage() {
             setIsProcessing(false);
             setInteractionMode("idle");
             setIsSteering(false);
+            setIsConcluding(false);
             break;
 
           // Handle other types like connection confirmation, file updates etc. if needed
@@ -848,6 +898,15 @@ export default function HomePage() {
                 <span>Steering — the council takes this after the current expert finishes.</span>
               </div>
             )}
+            {isConcluding && (
+              <div
+                role="status"
+                aria-live="polite"
+                className="flex flex-wrap items-center gap-2 px-4 py-2 text-sm bg-farm-yellow/20 text-yellow-900 border-b border-farm-yellow/40"
+              >
+                <span>The council is concluding…</span>
+              </div>
+            )}
             {/* === Interaction Control Bar (Positioned at the top of this column) === */}
             {activeConversation && (
                  <div className="flex-shrink-0 flex items-center justify-between px-6 py-3 border-b border-farm-tan/30 bg-gradient-to-r from-farm-powder/20 to-white shadow-sm">
@@ -875,8 +934,30 @@ export default function HomePage() {
                                 className={`${isAutonomousEnabled ? 'bg-farm-blue/20 text-farm-blue border-farm-blue' : 'bg-neutral-200 text-neutral-600'} font-medium`}>
                              {isAutonomousEnabled ? 'Enabled' : 'Disabled'}
                          </Badge>
+                         {activeHasCharter && (
+                           <Badge
+                             variant="outline"
+                             aria-label="This conversation has a council charter"
+                             className="bg-farm-tan/30 text-yellow-900 border-farm-tan/50 font-medium"
+                           >
+                             <ScrollText className="h-3 w-3 mr-1" />
+                             Charter
+                           </Badge>
+                         )}
                      </div>
                      <div className="flex items-center gap-3">
+                          {/* G6: view/edit the council charter for the active conversation */}
+                          <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => setCharterDialogOpen(true)}
+                              aria-label="Edit the council charter"
+                              className="border-farm-tan/60 text-yellow-900 hover:bg-farm-tan/40 hover:text-neutral-900 transition-all duration-200 font-medium"
+                          >
+                              <ScrollText className="h-4 w-4 mr-1.5" />
+                              Charter
+                          </Button>
+
                           {/* Pause the running round — the current expert finishes, then the council parks */}
                           {(interactionMode === "processing_sequential" || interactionMode === "autonomous") && (
                             <Button
@@ -937,10 +1018,28 @@ export default function HomePage() {
                              </Button>
                          )}
                      </div>
-                 </div>
+                </div>
+             )}
+
+            {/* G6: one-time nudge to set a charter — dismissed via X and persisted */}
+            {showCharterNudge && (
+              <div className="flex items-center justify-between gap-2 px-4 py-1.5 text-xs bg-farm-powder/30 text-farm-blue border-b border-farm-tan/30">
+                <span className="flex items-center gap-1.5 min-w-0">
+                  <ScrollText className="h-3.5 w-3.5 flex-shrink-0" />
+                  <span className="truncate">Set a council charter so your experts share one goal and know when to conclude.</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={handleDismissCharterNudge}
+                  aria-label="Dismiss charter suggestion"
+                  className="p-1 rounded hover:bg-farm-powder/50 transition-colors flex-shrink-0"
+                >
+                  <XIcon className="h-3.5 w-3.5" />
+                </button>
+              </div>
             )}
 
-            {/* === Chat Area (Takes remaining space) === */} 
+            {/* === Chat Area (Takes remaining space) === */}
              <div className="flex-1 overflow-y-auto">
                  {activeConversation ? (
                     <ChatInterface
@@ -1006,6 +1105,14 @@ export default function HomePage() {
           setShowFarmProfileModal(false);
           queryClient.invalidateQueries({ queryKey: ["/api/protected/farm-profile"] });
         }}
+      />
+
+      {/* G6: council charter editor for the active conversation */}
+      <CharterDialog
+        open={charterDialogOpen}
+        conversationId={activeConversation}
+        currentCharter={activeConversationData?.charter ?? null}
+        onClose={() => setCharterDialogOpen(false)}
       />
     </div>
   );
