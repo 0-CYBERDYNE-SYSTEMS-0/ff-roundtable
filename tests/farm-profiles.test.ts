@@ -109,7 +109,11 @@ const mockWeatherData = {
 describe("GET /api/protected/farm-profile", () => {
   let app: Express;
   beforeAll(async () => { app = await createTestApp(); });
-  beforeEach(() => { mockGetWeather.mockReset(); mockFormatWeather.mockReset(); });
+  beforeEach(() => {
+    mockGetWeather.mockReset();
+    mockGetWeather.mockResolvedValue({ ok: false, reason: "missing_key", message: "Weather is not configured for this server." });
+    mockFormatWeather.mockReset();
+  });
 
   it("returns 401 when not authenticated", async () => {
     const res = await request(app).get("/api/protected/farm-profile");
@@ -148,7 +152,7 @@ describe("GET /api/protected/farm-profile", () => {
     const agent = request.agent(app);
     await devLogin(agent);
 
-    mockGetWeather.mockResolvedValue(mockWeatherData);
+    mockGetWeather.mockResolvedValue({ ok: true, data: mockWeatherData });
     mockFormatWeather.mockReturnValue("Current conditions: 72°F, clear sky, humidity 55%");
 
     await agent.put("/api/protected/farm-profile").send({
@@ -170,7 +174,7 @@ describe("GET /api/protected/farm-profile", () => {
   it("handles weather API failure gracefully", async () => {
     const agent = request.agent(app);
     await devLogin(agent);
-    mockGetWeather.mockResolvedValue(null);
+    mockGetWeather.mockResolvedValue({ ok: false, reason: "auth", message: "Weather is not configured for this server." });
 
     await agent.put("/api/protected/farm-profile").send({
       farmName: "Rainy Farm", location: "Seattle, WA",
@@ -333,7 +337,11 @@ describe("PUT /api/protected/farm-profile", () => {
 describe("GET /api/protected/weather", () => {
   let app: Express;
   beforeAll(async () => { app = await createTestApp(); });
-  beforeEach(() => { mockGetWeather.mockReset(); mockFormatWeather.mockReset(); });
+  beforeEach(() => {
+    mockGetWeather.mockReset();
+    mockGetWeather.mockResolvedValue({ ok: false, reason: "missing_key", message: "Weather is not configured for this server." });
+    mockFormatWeather.mockReset();
+  });
 
   it("returns 401 when not authenticated", async () => {
     const res = await request(app).get("/api/protected/weather");
@@ -358,7 +366,7 @@ describe("GET /api/protected/weather", () => {
       farmName: "Weather Farm", lat: "35.0", lng: "-90.0", acres: 100,
     });
 
-    mockGetWeather.mockResolvedValue(mockWeatherData);
+    mockGetWeather.mockResolvedValue({ ok: true, data: mockWeatherData });
     mockFormatWeather.mockReturnValue("Current conditions: 72°F, clear sky, humidity 55%.");
 
     const res = await agent.get("/api/protected/weather");
@@ -368,18 +376,20 @@ describe("GET /api/protected/weather", () => {
     expect(res.body.data).toEqual(mockWeatherData);
   });
 
-  it("returns available:false when weather API returns null", async () => {
+  it("returns available:false with typed reason when weather fetch fails", async () => {
     const agent = request.agent(app);
     await devLogin(agent);
 
     await agent.put("/api/protected/farm-profile")
       .send({ farmName: "Null Weather Farm", lat: "0", lng: "0" });
-    mockGetWeather.mockResolvedValue(null);
+    mockGetWeather.mockResolvedValue({ ok: false, reason: "transient", message: "Weather data is temporarily unavailable." });
 
     const res = await agent.get("/api/protected/weather");
     expect(res.status).toBe(200);
     expect(res.body.available).toBe(false);
+    expect(res.body.reason).toBe("transient");
     expect(res.body.message).toContain("unavailable");
+    expect(res.body.message).not.toContain("OWM_API_KEY");
   });
 
   it("returns 500 when weather fetch throws an error", async () => {

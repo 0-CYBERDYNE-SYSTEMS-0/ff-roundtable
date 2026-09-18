@@ -402,6 +402,23 @@ export default function HomePage() {
     
     window.open(`/api/protected/conversations/${activeConversation}/export`, "_blank");
   };
+
+  // Export the conversation's week-by-week plan as an .ics calendar.
+  // Enabled only when the conversation has artifacts or files to schedule from.
+  const hasSchedulableSource =
+    (messages ?? []).some((m) => (m.artifacts?.length ?? 0) > 0) || (files ?? []).length > 0;
+  const exportIcs = () => {
+    if (!activeConversation) {
+      toast({
+        title: "No active conversation",
+        description: "Start a conversation first",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    window.open(`/api/protected/conversations/${activeConversation}/export.ics`, "_blank");
+  };
   
   // Create the conversation before opening the selector so experts are added
   // to the new conversation rather than the previously active one.
@@ -708,6 +725,8 @@ export default function HomePage() {
             files={files || []}
             onStartNewSession={handleStartNewSession}
             onExportMarkdown={exportMarkdown}
+            onExportIcs={exportIcs}
+            canExportIcs={hasSchedulableSource}
             onFileUpload={handleFileUpload}
             onSelectConversation={handleSelectConversation}
             activeConversationId={activeConversation}

@@ -1,0 +1,330 @@
+/**
+ * Schedule extraction — turns conversation artifacts (table/chart/json) and
+ * File-Creator generated .md files into schedulable rows, plus the anchor-date
+ * math that maps rows onto real calendar dates.
+ *
+ * Pure and conservative: anything that does not clearly look like a week or an
+ * ISO date is skipped. No matches -> empty list -> the export route answers 422.
+ */
+
+import fs from "fs";
+import path from "path";
+import type { Artifact, File, Message } from "./schema";
+import { addDaysIso } from "./ics";
+import { stripMarkdownToText } from "./markdown";
+
+export interface ScheduleRow {
+  /** 1-based week number (W1 -> 1). */
+  weekIndex?: number;
+  /** Explicit ISO date "YYYY-MM-DD", used verbatim. */
+  date?: string;
+  /** Source title: artifact title or generated-file title. */
+  title: string;
+  description: string;
+}
+
+/**
+ * Only week-ish headers may anchor a weekIndex and only "date" may anchor a
+ * real date. The broader chart-axis superset (day/time/month/stage/…) is
+ * deliberately excluded: treating "Day 2" as week 2 fabricated events a week
+ * apart, so non-week time axes are skipped entirely (never invent events).
+ */
+const WEEK_HEADER_KEYS = new Set(["week", "wk", "w"]);
+const DATE_HEADER_KEYS = new Set(["date"]);
+
+/**
+ * The system prompt coaches emoji-decorated table headers ("| 🌱 Week |"), so
+ * header matching strips everything but letters: "🗓️ Week" -> "week".
+ */
+function normalizeHeader(cell: string): string {
+  return cell.toLowerCase().replace(/[^a-z]/g, "");
+}
+
+/** Strip markdown emphasis/emoji junk so "**Week 1**" parses as "Week 1". */
+function stripCellDecorations(cell: string): string {
+  return cell.replace(/[*_~]/g, "").trim();
+}
+
+/** Hard cap on exported events. */
+export const MAX_SCHEDULE_ROWS = 60;
+
+/** Max characters of description accumulated after a .md event line. */
+const MD_DESCRIPTION_MAX_CHARS = 200;
+
+/**
+ * Parse a week cell in one of the anchored forms "W1", "Week 2", "3" (and the
+ * bare digit form the .md line regex captures). Anchoring keeps ordinary
+ * time-axis values ("Day 1", "10:30", "March 15") from becoming week numbers.
+ * Returns undefined for anything else or outside 1..53.
+ */
+export function parseWeekCell(cell: string): number | undefined {
+  const match = stripCellDecorations(cell).match(/^(?:(?:w|wk|week)\.?\s*)?(\d{1,2})$/i);
+  if (!match) return undefined;
+  const n = Number(match[1]);
+  return n >= 1 && n <= 53 ? n : undefined;
+}
+
+/**
+ * Strict ISO calendar-date validation. Rejects garbage, out-of-range dates
+ * ("2026-02-30") and non-padded forms ("2026-3-1").
+ */
+export function parseIsoDate(value: string): string | undefined {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return undefined;
+  const [y, m, d] = value.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  if (
+    dt.getUTCFullYear() !== y ||
+    dt.getUTCMonth() !== m - 1 ||
+    dt.getUTCDate() !== d
+  ) {
+    return undefined;
+  }
+  return value;
+}
+
+/**
+ * Convention: "next Monday" is the first Monday STRICTLY AFTER today's UTC
+ * date. On a Monday, the anchor is the following Monday (+7).
+ */
+export function nextMondayFrom(date: Date): string {
+  const daysAhead = ((8 - date.getUTCDay()) % 7) || 7;
+  return addDaysIso(date.toISOString().slice(0, 10), daysAhead);
+}
+
+/** Map a row onto a calendar date: explicit dates verbatim, weekIndex anchored. */
+export function resolveRowStartDate(row: ScheduleRow, anchorIso: string): string {
+  if (row.date) return row.date;
+  const n = row.weekIndex ?? 1;
+  return addDaysIso(anchorIso, (n - 1) * 7);
+}
+
+/** Generic extractor label that carries no information for a calendar user. */
+const GENERIC_TABLE_TITLE_RE = /^Data Table \d+$/;
+
+/**
+ * SUMMARY format: "<source title> — Week N" (or the explicit date). When the
+ * source title is still the generic "Data Table N" label, compose the summary
+ * from the row's first meaningful description cell instead — "Soil test —
+ * Week 1" reads like an event, "Data Table 1 — Week 1" does not.
+ */
+export function buildRowSummary(row: ScheduleRow): string {
+  if (GENERIC_TABLE_TITLE_RE.test(row.title.trim())) {
+    const firstCell = row.description
+      .split(" — ")
+      .map((segment) =>
+        segment
+          .trim()
+          .replace(/^[—–:\s]+/, "")
+          .replace(/[—–:\s]+$/, ""),
+      )
+      .find((segment) => segment.length > 0);
+    if (firstCell) {
+      if (row.weekIndex !== undefined) return `${firstCell} — Week ${row.weekIndex}`;
+      if (row.date) return `${firstCell} — ${row.date}`;
+      return firstCell;
+    }
+  }
+  if (row.weekIndex !== undefined) return `${row.title} — Week ${row.weekIndex}`;
+  if (row.date) return `${row.title} — ${row.date}`;
+  return row.title;
+}
+
+// ── table artifacts ──────────────────────────────────────────────────────────
+
+/**
+ * Split a markdown pipe table exactly the way ArtifactDisplay does:
+ * lines -> split("|") -> drop empty cells -> trim.
+ */
+function splitMarkdownTable(content: string): string[][] {
+  return content
+    .split("\n")
+    .filter((line) => line.trim())
+    .map((row) =>
+      row
+        .split("|")
+        .filter((cell) => cell.trim())
+        .map((cell) => cell.trim()),
+    );
+}
+
+function extractFromTable(artifact: Artifact, rows: ScheduleRow[]): void {
+  const table = splitMarkdownTable(artifact.content);
+  if (table.length < 2) return;
+  const header = table[0];
+  const weekCol = header.findIndex((cell) => WEEK_HEADER_KEYS.has(normalizeHeader(cell)));
+  const dateCol = header.findIndex((cell) => DATE_HEADER_KEYS.has(normalizeHeader(cell)));
+  if (weekCol === -1 && dateCol === -1) return;
+  const title = artifact.title || "Schedule";
+  for (const row of table.slice(1)) {
+    const dateCell = dateCol !== -1 ? stripCellDecorations(row[dateCol]) : undefined;
+    const weekCell = weekCol !== -1 ? stripCellDecorations(row[weekCol]) : undefined;
+    const date = dateCell ? parseIsoDate(dateCell) : undefined;
+    const weekIndex = weekCell ? parseWeekCell(weekCell) : undefined;
+    if (date === undefined && weekIndex === undefined) continue;
+    // .ics DESCRIPTION is plain text: strip markdown from each cell (the chat
+    // UI renders the artifact itself — this is the export path only).
+    const description = row
+      .filter((_, i) => i !== weekCol && i !== dateCol)
+      .map((cell) => stripMarkdownToText(cell))
+      .filter((cell) => cell.length > 0)
+      .join(" — ");
+    rows.push({ weekIndex, date, title, description });
+  }
+}
+
+// ── chart / json artifacts ───────────────────────────────────────────────────
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Accept either a bare array or a { data: [...] } wrapper (chart shape). */
+function extractObjectArray(source: unknown): Record<string, unknown>[] {
+  if (Array.isArray(source)) return source.filter(isPlainObject);
+  if (isPlainObject(source) && Array.isArray(source.data)) {
+    return source.data.filter(isPlainObject);
+  }
+  return [];
+}
+
+function extractFromArrayData(data: Record<string, unknown>[], title: string, rows: ScheduleRow[]): void {
+  for (const entry of data) {
+    const keys = Object.keys(entry);
+    const weekKey = keys.find((k) => WEEK_HEADER_KEYS.has(normalizeHeader(k)));
+    const dateKey = keys.find((k) => DATE_HEADER_KEYS.has(normalizeHeader(k)));
+    if (!weekKey && !dateKey) continue;
+    const toCell = (key: string) => {
+      const raw = entry[key];
+      return typeof raw === "string" ? raw : String(raw ?? "");
+    };
+    const date = dateKey ? parseIsoDate(toCell(dateKey)) : undefined;
+    const weekIndex = weekKey ? parseWeekCell(toCell(weekKey)) : undefined;
+    if (date === undefined && weekIndex === undefined) continue;
+    const description = keys
+      .filter((k) => k !== weekKey && k !== dateKey)
+      .map((k) => `${k}: ${stripMarkdownToText(String(entry[k] ?? ""))}`)
+      .join("; ");
+    rows.push({ weekIndex, date, title, description });
+  }
+}
+
+// ── File-Creator .md files ───────────────────────────────────────────────────
+
+const MD_WEEK_LINE_RE = /^(?:#{1,4}\s*|[-*]\s*|\*\*)?(?:week|wk\.?|w)\s*(\d{1,2})\b/i;
+const ISO_DATE_RE = /\d{4}-\d{2}-\d{2}/;
+
+function extractFromMarkdown(content: string, sourceTitle: string, rows: ScheduleRow[]): void {
+  let current: ScheduleRow | null = null;
+
+  const flush = () => {
+    if (current) rows.push(current);
+    current = null;
+  };
+
+  for (const line of content.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    const weekMatch = trimmed.match(MD_WEEK_LINE_RE);
+    const dateMatch = weekMatch ? null : trimmed.match(ISO_DATE_RE);
+
+    if (weekMatch || dateMatch) {
+      flush();
+      // Rest of the line (after the week prefix / date) describes the event.
+      // Stripped to plaintext while emphasis pairs are still intact, then the
+      // leftover separator/prefix junk is trimmed.
+      const rest = stripMarkdownToText(
+        weekMatch ? trimmed.slice(weekMatch[0].length) : trimmed.replace(ISO_DATE_RE, ""),
+      )
+        .replace(/^[\s—–:*\-]+/, "")
+        .trim();
+      const descriptionParts: string[] = [];
+      if (rest) descriptionParts.push(rest);
+      const row: ScheduleRow = {
+        weekIndex: weekMatch ? parseWeekCell(weekMatch[1]) : undefined,
+        date: dateMatch ? parseIsoDate(dateMatch[0]) : undefined,
+        title: sourceTitle,
+        description: descriptionParts.join(" "),
+      };
+      // A line that looked schedulable but parsed to neither a valid week nor
+      // a valid date ("Week 99", "Due 2026-99-99") must not become a phantom
+      // event anchored at Week 1.
+      if (row.weekIndex !== undefined || row.date !== undefined) {
+        current = row;
+      }
+      continue;
+    }
+
+    if (current && trimmed) {
+      const line = stripMarkdownToText(trimmed);
+      if (line) {
+        const sep = current.description ? "\n" : "";
+        if (current.description.length + sep.length + line.length <= MD_DESCRIPTION_MAX_CHARS) {
+          current.description += sep + line;
+        }
+      }
+    }
+  }
+  flush();
+}
+
+// ── file reading ─────────────────────────────────────────────────────────────
+
+/** Default disk reader: null on any error so unreadable files are skipped silently. */
+function readLocalFile(absolutePath: string): string | null {
+  try {
+    return fs.readFileSync(absolutePath, "utf-8");
+  } catch {
+    return null;
+  }
+}
+
+function readGeneratedFile(file: File, readFile: (p: string) => string | null): string | null {
+  try {
+    const relativePath = file.fileUrl.replace(/^\/+/, "");
+    return readFile(path.join(process.cwd(), relativePath));
+  } catch {
+    return null;
+  }
+}
+
+// ── entry point ──────────────────────────────────────────────────────────────
+
+/**
+ * Extract schedulable rows from conversation messages (their artifacts) and
+ * conversation files (Expert-generated .md plans), capped at MAX_SCHEDULE_ROWS.
+ *
+ * `readFile` is injectable for tests; the default reads from disk relative to
+ * process.cwd() and skips files it cannot read.
+ */
+export function extractScheduleRows(
+  messages: Message[],
+  files: File[],
+  readFile: (absolutePath: string) => string | null = readLocalFile,
+): ScheduleRow[] {
+  const rows: ScheduleRow[] = [];
+
+  for (const message of messages ?? []) {
+    for (const artifact of message.artifacts ?? []) {
+      if (artifact.type === "table") {
+        extractFromTable(artifact, rows);
+      } else if (artifact.type === "chart" || artifact.type === "json") {
+        try {
+          const data = extractObjectArray(JSON.parse(artifact.content));
+          extractFromArrayData(data, artifact.title || "Schedule", rows);
+        } catch {
+          // Not valid JSON — skip silently.
+        }
+      }
+    }
+  }
+
+  for (const file of files ?? []) {
+    if (!file.uploadedBy.startsWith("Expert:")) continue;
+    if (!file.filename.toLowerCase().endsWith(".md")) continue;
+    const content = readGeneratedFile(file, readFile);
+    if (!content) continue;
+    const sourceTitle = file.filename.replace(/\.md$/i, "") || file.filename;
+    extractFromMarkdown(content, sourceTitle, rows);
+  }
+
+  return rows.slice(0, MAX_SCHEDULE_ROWS);
+}

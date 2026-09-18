@@ -668,6 +668,8 @@ export class PostgresStorage implements IStorage {
 
   // ── Weather cache operations ───────────────────────────────────────────────
 
+  // Returns the last entry regardless of age (plus fetchedAt) so callers can
+  // implement stale-while-revalidate; freshness is the caller's decision.
   async getCachedWeather(lat: string, lng: string): Promise<{ data: any; fetchedAt: Date } | undefined> {
     const result = await this.db
       .select()
@@ -679,13 +681,7 @@ export class PostgresStorage implements IStorage {
     const entry = result[0];
     if (!entry) return undefined;
 
-    // Check if cache is still fresh (within 30 minutes)
-    const thirtyMinutesAgo = new Date(Date.now() - 30 * 60 * 1000);
-    if (!entry.fetchedAt || entry.fetchedAt < thirtyMinutesAgo) {
-      return undefined;
-    }
-
-    return { data: entry.data, fetchedAt: entry.fetchedAt };
+    return { data: entry.data, fetchedAt: entry.fetchedAt ?? new Date(0) };
   }
 
   async cacheWeather(lat: string, lng: string, data: any): Promise<void> {

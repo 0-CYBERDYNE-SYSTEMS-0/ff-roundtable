@@ -21,6 +21,7 @@ import {
   OpenRouterProvider,
   LocalOpenAIProvider,
 } from "../server/ai-providers";
+import type { AIMessage } from "../server/ai";
 import { isFreeModel } from "../server/tiers";
 
 describe("AI Providers", () => {
@@ -148,6 +149,64 @@ describe("AI Providers", () => {
       await expect(
         provider.chat([{ role: "user", content: "hello" }], "deepseek/deepseek-v3")
       ).rejects.toThrow("OpenRouter API key not provided");
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────
+  // Multimodal content passthrough (vision input, SPEC §B6)
+  // ─────────────────────────────────────────────────────────────────
+
+  describe("Multimodal content passthrough", () => {
+    const multimodalMessages: AIMessage[] = [
+      { role: "system", content: "You describe images." },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "What is in this image?" },
+          {
+            type: "image_url",
+            image_url: { url: "data:image/png;base64,aGVsbG8gdmlzaW9u" },
+          },
+        ],
+      },
+    ];
+
+    it("passes array content with image_url verbatim in the OpenRouter fetch body", async () => {
+      process.env.OPENROUTER_API_KEY = "or-key-123";
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          choices: [{ message: { role: "assistant", content: "A field." } }],
+        }),
+      });
+
+      const provider = new OpenRouterProvider();
+      await provider.chat(multimodalMessages, "openai/gpt-4o");
+
+      const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+      expect(body.messages).toEqual(multimodalMessages);
+      const userContent = body.messages[1].content;
+      expect(Array.isArray(userContent)).toBe(true);
+      expect(userContent[1].type).toBe("image_url");
+      expect(userContent[1].image_url.url).toBe("data:image/png;base64,aGVsbG8gdmlzaW9u");
+    });
+
+    it("passes array content with image_url verbatim in the local provider fetch body", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          choices: [{ message: { role: "assistant", content: "A field." } }],
+        }),
+      });
+
+      const provider = new LocalOpenAIProvider();
+      await provider.chat(multimodalMessages, "local/llava");
+
+      const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+      expect(body.messages).toEqual(multimodalMessages);
+      expect(body.messages[1].content[1].image_url.url).toBe(
+        "data:image/png;base64,aGVsbG8gdmlzaW9u"
+      );
     });
   });
 

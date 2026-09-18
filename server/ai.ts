@@ -8,6 +8,7 @@ import fs from "fs";
 import axios from "axios";
 import { randomBytes } from "crypto";
 import { getProvider } from "./ai-providers";
+import { collectImageParts, isImageFile, MAX_IMAGE_PARTS, analyzedImageNote, makeAnalyzedBeforePredicate, type ImagePart } from "./image-context";
 
 const AI_REQUEST_TIMEOUT_MS = 120_000;
 const MAX_MODEL_MESSAGE_CHARS = 12_000;
@@ -24,10 +25,16 @@ function sanitizeGeneratedFilename(filename: string): string {
   return basename.replace(/[^a-zA-Z0-9_.-]/g, "_") || "generated-file";
 }
 
+// Multimodal content parts (OpenAI chat-completions format) — used to deliver
+// uploaded images to vision-capable models alongside the text part.
+export type ContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } };
+
 // Define the structure for messages sent to AI APIs
 export interface AIMessage {
   role: "system" | "user" | "assistant";
-  content: string;
+  content: string | ContentPart[];
 }
 
 export interface AIModelResponse {
@@ -214,7 +221,8 @@ When appropriate, explain how weather conditions impact farming decisions and ri
       roleInstructions = `Focus on researching topics using external tools, summarizing findings, and providing citations.`;
       break;
     case "Imagery Specialist":
-      roleInstructions = `Focus on analyzing satellite, drone, or field imagery to provide visual insights and interpretations. If images are provided, describe what you see and its relevance.`;
+      roleInstructions = `Focus on analyzing satellite, drone, or field imagery to provide visual insights and interpretations. If images are provided, describe what you see and its relevance.
+Uploaded images are delivered to you directly as native vision input — describe and analyze what you actually see in them.`;
       break;
     case "Moderator":
       roleInstructions = `Facilitate the discussion, summarize key points, ensure all experts contribute, and manage conversation flow. 
@@ -346,6 +354,114 @@ async function readFileContent(file: File, maxLength = 2000): Promise<string | n
     }
 }
 
+/**
+ * Build the "Attached Files Context" system message plus native vision parts
+ * for the user message. Text files are inlined as before; image/* files are
+ * listed as delivered-visually and their base64 image_url parts are returned
+ * for appending to the user message content (SPEC §B2-B3).
+ *
+ * F2 analyze-image-once: user-uploaded images that have already been analyzed
+ * (an assistant message exists after the upload) are described by a one-line
+ * text note instead of re-embedding their base64 payload on every turn.
+ */
+async function buildAttachedFilesContext(
+    files: File[],
+    history: Message[] = []
+): Promise<{ context: string | null; imageParts: ImagePart[] }> {
+    if (files.length === 0) {
+        return { context: null, imageParts: [] };
+    }
+
+    const analyzedBefore = makeAnalyzedBeforePredicate(history);
+    const { parts: imageParts, skipped: skippedImages, alreadyAnalyzed } =
+        await collectImageParts(files, MAX_IMAGE_PARTS, analyzedBefore);
+
+    // Which image filenames actually produced a vision part? Mirror the
+    // most-recent-first selection used by collectImageParts so the text
+    // listing never claims delivery for an image that was skipped,
+    // already analyzed, or beyond the 2-part limit.
+    const deliveredImageNames = new Set<string>();
+    let deliveredCount = 0;
+    for (const file of files.filter(isImageFile).sort((a, b) => {
+        const ta = a.uploadedAt ? new Date(a.uploadedAt).getTime() : 0;
+        const tb = b.uploadedAt ? new Date(b.uploadedAt).getTime() : 0;
+        return tb - ta;
+    })) {
+        if (alreadyAnalyzed.includes(file.filename)) continue;
+        if (deliveredCount >= imageParts.length) break;
+        if (skippedImages.includes(file.filename)) continue;
+        deliveredImageNames.add(file.filename);
+        deliveredCount++;
+    }
+
+    let fileContextString = "\n\n--- Attached Files Context ---\n";
+    for (const file of files.slice(0, MAX_FILE_CONTEXT_FILES)) {
+        fileContextString += `\nFile Name: ${file.filename} (${file.fileType})\n`;
+        if (isImageFile(file)) {
+            if (deliveredImageNames.has(file.filename)) {
+                fileContextString += `[Image attached: ${file.filename} — delivered visually]\n`;
+            } else if (alreadyAnalyzed.includes(file.filename)) {
+                fileContextString += `${analyzedImageNote(file.filename)}\n`;
+            } else if (skippedImages.includes(file.filename)) {
+                fileContextString += `[Image attached: ${file.filename} — not delivered (missing or over the 5 MB vision limit)]\n`;
+            } else {
+                fileContextString += `[Image attached: ${file.filename} — not delivered (vision input is limited to the 2 most recent images)]\n`;
+            }
+        } else {
+            const contentSnippet = await readFileContent(file);
+            if (contentSnippet) {
+                fileContextString += `Content Snippet:\n\`\`\`\n${contentSnippet}\n\`\`\`\n`;
+            }
+        }
+    }
+    fileContextString += "\n--- End Attached Files Context ---\n";
+
+    return { context: fileContextString, imageParts };
+}
+
+/**
+ * Vision-rejecting providers phrase the failure around the modality ("Image
+ * input is not supported by this model"). Requiring a rejection-shaped phrase
+ * near the keyword keeps lookalikes honest — e.g. a 429 body that merely echoes
+ * a model slug like "llama-3.2-11b-vision-instruct:free" is a rate limit, not a
+ * rejection.
+ */
+const VISION_REJECTION_RE = new RegExp(
+  "(?:image|vision|modalit|multimodal)[\\s\\S]{0,80}(?:not\\s+support|unsupport\\w*|reject\\w*|invalid|disabled|not\\s+allowed|can(?:not|'t)|unable)" +
+  "|" +
+  "(?:not\\s+support|unsupport\\w*|reject\\w*|invalid|disabled|not\\s+allowed|can(?:not|'t)|unable)[\\s\\S]{0,80}(?:image|vision|modalit|multimodal)" +
+  "|" +
+  // OpenRouter's real rejection shape: 404 "No endpoints found that support image input"
+  "(?:support|accept|allow|handle)\\s+(?:[\\w-]+\\s+){0,2}(?:image|vision|multimodal|modalit)",
+  "i",
+);
+
+/**
+ * True when a provider error looks like the model rejected the vision input
+ * itself AND this turn actually sent image parts.
+ *
+ * Status-bearing 4xx: only true modality rejections (400/404/422) qualify —
+ * 429/402 bodies commonly echo vision-slug model names, so rate-limit and
+ * payment failures keep the generic path. 413 counts too: with parts sent, the
+ * payload overflow was caused by the images. Status-less shapes (a 200 response
+ * wrapping {"error":{...}} surfaces as "OpenRouter/Local AI Provider Error: …")
+ * fall back to the phrase test alone.
+ */
+function isVisionRejection(error: unknown, imageParts: ImagePart[]): boolean {
+    if (imageParts.length === 0 || !(error instanceof Error)) return false;
+    const status = error.message.match(/\((4\d{2})\)/)?.[1];
+    if (status) {
+      if (status === "413") return true;
+      if (![400, 404, 422].includes(Number(status))) return false;
+    }
+    return VISION_REJECTION_RE.test(error.message);
+}
+
+/** Honest per-expert failure message for vision-rejecting models (SPEC §B4). */
+function visionRejectionMessage(expertName: string): string {
+    return `⚠️ ${expertName} could not analyze the image — this model doesn't accept image input. Try a vision-capable model (e.g. switch this expert to one, or use BYOK).`;
+}
+
 // Function to generate response for a single expert WITH STREAMING
 // Calls onToken for each token chunk, returns the final InsertMessage
 export async function getExpertResponseStream(
@@ -372,8 +488,8 @@ export async function getExpertResponseStream(
         if (profile.lat && profile.lng) {
           const { getWeatherForFarm, formatWeatherContext } = await import('./weather');
           const weather = await getWeatherForFarm(profile.lat, profile.lng);
-          if (weather) {
-            weatherContext = formatWeatherContext(weather);
+          if (weather.ok) {
+            weatherContext = formatWeatherContext(weather.data);
           }
         }
       }
@@ -383,22 +499,14 @@ export async function getExpertResponseStream(
   }
   
   const systemPrompt = generateSystemPrompt(expert, availableRoles, farmContext, weatherContext);
-  
+
   const messages: AIMessage[] = [
     { role: "system", content: systemPrompt }
   ];
 
-  if (files.length > 0) {
-     let fileContextString = "\n\n--- Attached Files Context ---\n";
-     for (const file of files.slice(0, MAX_FILE_CONTEXT_FILES)) {
-         const contentSnippet = await readFileContent(file);
-         fileContextString += `\nFile Name: ${file.filename} (${file.fileType})\n`;
-         if (contentSnippet) {
-              fileContextString += `Content Snippet:\n\`\`\`\n${contentSnippet}\n\`\`\`\n`;
-         }
-     }
-     fileContextString += "\n--- End Attached Files Context ---\n";
-     messages.push({ role: "system", content: fileContextString });
+  const { context: fileContext, imageParts } = await buildAttachedFilesContext(files, history);
+  if (fileContext) {
+     messages.push({ role: "system", content: fileContext });
   }
 
    messages.push(...history.map(msg => ({
@@ -406,9 +514,17 @@ export async function getExpertResponseStream(
       content: truncateForModel(msg.content)
    })).slice(-15));
 
-   messages.push({ role: "user", content: truncateForModel(referenceMessageContent) });
+   // With image parts present, the user message becomes a multimodal content
+   // array. The 12k-char truncation applies to the TEXT part only — the
+   // base64 image parts are appended verbatim, never truncated.
+   const userText = truncateForModel(referenceMessageContent);
+   messages.push(
+      imageParts.length > 0
+        ? { role: "user", content: [{ type: "text", text: userText }, ...imageParts] }
+        : { role: "user", content: userText }
+   );
 
-   console.log(`[STREAM] Sending ${messages.length} messages to LLM for ${expert.role}.`);
+   console.log(`[STREAM] Sending ${messages.length} messages to LLM for ${expert.role}${imageParts.length > 0 ? ` (with ${imageParts.length} image part${imageParts.length > 1 ? "s" : ""})` : ""}.`);
 
   try {
     let response: AIModelResponse;
@@ -475,7 +591,9 @@ export async function getExpertResponseStream(
 
   } catch (error) {
     console.error(`[STREAM] Error streaming from expert ${expert.name}:`, error);
-    const errorMsg = `(Error generating response for ${expert.name}: ${error instanceof Error ? error.message : String(error)})`;
+    const errorMsg = isVisionRejection(error, imageParts)
+      ? visionRejectionMessage(expert.name)
+      : `(Error generating response for ${expert.name}: ${error instanceof Error ? error.message : String(error)})`;
     onToken(errorMsg); // Show error inline
     return {
       conversationId: expert.conversationId,
@@ -504,19 +622,11 @@ export async function getExpertResponse(
     { role: "system", content: systemPrompt }
   ];
 
-  if (files.length > 0) {
-     let fileContextString = "\n\n--- Attached Files Context ---\n";
-     for (const file of files.slice(0, MAX_FILE_CONTEXT_FILES)) {
-         const contentSnippet = await readFileContent(file);
-         fileContextString += `\nFile Name: ${file.filename} (${file.fileType})\n`;
-         if (contentSnippet) {
-              fileContextString += `Content Snippet:\n\`\`\`\n${contentSnippet}\n\`\`\`\n`;
-         }
-     }
-     fileContextString += "\n--- End Attached Files Context ---\n";
-     messages.push({ 
-         role: "system", 
-         content: fileContextString 
+  const { context: fileContext, imageParts } = await buildAttachedFilesContext(files, history);
+  if (fileContext) {
+     messages.push({
+         role: "system",
+         content: fileContext
      });
   }
 
@@ -525,9 +635,17 @@ export async function getExpertResponse(
       content: truncateForModel(msg.content)
    })).slice(-15));
 
-   messages.push({ role: "user", content: truncateForModel(referenceMessageContent) });
+   // With image parts present, the user message becomes a multimodal content
+   // array. The 12k-char truncation applies to the TEXT part only — the
+   // base64 image parts are appended verbatim, never truncated.
+   const userText = truncateForModel(referenceMessageContent);
+   messages.push(
+      imageParts.length > 0
+        ? { role: "user", content: [{ type: "text", text: userText }, ...imageParts] }
+        : { role: "user", content: userText }
+   );
 
-   console.log(`[DEBUG] Sending ${messages.length} messages to LLM for ${expert.role}.`);
+   console.log(`[DEBUG] Sending ${messages.length} messages to LLM for ${expert.role}${imageParts.length > 0 ? ` (with ${imageParts.length} image part${imageParts.length > 1 ? "s" : ""})` : ""}.`);
 
   try {
     let response: AIModelResponse;
@@ -590,11 +708,14 @@ export async function getExpertResponse(
 
   } catch (error) {
     console.error(`Error getting response from expert ${expert.name}:`, error);
+    const errorMsg = isVisionRejection(error, imageParts)
+      ? visionRejectionMessage(expert.name)
+      : `(Error generating response for ${expert.name}: ${error instanceof Error ? error.message : String(error)})`;
     return {
       conversationId: expert.conversationId,
       expertId: expert.id,
       userId: null,
-      content: `(Error generating response for ${expert.name}: ${error instanceof Error ? error.message : String(error)})`,
+      content: errorMsg,
       role: "assistant",
       expertName: expert.name,
       expertRole: expert.role,

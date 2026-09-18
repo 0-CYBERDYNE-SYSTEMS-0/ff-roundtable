@@ -585,4 +585,108 @@ describe("Orchestrator", () => {
       expect(state!.currentExpertIndex).toBe(-1);
     });
   });
+
+  // ─────────────────────────────────────────────────────────────────
+  // F2 — Redundancy early-stop in autonomous mode
+  // ─────────────────────────────────────────────────────────────────
+
+  describe("F2 redundancy early-stop", () => {
+    function mockHistoryBackedStorage() {
+      // Conversation-aware backing store (leftover orchestrator chains from
+      // earlier tests keep running on their own conversation IDs, so neither
+      // the history nor turn counts may be global).
+      const messages: Message[] = [];
+      let messageId = 100;
+      mockGetConversationMessages.mockImplementation((conversationId: number) =>
+        Promise.resolve(messages.filter((m) => m.conversationId === conversationId)),
+      );
+      mockCreateMessage.mockImplementation((msg: Partial<Message>) => {
+        const stored = { ...msg, id: messageId++, timestamp: new Date() } as Message;
+        messages.push(stored);
+        return Promise.resolve(stored);
+      });
+      return (conversationId: number) =>
+        messages.filter((m) => m.conversationId === conversationId && m.role === "assistant").length;
+    }
+
+    it("stops the autonomous sequence early on a near-identical repeat of a prior expert message", async () => {
+      const conversationId = nextConvId();
+      // Experts bound to THIS conversation: the mock returns
+      // expert.conversationId, so leftover chains from earlier tests (whose
+      // loops keep running on their own conversation IDs) can never pollute
+      // this conversation's stored-message counts.
+      const myExperts = experts.map((e) => ({ ...e, conversationId }));
+      mockGetConversationExperts.mockResolvedValue(myExperts);
+      mockGetConversationFiles.mockResolvedValue([]);
+      const assistantTurns = mockHistoryBackedStorage();
+
+      const sequentialContents: Record<string, string> = {
+        Alice: "Lime this field at two tons per acre and retest the soil in spring",
+        Bob: "Tile drainage would fix the wet spot in the north corner",
+        Carol: "Frost risk stays low for the next ten days in your county",
+      };
+
+      mockGetExpertResponseStream.mockImplementation(async (expert: Expert) => {
+        // Autonomous turn (after the 3 sequential turns): near-identical to
+        // Alice's sequential message — only the final word differs (0.875 sim).
+        const content =
+          assistantTurns(conversationId) >= 3
+            ? "Lime this field at two tons per acre and retest the soil in autumn"
+            : sequentialContents[expert.name];
+        return {
+          conversationId: expert.conversationId,
+          expertId: expert.id,
+          userId: null,
+          content,
+          role: "assistant",
+          expertName: expert.name,
+          expertRole: expert.role,
+          artifacts: [],
+        };
+      });
+
+      const userMessage = createMockMessage(1, "What should I do about the field?");
+      await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn);
+
+      await waitFor(800);
+
+      // Exactly the sequential round (3) + ONE autonomous turn (the redundant
+      // one) — the sequence stopped before the maxAutonomousTurns cap of 6.
+      expect(assistantTurns(conversationId)).toBe(4);
+
+      const state = getConversationState(conversationId);
+      expect(state!.mode).toBe("idle");
+      // Same cleanup as a natural end.
+      expect(state!.totalAutonomousTurnsTaken).toBe(0);
+      expect(mockGenerateInsights).toHaveBeenCalledWith(conversationId, expect.any(Function));
+    });
+
+    it("lets the autonomous sequence run to the cap when contributions stay distinct", async () => {
+      const conversationId = nextConvId();
+      const myExperts = experts.map((e) => ({ ...e, conversationId }));
+      mockGetConversationExperts.mockResolvedValue(myExperts);
+      mockGetConversationFiles.mockResolvedValue([]);
+      const assistantTurns = mockHistoryBackedStorage();
+
+      mockGetExpertResponseStream.mockImplementation(async (expert: Expert) => ({
+        conversationId: expert.conversationId,
+        expertId: expert.id,
+        userId: null,
+        content: `Response number ${assistantTurns(conversationId) + 1} from ${expert.name} with fresh vocabulary`,
+        role: "assistant",
+        expertName: expert.name,
+        expertRole: expert.role,
+        artifacts: [],
+      }));
+
+      const userMessage = createMockMessage(1, "Let's discuss rotation planning");
+      await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn);
+
+      await waitFor(1000);
+
+      // 3 sequential + maxAutonomousTurns (3 experts * 2 = 6) — never cut early.
+      expect(assistantTurns(conversationId)).toBe(9);
+      expect(getConversationState(conversationId)!.mode).toBe("idle");
+    });
+  });
 });
