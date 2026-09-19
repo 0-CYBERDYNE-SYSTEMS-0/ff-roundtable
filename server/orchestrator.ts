@@ -512,6 +512,19 @@ export class InteractionOrchestrator {
             });
             if (!state) return;
             const broadcastFn = state.broadcastFn;
+
+            // G9 legibility: preview who is about to speak, BEFORE their turn
+            // starts (acceptance: next_speaker → expert_stream_start in that
+            // order, matching expertId). Fires for BOTH processing_sequential
+            // and autonomous turns; the G5 closing synthesis turn is not a
+            // step-3 turn and is intentionally not previewed (the concluding
+            // banner covers it). Synchronous broadcast — no scheduling site.
+            state.broadcastFn(this.conversationId, {
+                type: "next_speaker",
+                conversationId: this.conversationId,
+                expertId: currentExpert.id,
+                expertRole: currentExpert.role,
+            });
             
             // --- Determine Reference Message --- 
             let referenceMessageContent = "";

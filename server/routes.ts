@@ -489,6 +489,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
               message: data.message
             }));
           }
+          // Handle G9 next-speaker preview: who is about to speak, sent just
+          // before their expert_stream_start.
+          else if (data.type === "next_speaker") {
+            client.send(JSON.stringify({
+              type: "next_speaker",
+              conversationId,
+              expertId: data.expertId,
+              expertRole: data.expertRole
+            }));
+          }
           // Handle error messages
           else if (data.type === "message_error") {
             // Prefer the persisted error message (survives refetch); fall back

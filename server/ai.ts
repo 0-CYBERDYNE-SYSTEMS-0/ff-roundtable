@@ -14,6 +14,8 @@ import { collectImageParts, isImageFile, MAX_IMAGE_PARTS, analyzedImageNote, mak
 const AI_REQUEST_TIMEOUT_MS = 120_000;
 const MAX_MODEL_MESSAGE_CHARS = 12_000;
 const MAX_FILE_CONTEXT_FILES = 10;
+// G9: cap on the carried-forward PRIOR DECISIONS system block.
+const PRIOR_DECISIONS_MAX_CHARS = 1200;
 
 function truncateForModel(content: string, maxChars = MAX_MODEL_MESSAGE_CHARS): string {
   return content.length > maxChars
@@ -472,6 +474,57 @@ function visionRejectionMessage(expertName: string): string {
     return `⚠️ ${expertName} could not analyze the image — this model doesn't accept image input. Try a vision-capable model (e.g. switch this expert to one, or use BYOK).`;
 }
 
+/**
+ * G9 legibility: the structural slice of a stored Insight the carried-forward
+ * block needs (a plain Insight satisfies this). id/createdAt are optional so
+ * synthetic entries remain testable; the latest-insight pick falls back
+ * through id → createdAt → insertion order.
+ */
+export interface PriorDecisionInsight {
+    title: string;
+    // Nullable to accept the drizzle select type of the insights.points
+    // array column directly; non-array values are filtered out below.
+    points: string[] | null | undefined;
+    id?: number;
+    createdAt?: Date | string | null;
+}
+
+/**
+ * G9 legibility: build the compact "PRIOR DECISIONS" system block injected
+ * into expert turns so the council builds on settled decisions from a prior
+ * sequence instead of re-litigating them. Zero extra model calls — the block
+ * is assembled from the insights already stored by generateInsights.
+ *
+ * Pure and unit-testable. Returns the block for the LATEST insight (highest
+ * id, else newest createdAt, else last array entry — storage order is not
+ * relied upon), or null when there is nothing usable. The whole block is
+ * truncated to PRIOR_DECISIONS_MAX_CHARS via the shared truncator.
+ */
+export function buildPriorDecisionsBlock(insights: PriorDecisionInsight[]): string | null {
+    if (!Array.isArray(insights) || insights.length === 0) return null;
+    const withPoints = insights.filter(
+        (i) => i && Array.isArray(i.points) && i.points.some((p) => typeof p === "string" && p.trim())
+    );
+    if (withPoints.length === 0) return null;
+    const rank = (i: PriorDecisionInsight): number => {
+        if (typeof i.id === "number") return i.id;
+        const t = i.createdAt ? new Date(i.createdAt).getTime() : 0;
+        return Number.isNaN(t) ? 0 : t;
+    };
+    const latest = withPoints.reduce((a, b) => (rank(b) >= rank(a) ? b : a));
+    // The filter above guarantees an array, but narrowing doesn't survive
+    // reduce — assert it locally.
+    const latestPoints: string[] = Array.isArray(latest.points) ? latest.points : [];
+    const bullets = latestPoints
+        .filter((p) => typeof p === "string" && p.trim())
+        .map((p) => `- ${p.trim()}`);
+    if (bullets.length === 0) return null;
+    return truncateForModel(
+        `PRIOR DECISIONS (settled in an earlier round — do not re-litigate; build on these):\n${bullets.join("\n")}`,
+        PRIOR_DECISIONS_MAX_CHARS
+    );
+}
+
 // Function to generate response for a single expert WITH STREAMING
 // Calls onToken for each token chunk, returns the final InsertMessage
 export async function getExpertResponseStream(
@@ -523,6 +576,19 @@ export async function getExpertResponseStream(
       role: mapDbRoleToApiRole(msg.role),
       content: truncateForModel(msg.content)
    })).slice(-15));
+
+   // G9 legibility: carried-forward context — the latest insight from a prior
+   // sequence rides along as a compact system block (zero extra model calls).
+   // Optional context: any storage hiccup is logged and skipped, never fatal.
+   try {
+     const priorInsights = await storage.getConversationInsights(expert.conversationId);
+     const priorDecisionsBlock = buildPriorDecisionsBlock(priorInsights ?? []);
+     if (priorDecisionsBlock) {
+       messages.push({ role: "system", content: priorDecisionsBlock });
+     }
+   } catch (priorErr) {
+     console.warn("[STREAM] Could not load prior decisions:", (priorErr as Error).message);
+   }
 
    // With image parts present, the user message becomes a multimodal content
    // array. The 12k-char truncation applies to the TEXT part only — the
@@ -651,6 +717,18 @@ export async function getExpertResponse(
       role: mapDbRoleToApiRole(msg.role),
       content: truncateForModel(msg.content)
    })).slice(-15));
+
+   // G9 legibility: same carried-forward PRIOR DECISIONS block as the
+   // streaming path. Optional context: storage hiccups are skipped.
+   try {
+     const priorInsights = await storage.getConversationInsights(expert.conversationId);
+     const priorDecisionsBlock = buildPriorDecisionsBlock(priorInsights ?? []);
+     if (priorDecisionsBlock) {
+       messages.push({ role: "system", content: priorDecisionsBlock });
+     }
+   } catch (priorErr) {
+     console.warn("Could not load prior decisions:", (priorErr as Error).message);
+   }
 
    // With image parts present, the user message becomes a multimodal content
    // array. The 12k-char truncation applies to the TEXT part only — the
