@@ -17,6 +17,18 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ZapIcon, ZapOffIcon, Menu, PauseIcon, PlayIcon, ScrollText, XIcon } from "lucide-react";
 
+// G9 quiet console: per-event chatter is gated behind a debug flag so the
+// browser console stays readable in production. Force it per-tab with
+// localStorage.setItem("ffDebug", "1"). console.error/console.warn for
+// genuine failures are never gated.
+const ffDebug =
+  import.meta.env.DEV ||
+  (typeof localStorage !== "undefined" && localStorage.getItem("ffDebug") === "1");
+
+const debugLog = (...args: unknown[]) => {
+  if (ffDebug) console.log(...args);
+};
+
 // Define the type for interaction modes matching the backend
 type InteractionMode = 
     | "idle" 
@@ -65,6 +77,11 @@ export default function HomePage() {
   // Streaming state
   const [streamingMessages, setStreamingMessages] = useState<Map<number, { content: string; expertName: string; expertRole: string }>>(new Map());
   const [typingExpertIds, setTypingExpertIds] = useState<Set<number>>(new Set());
+
+  // G9: expert announced by the server's next_speaker broadcast — the Expert
+  // Panel shows an "up next" treatment on their row until their stream starts
+  // (typing state takes over) or the round/session resets.
+  const [upNextExpertId, setUpNextExpertId] = useState<number | null>(null);
 
   // WebSocket connection for real-time updates
   const { socket, status: socketStatus, reconnectAttempts } = useWebSocket();
@@ -523,6 +540,7 @@ export default function HomePage() {
     setActiveConversation(conversationId);
     setStreamingMessages(new Map());
     setTypingExpertIds(new Set());
+    setUpNextExpertId(null);
     setInteractionMode("idle");
     setIsProcessing(false);
     setIsSteering(false);
@@ -571,6 +589,7 @@ export default function HomePage() {
 
     setStreamingMessages(new Map());
     setTypingExpertIds(new Set());
+    setUpNextExpertId(null);
     setIsProcessing(false);
     setInteractionMode("idle");
     setIsSteering(false);
@@ -615,11 +634,11 @@ export default function HomePage() {
     const handleWebSocketMessage = (event: MessageEvent) => {
       try {
         const parsedData = JSON.parse(event.data);
-        console.log("WebSocket received:", parsedData);
+        debugLog("WebSocket received:", parsedData);
 
         // Check if the message is for the active conversation
         if (parsedData.conversationId !== activeConversation) {
-            console.log("WS message ignored (wrong conversation)");
+            debugLog("WS message ignored (wrong conversation)");
             return;
         }
 
@@ -665,9 +684,9 @@ export default function HomePage() {
             break;
           
           case "state_update":
-            console.log("WebSocket: Received state_update signal", parsedData);
+            debugLog("WebSocket: Received state_update signal", parsedData);
             if (parsedData.mode) {
-              console.log(`[UI State] Setting interactionMode to: ${parsedData.mode}`);
+              debugLog(`[UI State] Setting interactionMode to: ${parsedData.mode}`);
               setInteractionMode(parsedData.mode as InteractionMode);
               // Set isProcessing to true when entering processing_sequential or autonomous mode
               setIsProcessing(parsedData.mode === "processing_sequential" || parsedData.mode === "autonomous");
@@ -681,10 +700,11 @@ export default function HomePage() {
               if (parsedData.mode === "idle") {
                 setStreamingMessages(new Map());
                 setTypingExpertIds(new Set());
+                setUpNextExpertId(null);
               }
             }
             if (typeof parsedData.isAutonomousEnabled === 'boolean') {
-              console.log(`[UI State] Setting isAutonomousEnabled to: ${parsedData.isAutonomousEnabled}`);
+              debugLog(`[UI State] Setting isAutonomousEnabled to: ${parsedData.isAutonomousEnabled}`);
               setIsAutonomousEnabled(parsedData.isAutonomousEnabled);
             }
             break;
@@ -692,7 +712,7 @@ export default function HomePage() {
           case "steering":
             // The server accepted a mid-sequence message; it will restart the
             // round on it once the current expert finishes.
-            console.log("WebSocket: Steering acknowledged");
+            debugLog("WebSocket: Steering acknowledged");
             setIsSteering(true);
             break;
 
@@ -704,7 +724,10 @@ export default function HomePage() {
 
           // --- Streaming message handlers ---
           case "expert_stream_start":
-            console.log(`[Stream] Expert ${parsedData.expertName} started typing`);
+            debugLog(`[Stream] Expert ${parsedData.expertName} started typing`);
+            // G9: the announced expert is now typing, so the "up next"
+            // preview yields to the existing typing indicator.
+            setUpNextExpertId(null);
             setTypingExpertIds(prev => new Set(prev).add(parsedData.expertId));
             setStreamingMessages(prev => {
               const next = new Map(prev);
@@ -732,7 +755,7 @@ export default function HomePage() {
             break;
 
           case "expert_stream_done":
-            console.log(`[Stream] Expert ${parsedData.expertId} done`);
+            debugLog(`[Stream] Expert ${parsedData.expertId} done`);
             setTypingExpertIds(prev => {
               const next = new Set(prev);
               next.delete(parsedData.expertId);
@@ -755,7 +778,7 @@ export default function HomePage() {
             break;
 
           case "insights":
-             console.log("WebSocket: Received insights signal");
+             debugLog("WebSocket: Received insights signal");
              queryClient.invalidateQueries({ queryKey: [`/api/protected/conversations/${activeConversation}/insights`] });
              break;
 
@@ -770,15 +793,29 @@ export default function HomePage() {
             });
             setStreamingMessages(new Map());
             setTypingExpertIds(new Set());
+            setUpNextExpertId(null);
             setIsProcessing(false);
             setInteractionMode("idle");
             setIsSteering(false);
             setIsConcluding(false);
             break;
 
+          // G8: the Moderator's auxiliary call failed and the server fell
+          // back (e.g. round-robin). Ephemeral toast only — never a chat
+          // message, and no pipeline state is touched.
+          case "notice":
+            toast({ description: parsedData.message });
+            break;
+
+          // G9: the next expert turn is announced before its stream starts —
+          // the Expert Panel previews it until expert_stream_start arrives.
+          case "next_speaker":
+            setUpNextExpertId(parsedData.expertId);
+            break;
+
           // Handle other types like connection confirmation, file updates etc. if needed
           case "connection":
-            console.log("WebSocket: Connection confirmed.");
+            debugLog("WebSocket: Connection confirmed.");
             break;
 
           case "subscribed":
@@ -797,7 +834,7 @@ export default function HomePage() {
             break;
 
           default:
-            console.log("WebSocket: Received unhandled message type:", parsedData.type);
+            debugLog("WebSocket: Received unhandled message type:", parsedData.type);
         }
       } catch (error) {
         console.error("Error processing WebSocket message:", error);
@@ -817,23 +854,23 @@ export default function HomePage() {
 
   // Handler specifically for Enabling Auto Mode
   const handleEnableAutonomous = () => {
-    console.log("[UI Click] Handle Enable Autonomous triggered.");
+    debugLog("[UI Click] Handle Enable Autonomous triggered.");
     if (activeConversation) {
-        console.log("[UI Click] Calling enableAutoMutation.mutate(undefined)");
-        enableAutoMutation.mutate(undefined); 
+        debugLog("[UI Click] Calling enableAutoMutation.mutate(undefined)");
+        enableAutoMutation.mutate(undefined);
     } else {
-         console.log("[UI Click] Enable Autonomous condition not met (no active conversation).");
+         debugLog("[UI Click] Enable Autonomous condition not met (no active conversation).");
     }
   };
 
   // Handler specifically for Disabling Auto Mode
   const handleDisableAutonomous = () => {
-    console.log("[UI Click] Handle Disable Autonomous triggered.");
+    debugLog("[UI Click] Handle Disable Autonomous triggered.");
     if (activeConversation) {
-        console.log("[UI Click] Calling disableAutoMutation.mutate()");
+        debugLog("[UI Click] Calling disableAutoMutation.mutate()");
         disableAutoMutation.mutate();
     } else {
-         console.log("[UI Click] Disable Autonomous condition not met (no active conversation).");
+         debugLog("[UI Click] Disable Autonomous condition not met (no active conversation).");
     }
   };
   
@@ -1056,6 +1093,7 @@ export default function HomePage() {
                         visualizations={[]}
                         streamingMessages={streamingMessages}
                         typingExpertIds={typingExpertIds}
+                        upNextExpertId={upNextExpertId}
                     />
                 ) : (
                     <div className="flex-1 flex items-center justify-center bg-gradient-to-br from-farm-powder/10 via-white to-farm-tan/10">

@@ -32,6 +32,10 @@ interface ChatInterfaceProps {
   visualizations: any[];
   streamingMessages?: Map<number, { content: string; expertName: string; expertRole: string }>;
   typingExpertIds?: Set<number>;
+  // G9: expert announced as the next turn — shown as an "up next" preview in
+  // the Expert Panel until their stream starts. Distinct from the mention
+  // pulse (whole-row ring) and the typing indicator (green ping dot).
+  upNextExpertId?: number | null;
 }
 
 // === G4 mention helpers (UI only — parsing/storage stays on the server) ===
@@ -176,6 +180,7 @@ export default function ChatInterface({
   visualizations,
   streamingMessages = new Map(),
   typingExpertIds = new Set(),
+  upNextExpertId = null,
 }: ChatInterfaceProps) {
   const queryClient = useQueryClient();
   const { toast } = useToast();
@@ -534,7 +539,7 @@ export default function ChatInterface({
                   >
                     <div className="flex items-start gap-2">
                       <div className="relative">
-                        <Avatar className="h-8 w-8 ring-2 ring-farm-green/20 flex-shrink-0 group-hover:ring-farm-blue/40 transition-all">
+                        <Avatar className={`h-8 w-8 ring-2 flex-shrink-0 group-hover:ring-farm-blue/40 transition-all ${upNextExpertId === expert.id ? `animate-pulse ${getExpertRingColor(expert.id)}` : "ring-farm-green/20"}`}>
                           <AvatarImage src={expert.avatarUrl || ""} alt={expert.name} />
                           <AvatarFallback className="bg-farm-green text-white text-xs font-semibold">
                             {expert.name.charAt(0)}
@@ -552,6 +557,14 @@ export default function ChatInterface({
                           {expert.name}
                         </p>
                         <p className="text-xs text-neutral-600 truncate">{expert.role}</p>
+                        {/* G9: this expert was announced as the next turn — chip
+                            plus the avatar shimmer above, distinct from the
+                            mention pulse (row ring) and typing (green dot). */}
+                        {upNextExpertId === expert.id && (
+                          <span className="mt-1 inline-flex items-center rounded-full border border-farm-yellow/60 bg-farm-yellow/20 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide leading-none text-yellow-800">
+                            Up next
+                          </span>
+                        )}
                       </div>
                       <svg className="w-4 h-4 text-neutral-400 group-hover:text-farm-blue transition-colors flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
@@ -573,7 +586,8 @@ export default function ChatInterface({
                   className={`flex justify-center hover:bg-farm-powder/30 rounded-lg p-1 transition-colors w-full ${isExpertMentioned(expert) ? `animate-pulse ring-2 ${getExpertRingColor(expert.id)}` : ""}`}
                   title={`${expert.name} - ${expert.role}\nClick to edit settings`}
                 >
-                  <Avatar className="h-8 w-8 ring-2 ring-farm-green/20 hover:ring-farm-blue/40 transition-all">
+                  {/* G9: collapsed panel shows only the up-next avatar shimmer */}
+                  <Avatar className={`h-8 w-8 ring-2 hover:ring-farm-blue/40 transition-all ${upNextExpertId === expert.id ? `animate-pulse ${getExpertRingColor(expert.id)}` : "ring-farm-green/20"}`}>
                     <AvatarImage src={expert.avatarUrl || ""} alt={expert.name} />
                     <AvatarFallback className="bg-farm-green text-white text-xs font-semibold">
                       {expert.name.charAt(0)}
