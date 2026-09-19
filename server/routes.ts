@@ -355,6 +355,40 @@ export async function registerRoutes(app: Express): Promise<Server> {
                     isAutonomousEnabled: state.isAutonomousEnabled,
                     maxAutonomousTurns: state.maxAutonomousTurns
                   }));
+                } else {
+                  // G7: no live in-memory state — the snapshot stored on the
+                  // row (already loaded for the ownership check) is the only
+                  // remaining truth. A processing_*/autonomous snapshot is a
+                  // dead turn chain from before a restart: correct the badge
+                  // to idle instead of letting the client assume nothing.
+                  // Paused is real recoverable state: show the Paused badge —
+                  // the next message's cold-start path restores it for real.
+                  // Storage is intentionally not mutated here; the next
+                  // message's cold-start path owns snapshot corrections.
+                  const snapshot = conversation.orchestratorState;
+                  if (snapshot && (snapshot.mode === "processing_sequential" || snapshot.mode === "autonomous")) {
+                    ws.send(JSON.stringify({
+                      type: "state_update",
+                      conversationId,
+                      mode: "idle",
+                      isAutonomousEnabled: true,
+                      // maxAutonomousTurns is not part of the snapshot and
+                      // experts are not loaded on this path (no second
+                      // storage call), so 0 = "unknown until the next round
+                      // initializes". The client does not consume this field
+                      // and the real value (experts.length * 2) arrives with
+                      // the initialize broadcast on the next message.
+                      maxAutonomousTurns: 0
+                    }));
+                  } else if (snapshot && snapshot.mode === "paused") {
+                    ws.send(JSON.stringify({
+                      type: "state_update",
+                      conversationId,
+                      mode: "paused",
+                      isAutonomousEnabled: true,
+                      maxAutonomousTurns: 0
+                    }));
+                  }
                 }
               } else {
                 ws.send(JSON.stringify({ type: "subscribe_denied", conversationId }));

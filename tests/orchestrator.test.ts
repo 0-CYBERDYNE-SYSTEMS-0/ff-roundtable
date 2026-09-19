@@ -21,6 +21,10 @@ const mockGetConversationMessages = vi.hoisted(() => vi.fn());
 const mockGetConversationExperts = vi.hoisted(() => vi.fn());
 const mockGetConversationFiles = vi.hoisted(() => vi.fn());
 const mockCreateMessage = vi.hoisted(() => vi.fn());
+// G7: the orchestrator persists snapshots through these; default no-ops here,
+// with dedicated coverage in tests/orchestrator-recovery.test.ts.
+const mockGetConversation = vi.hoisted(() => vi.fn());
+const mockUpdateConversation = vi.hoisted(() => vi.fn());
 
 const mockGetExpertResponseStream = vi.hoisted(() => vi.fn());
 const mockGenerateInsights = vi.hoisted(() => vi.fn());
@@ -29,6 +33,8 @@ const mockGenerateClosingSynthesis = vi.hoisted(() => vi.fn());
 
 vi.mock("../server/storage", () => ({
   storage: {
+    getConversation: mockGetConversation,
+    updateConversation: mockUpdateConversation,
     getConversationMessages: mockGetConversationMessages,
     getConversationExperts: mockGetConversationExperts,
     getConversationFiles: mockGetConversationFiles,
@@ -42,6 +48,11 @@ vi.mock("../server/ai", () => ({
   getModeratorNextSpeakerSuggestion: mockGetModeratorNextSpeakerSuggestion,
   generateClosingSynthesis: mockGenerateClosingSynthesis,
 }));
+
+// G7 snapshot persistence defaults: no stored snapshot, writes succeed.
+// clearAllMocks() clears calls only, so these survive every test.
+mockGetConversation.mockResolvedValue(undefined);
+mockUpdateConversation.mockResolvedValue(undefined);
 
 import {
   InteractionOrchestrator,

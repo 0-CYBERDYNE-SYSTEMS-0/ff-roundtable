@@ -32,7 +32,9 @@ export interface IStorage {
   getUserConversations(userId: number): Promise<Conversation[]>;
   // Partial update (G6): only provided keys change. `charter: null` clears
   // the charter; an omitted charter key leaves it untouched.
-  updateConversation(id: number, updates: Partial<Pick<Conversation, "title" | "charter">>): Promise<Conversation | undefined>;
+  // G7: `orchestratorState` joins the allowlist so the orchestrator can
+  // persist its survivable snapshot at turn boundaries.
+  updateConversation(id: number, updates: Partial<Pick<Conversation, "title" | "charter" | "orchestratorState">>): Promise<Conversation | undefined>;
   
   // Expert operations
   createExpert(expert: InsertExpert): Promise<Expert>;
@@ -225,11 +227,16 @@ export class MemStorage implements IStorage {
   async createConversation(insertConversation: InsertConversation): Promise<Conversation> {
     const id = this.conversationId++;
     const now = new Date();
+    // G7: the orchestrator snapshot is server-owned — a fresh conversation
+    // always starts stateless, whatever the (loosely jsonb-typed) insert
+    // payload carries.
+    const { orchestratorState: _ignoredSnapshot, ...rest } = insertConversation;
     const conversation: Conversation = {
-      ...insertConversation,
+      ...rest,
       id,
       title: insertConversation.title ?? "New Conversation",
       charter: insertConversation.charter ?? null,
+      orchestratorState: null,
       createdAt: now,
     };
     this.conversations.set(id, conversation);
@@ -246,7 +253,7 @@ export class MemStorage implements IStorage {
       .sort((a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0));
   }
 
-  async updateConversation(id: number, updates: Partial<Pick<Conversation, "title" | "charter">>): Promise<Conversation | undefined> {
+  async updateConversation(id: number, updates: Partial<Pick<Conversation, "title" | "charter" | "orchestratorState">>): Promise<Conversation | undefined> {
     const conversation = this.conversations.get(id);
     if (!conversation) return undefined;
 
@@ -256,6 +263,7 @@ export class MemStorage implements IStorage {
       ...conversation,
       ...(updates.title !== undefined && { title: updates.title }),
       ...(updates.charter !== undefined && { charter: updates.charter }),
+      ...(updates.orchestratorState !== undefined && { orchestratorState: updates.orchestratorState }),
     };
 
     this.conversations.set(id, updated);
@@ -535,7 +543,11 @@ export class PostgresStorage implements IStorage {
   // ── Conversation operations ────────────────────────────────────────────────
 
   async createConversation(insertConversation: InsertConversation): Promise<Conversation> {
-    const result = await this.db.insert(conversations).values(insertConversation).returning();
+    // G7: the orchestrator snapshot is server-owned — a fresh conversation
+    // always starts stateless, whatever the (loosely jsonb-typed) insert
+    // payload carries.
+    const { orchestratorState: _ignoredSnapshot, ...values } = insertConversation;
+    const result = await this.db.insert(conversations).values(values).returning();
     return result[0];
   }
 
@@ -552,13 +564,14 @@ export class PostgresStorage implements IStorage {
       .orderBy(desc(conversations.createdAt));
   }
 
-  async updateConversation(id: number, updates: Partial<Pick<Conversation, "title" | "charter">>): Promise<Conversation | undefined> {
-    // Only allow updating title and charter. Explicit undefined-checks (not a
-    // plain spread) so an omitted key stays untouched while `charter: null`
-    // clears the column.
-    const allowed: Partial<Pick<Conversation, "title" | "charter">> = {
+  async updateConversation(id: number, updates: Partial<Pick<Conversation, "title" | "charter" | "orchestratorState">>): Promise<Conversation | undefined> {
+    // Only allow updating title, charter and the G7 orchestrator snapshot.
+    // Explicit undefined-checks (not a plain spread) so an omitted key stays
+    // untouched while `charter: null` clears the column.
+    const allowed: Partial<Pick<Conversation, "title" | "charter" | "orchestratorState">> = {
       ...(updates.title !== undefined && { title: updates.title }),
       ...(updates.charter !== undefined && { charter: updates.charter }),
+      ...(updates.orchestratorState !== undefined && { orchestratorState: updates.orchestratorState }),
     };
 
     const result = await this.db

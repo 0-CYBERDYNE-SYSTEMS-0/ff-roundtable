@@ -15,6 +15,17 @@ export const users = pgTable("users", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
+// G7: minimal orchestrator snapshot persisted per turn boundary so a server
+// restart can recover honest state — dead loops (processing_*/autonomous)
+// recover to idle; paused restores paused. Never written per token.
+export interface OrchestratorSnapshot {
+  mode: "idle" | "processing_sequential" | "paused" | "autonomous";
+  currentExpertIndex: number;
+  totalAutonomousTurnsTaken: number;
+  wasInterrupted: boolean;
+  pausedFromMode: string | null;
+}
+
 export const conversations = pgTable("conversations", {
   id: serial("id").primaryKey(),
   userId: integer("user_id").notNull().references(() => users.id),
@@ -24,6 +35,8 @@ export const conversations = pgTable("conversations", {
   // and synthesis prompt. Nullable: optional. Hard-capped at 2,000 chars
   // on write (API-level).
   charter: text("charter"),
+  // G7: last known orchestrator state, written at turn boundaries only.
+  orchestratorState: jsonb("orchestrator_state").$type<OrchestratorSnapshot>(),
   createdAt: timestamp("created_at").defaultNow(),
 });
 

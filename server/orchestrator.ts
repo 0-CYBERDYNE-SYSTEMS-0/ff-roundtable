@@ -1,7 +1,7 @@
 import { storage } from "./storage";
 import { getExpertResponse, getExpertResponseStream, generateInsights, getModeratorNextSpeakerSuggestion, generateClosingSynthesis } from "./ai";
 import { shouldStopForRedundancy, REDUNDANCY_STOP_SIMILARITY_THRESHOLD } from "./text-similarity";
-import type { InsertMessage, Expert, Message, File } from "@shared/schema";
+import type { InsertMessage, Expert, Message, File, OrchestratorSnapshot } from "@shared/schema";
 
 // Verbose per-turn tracing is opt-in (ORCH_DEBUG=1). The default flood slows
 // test teardown and leaks conversation content into production logs.
@@ -61,9 +61,62 @@ interface ConversationState {
     // We might add turn limits, autonomous rounds etc. later
 }
 
-// Placeholder - In-memory state management 
+// Placeholder - In-memory state management
 const conversationStates: Map<number, ConversationState> = new Map();
 const STALE_PROCESSING_MS = 5 * 60 * 1000;
+
+// ─── G7: Survivable orchestrator state ───────────────────────────────────────
+// A minimal snapshot is persisted to the conversation row at TURN BOUNDARIES
+// ONLY (never per token, never on turnInFlight/turnChainScheduled flips) so a
+// server restart mid-round can reconstruct honest state: dead loops
+// (processing_sequential/autonomous) recover to idle; paused restores paused.
+
+function buildSnapshot(state: ConversationState): OrchestratorSnapshot {
+    return {
+        mode: state.mode,
+        currentExpertIndex: state.currentExpertIndex,
+        totalAutonomousTurnsTaken: state.totalAutonomousTurnsTaken,
+        wasInterrupted: state.wasInterrupted,
+        pausedFromMode: state.pausedFromMode,
+    };
+}
+
+function snapshotsDiffer(a: OrchestratorSnapshot, b: OrchestratorSnapshot): boolean {
+    return a.mode !== b.mode ||
+        a.currentExpertIndex !== b.currentExpertIndex ||
+        a.totalAutonomousTurnsTaken !== b.totalAutonomousTurnsTaken ||
+        a.wasInterrupted !== b.wasInterrupted ||
+        a.pausedFromMode !== b.pausedFromMode;
+}
+
+// One serialized write chain per conversation: updateConversationState must
+// stay synchronous, so the write is fired WITHOUT awaiting and chained on the
+// previous write to preserve turn-boundary order. A rejected write is caught
+// (and the caught promise is what the chain stores), so a storage failure is
+// logged once and never throws into the turn loop nor poisons later writes.
+const snapshotWriteChains: Map<number, Promise<void>> = new Map();
+
+function persistSnapshot(conversationId: number, snapshot: OrchestratorSnapshot): void {
+    // Partial test doubles may omit updateConversation; the IStorage contract
+    // guarantees it in production, so absence is a silent skip, not an error.
+    if (typeof storage.updateConversation !== "function") {
+        debugLog(`Orchestrator: storage.updateConversation unavailable — snapshot for ${conversationId} not persisted.`);
+        return;
+    }
+    try {
+        const previous = snapshotWriteChains.get(conversationId) ?? Promise.resolve();
+        const write = previous
+            .then(() => storage.updateConversation(conversationId, { orchestratorState: snapshot }))
+            .then(() => undefined);
+        snapshotWriteChains.set(conversationId, write);
+        write.catch((error) => {
+            console.error(`Orchestrator: Failed to persist orchestrator snapshot for conversation ${conversationId}:`, error);
+        });
+    } catch (error) {
+        // Synchronous enqueue failure — same contract: never break the loop.
+        console.error(`Orchestrator: Failed to enqueue orchestrator snapshot for conversation ${conversationId}:`, error);
+    }
+}
 
 function isUsableConversationState(state: ConversationState | undefined): state is ConversationState {
     return Boolean(
@@ -107,6 +160,18 @@ function updateConversationState(
     const previousState = { ...existingState }; // Shallow copy for comparison
     const newState = { ...existingState, ...updates, lastProgressAt: Date.now() };
     conversationStates.set(conversationId, newState);
+
+    // G7: persist the snapshot at this turn boundary — but ONLY when one of
+    // the persisted fields actually changed. No-op updates, lastProgressAt
+    // ticks, internal-only flips (turnInFlight/turnChainScheduled) and
+    // in-memory-only changes (sequenceExpertContents/mentionPairStreak/
+    // roundExperts) never write.
+    const previousSnapshot = buildSnapshot(previousState);
+    const nextSnapshot = buildSnapshot(newState);
+    if (snapshotsDiffer(previousSnapshot, nextSnapshot)) {
+        persistSnapshot(conversationId, nextSnapshot);
+    }
+
     debugLog(`State updated for ${conversationId}: mode=${newState.mode}, expertIndex=${newState.currentExpertIndex}, autoTurns=${newState.totalAutonomousTurnsTaken}/${newState.maxAutonomousTurns}, interrupted=${newState.wasInterrupted}`);
 
     // Broadcast relevant state changes
@@ -148,9 +213,14 @@ function initializeConversationState(conversationId: number, experts: Expert[], 
     };
     conversationStates.set(conversationId, initialState);
     debugLog(`Initialized state for ${conversationId}, Auto ON (max ${defaultMaxAutonomousTurns} turns)`);
+    // G7: the fresh idle state is this server's recovery truth for the
+    // conversation — persist it immediately so a snapshot left by a previous
+    // process (paused, or a dead processing loop) is corrected the moment we
+    // take over. Every cold start goes through here.
+    persistSnapshot(conversationId, buildSnapshot(initialState));
     // Broadcast initial state including autonomous info
-    broadcastFn(conversationId, { 
-        type: "state_update", 
+    broadcastFn(conversationId, {
+        type: "state_update",
         mode: "idle",
         isAutonomousEnabled: initialState.isAutonomousEnabled,
         maxAutonomousTurns: initialState.maxAutonomousTurns
@@ -763,9 +833,40 @@ export async function processMessageTurnBased(
             if (state) {
                 console.warn(`Recovering stale or partial orchestrator state for conversation ${conversationId}.`);
             }
+            // G7 cold-start reconstruction: with no in-memory state, the
+            // snapshot persisted by the previous process tells us what died.
+            // processing_sequential/autonomous is a dead turn chain — it
+            // cannot be revived, so recover honestly to idle (the
+            // initialization below persists the corrected snapshot). paused
+            // is real, recoverable state: initialize, then restore paused
+            // through updateConversationState so the paused state_update
+            // reaches the client badge. idle/null/absent snapshots keep the
+            // previous behavior exactly. A stale-but-present in-memory state
+            // keeps its existing recovery semantics regardless of the row.
+            let storedSnapshot: OrchestratorSnapshot | null = null;
+            if (!state && typeof storage.getConversation === "function") {
+                try {
+                    const conversationRow = await storage.getConversation(conversationId);
+                    storedSnapshot = conversationRow?.orchestratorState ?? null;
+                } catch (error) {
+                    console.error(`Orchestrator: Could not read stored orchestrator snapshot for conversation ${conversationId}:`, error);
+                }
+                if (storedSnapshot && (storedSnapshot.mode === "processing_sequential" || storedSnapshot.mode === "autonomous")) {
+                    console.warn(`Orchestrator: conversation ${conversationId} snapshot says "${storedSnapshot.mode}" from before a restart — the turn chain died with the old process. Recovering to idle.`);
+                }
+            }
             // Initialize if first message for this server instance, or recover
             // from a state left behind by a crashed loop.
             state = initializeConversationState(conversationId, experts, userMessage, broadcastFn);
+            if (storedSnapshot?.mode === "paused") {
+                updateConversationState(conversationId, {
+                    mode: "paused",
+                    pausedFromMode: storedSnapshot.pausedFromMode === "processing_sequential" || storedSnapshot.pausedFromMode === "autonomous"
+                        ? storedSnapshot.pausedFromMode
+                        : null
+                });
+                state = getConversationState(conversationId)!;
+            }
         } else {
             // State exists, check for interruption
             const isBusy = state.mode === "processing_sequential" || state.mode === "autonomous";
@@ -773,7 +874,7 @@ export async function processMessageTurnBased(
                  debugLog(`User message arrived during active sequence (mode: ${state.mode}). Interrupting.`);
                   // Set interrupted flag and update context. The running loop will
                   // finish its current expert and immediately restart this message.
-                 updateConversationState(conversationId, { 
+                 updateConversationState(conversationId, {
                      wasInterrupted: true,
                      activeExperts: experts, // Update experts list potentially
                      lastUserMessage: userMessage // Store newest user message
@@ -784,41 +885,43 @@ export async function processMessageTurnBased(
                  return;
             } else {
                 // If not busy (idle or paused), just update state normally
-                 updateConversationState(conversationId, { 
-                    activeExperts: experts, 
-                    lastUserMessage: userMessage, 
+                 updateConversationState(conversationId, {
+                    activeExperts: experts,
+                    lastUserMessage: userMessage,
                     wasInterrupted: false // Ensure flag is clear if we were idle/paused
                 });
                 state = getConversationState(conversationId)!; // Re-fetch state
-
-                // A message while paused is an implicit resume-and-restart: a
-                // parked conversation comes back to life the moment the farmer
-                // speaks. The user message itself was already persisted by
-                // routes.ts before this call.
-                if (state.mode === "paused") {
-                    if (state.turnInFlight) {
-                        // A turn is still streaming. Flag the interrupt; the
-                        // running loop's final check resets to idle and
-                        // re-processes this message once the turn finishes.
-                        updateConversationState(conversationId, { wasInterrupted: true });
-                        debugLog(`Message arrived while paused mid-turn for ${conversationId}. Interrupting after the current expert.`);
-                    } else {
-                        // Parked between turns: reset and restart immediately
-                        // on the new message.
-                        updateConversationState(conversationId, {
-                            mode: "idle",
-                            wasInterrupted: false,
-                            currentExpertIndex: -1,
-                            totalAutonomousTurnsTaken: 0,
-                            pausedFromMode: null,
-                            lastUserMessage: null
-                        });
-                        debugLog(`Message arrived while paused for ${conversationId}. Restarting sequence on the new message.`);
-                        scheduleInterruptedMessage(state, userMessage);
-                    }
-                    return; // Never fall through to the idle start below.
-                }
             }
+        }
+
+        // A message while paused is an implicit resume-and-restart: a parked
+        // conversation comes back to life the moment the farmer speaks. The
+        // user message itself was already persisted by routes.ts before this
+        // call. Shared by live paused states and paused states restored from
+        // the G7 snapshot after a restart (a fresh state has turnInFlight
+        // false, so a restored pause always takes the restart path below).
+        if (state.mode === "paused") {
+            if (state.turnInFlight) {
+                // A turn is still streaming. Flag the interrupt; the
+                // running loop's final check resets to idle and
+                // re-processes this message once the turn finishes.
+                updateConversationState(conversationId, { wasInterrupted: true });
+                debugLog(`Message arrived while paused mid-turn for ${conversationId}. Interrupting after the current expert.`);
+            } else {
+                // Parked between turns: reset and restart immediately
+                // on the new message.
+                updateConversationState(conversationId, {
+                    mode: "idle",
+                    wasInterrupted: false,
+                    currentExpertIndex: -1,
+                    totalAutonomousTurnsTaken: 0,
+                    pausedFromMode: null,
+                    lastUserMessage: null
+                });
+                debugLog(`Message arrived while paused for ${conversationId}. Restarting sequence on the new message.`);
+                scheduleInterruptedMessage(state, userMessage);
+            }
+            return; // Never fall through to the idle start below.
         }
 
         // Only start processing if the orchestrator is currently idle.
