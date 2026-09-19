@@ -50,6 +50,7 @@ vi.mock("../server/ai", () => ({
   getExpertResponseStream: mockGetExpertResponseStream,
   generateInsights: mockGenerateInsights,
   getModeratorNextSpeakerSuggestion: mockGetModeratorNextSpeakerSuggestion,
+  generateClosingSynthesis: vi.fn().mockResolvedValue(undefined),
 }));
 
 import { registerRoutes } from "../server/routes";
@@ -387,6 +388,165 @@ describe("WebSocket scoping (G3)", () => {
       }
     } finally {
       (storage.sessionStore as any).get = originalGet;
+    }
+  });
+
+  // ─────────────────────────────────────────────────────────────────
+  // Snapshot-only replay + restart-paused resume (POST /resume)
+  // ─────────────────────────────────────────────────────────────────
+
+  it("replays a dead-loop snapshot as idle WITHOUT synthetic autonomous fields", async () => {
+    // Row says autonomous (a turn chain that died with a previous process)
+    // and no live in-memory state exists: the subscribe-time correction must
+    // flip the badge to idle but must NOT invent autonomous fields — a
+    // hardcoded isAutonomousEnabled:true flipped the client's Enabled badge
+    // on reconnect even when autonomous was disabled.
+    const convo = await createConversation(baseUrl, cookieA, "Dead loop before restart");
+    await addExpert(baseUrl, cookieA, convo.id);
+    await storage.updateConversation(convo.id, {
+      orchestratorState: {
+        mode: "autonomous",
+        currentExpertIndex: 0,
+        totalAutonomousTurnsTaken: 1,
+        wasInterrupted: false,
+        pausedFromMode: null,
+      },
+    });
+    expect(getConversationState(convo.id)).toBeUndefined();
+
+    const client = await connect(wsUrl, cookieA);
+    try {
+      await nextMessage(client, (m) => m.type === "connection");
+      client.ws.send(JSON.stringify({ type: "subscribe", conversationId: convo.id }));
+      const replay = await nextMessage(
+        client,
+        (m) => m.type === "state_update" && m.conversationId === convo.id,
+      );
+      expect(replay.mode).toBe("idle");
+      expect(replay).not.toHaveProperty("isAutonomousEnabled");
+      expect(replay).not.toHaveProperty("maxAutonomousTurns");
+    } finally {
+      client.ws.close(1000, "test done");
+    }
+  });
+
+  it("resumes a paused snapshot after a restart (no live state): POST /resume rebuilds and streams", async () => {
+    // The server-restart-while-parked shape: the row's snapshot says paused
+    // but no live orchestrator state exists. POST /resume used to 404 while
+    // the client showed a Resume button.
+    const convo = await createConversation(baseUrl, cookieA, "Paused before restart");
+    await addExpert(baseUrl, cookieA, convo.id);
+    await storage.updateConversation(convo.id, {
+      orchestratorState: {
+        mode: "paused",
+        currentExpertIndex: 0,
+        totalAutonomousTurnsTaken: 0,
+        wasInterrupted: false,
+        pausedFromMode: "processing_sequential",
+      },
+    });
+    expect(getConversationState(convo.id)).toBeUndefined();
+
+    const client = await connect(wsUrl, cookieA);
+    try {
+      await nextMessage(client, (m) => m.type === "connection");
+      client.ws.send(JSON.stringify({ type: "subscribe", conversationId: convo.id }));
+
+      // Subscribe-time replay: the Paused badge, again without synthetic
+      // autonomous fields.
+      const replay = await nextMessage(
+        client,
+        (m) => m.type === "state_update" && m.conversationId === convo.id,
+      );
+      expect(replay.mode).toBe("paused");
+      expect(replay).not.toHaveProperty("isAutonomousEnabled");
+      expect(replay).not.toHaveProperty("maxAutonomousTurns");
+
+      const res = await api(baseUrl, "POST", `/api/protected/conversations/${convo.id}/resume`, {
+        cookie: cookieA,
+      });
+      expect(res.status).toBe(200);
+
+      // The sequence leaves paused (state_update) and streams turns to its
+      // natural idle end: the rebuilt paused state is genuinely resumable.
+      await nextMessage(
+        client,
+        (m) => m.type === "state_update" && m.conversationId === convo.id && m.mode === "processing_sequential",
+      );
+      await nextMessage(client, (m) => m.type === "expert_stream_start" && m.conversationId === convo.id);
+      await waitForConversationMode(convo.id, "idle");
+      await nextMessage(
+        client,
+        (m) => m.type === "state_update" && m.conversationId === convo.id && m.mode === "idle",
+      );
+    } finally {
+      client.ws.close(1000, "test done");
+    }
+  });
+
+  it("keeps POST /resume 404 when no live state exists and the snapshot is not paused", async () => {
+    const convo = await createConversation(baseUrl, cookieA, "Idle snapshot, no live state");
+    await addExpert(baseUrl, cookieA, convo.id);
+    await storage.updateConversation(convo.id, {
+      orchestratorState: {
+        mode: "idle",
+        currentExpertIndex: -1,
+        totalAutonomousTurnsTaken: 0,
+        wasInterrupted: false,
+        pausedFromMode: null,
+      },
+    });
+
+    const res = await api(baseUrl, "POST", `/api/protected/conversations/${convo.id}/resume`, {
+      cookie: cookieA,
+    });
+    expect(res.status).toBe(404);
+  });
+
+  // ─────────────────────────────────────────────────────────────────
+  // Scoped delivery of notice / next_speaker / concluding frames
+  // ─────────────────────────────────────────────────────────────────
+
+  it("delivers notice, next_speaker, and concluding only to subscribed sockets", async () => {
+    const convo = await createConversation(baseUrl, cookieA, "Moderated scoping round");
+    await addExpert(baseUrl, cookieA, convo.id);
+    const modRes = await api(baseUrl, "POST", `/api/protected/conversations/${convo.id}/experts`, {
+      cookie: cookieA,
+      body: { name: "Chair", role: "Moderator", model: "test/model:free" },
+    });
+    expect(modRes.status).toBe(201);
+
+    const clientSub = await connect(wsUrl, cookieA);
+    try {
+      await nextMessage(clientSub, (m) => m.type === "connection");
+      clientSub.ws.send(JSON.stringify({ type: "subscribe", conversationId: convo.id }));
+      await nextMessage(clientSub, (m) => m.type === "subscribed" && m.conversationId === convo.id);
+
+      // Consultation #1 fails (null → G8 degradation notice + round-robin);
+      // consultation #2 calls the round (concluding + synthesis turn).
+      mockGetModeratorNextSpeakerSuggestion.mockResolvedValueOnce(null);
+      mockGetModeratorNextSpeakerSuggestion.mockResolvedValueOnce("Conclude");
+
+      const res = await api(baseUrl, "POST", `/api/protected/conversations/${convo.id}/messages`, {
+        cookie: cookieA,
+        body: { content: "Convene the council" },
+      });
+      expect(res.status).toBe(201);
+
+      const notice = await nextMessage(clientSub, (m) => m.type === "notice" && m.conversationId === convo.id);
+      expect(notice.message).toBe("Moderator unavailable — speaking in round-robin.");
+      await nextMessage(clientSub, (m) => m.type === "next_speaker" && m.conversationId === convo.id);
+      await nextMessage(clientSub, (m) => m.type === "concluding" && m.conversationId === convo.id);
+      await waitForConversationMode(convo.id, "idle");
+
+      // clientA is subscribed only to convoA1: none of convo's frames —
+      // notice, next_speaker, concluding included — may reach it.
+      await waitFor(200); // grace for any in-flight (illegal) deliveries
+      const leaked = clientA.received.filter((m) => m.conversationId === convo.id);
+      expect(leaked).toEqual([]);
+    } finally {
+      mockGetModeratorNextSpeakerSuggestion.mockResolvedValue(null);
+      clientSub.ws.close(1000, "test done");
     }
   });
 });

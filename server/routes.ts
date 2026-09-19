@@ -4,7 +4,7 @@ import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { setupAuth } from "./auth";
 import { callOpenRouterAPI, callPerplexityAPI, generateSystemPrompt, getExpertResponse, generateInsights } from "./ai";
-import { processMessageTurnBased, InteractionOrchestrator, getConversationState } from "./orchestrator";
+import { processMessageTurnBased, InteractionOrchestrator, getConversationState, restorePausedFromSnapshot } from "./orchestrator";
 import { encryptApiKey, decryptApiKey, maskApiKey } from "./crypto";
 import multer from "multer";
 import path from "path";
@@ -365,28 +365,25 @@ export async function registerRoutes(app: Express): Promise<Server> {
                   // the next message's cold-start path restores it for real.
                   // Storage is intentionally not mutated here; the next
                   // message's cold-start path owns snapshot corrections.
+                  // isAutonomousEnabled/maxAutonomousTurns are intentionally
+                  // OMITTED: they are not part of the snapshot, and hardcoding
+                  // a value here would flip the client's Enabled/Disabled
+                  // badge on every reconnect (the client guards both fields
+                  // with a typeof check and keeps its current value when
+                  // they're absent). The real values arrive with the next
+                  // live state_update.
                   const snapshot = conversation.orchestratorState;
                   if (snapshot && (snapshot.mode === "processing_sequential" || snapshot.mode === "autonomous")) {
                     ws.send(JSON.stringify({
                       type: "state_update",
                       conversationId,
-                      mode: "idle",
-                      isAutonomousEnabled: true,
-                      // maxAutonomousTurns is not part of the snapshot and
-                      // experts are not loaded on this path (no second
-                      // storage call), so 0 = "unknown until the next round
-                      // initializes". The client does not consume this field
-                      // and the real value (experts.length * 2) arrives with
-                      // the initialize broadcast on the next message.
-                      maxAutonomousTurns: 0
+                      mode: "idle"
                     }));
                   } else if (snapshot && snapshot.mode === "paused") {
                     ws.send(JSON.stringify({
                       type: "state_update",
                       conversationId,
-                      mode: "paused",
-                      isAutonomousEnabled: true,
-                      maxAutonomousTurns: 0
+                      mode: "paused"
                     }));
                   }
                 }
@@ -1353,10 +1350,33 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.post("/api/protected/conversations/:id/resume", async (req, res) => {
     try {
-      const orchestrator = await getOrchestratorForRequest(req, res);
-      if (!orchestrator) return;
+      const conversationId = parseInt(req.params.id);
+      // Ownership gate first — the same checks getOrchestratorForRequest
+      // applies, but WITHOUT its missing-state 404: a paused snapshot on the
+      // row is recoverable below, and this endpoint must answer exactly once.
+      const conversation = await storage.getConversation(conversationId);
+      if (!conversation) {
+        res.status(404).json({ message: "Conversation state not found or not initialized." });
+        return;
+      }
+      if (conversation.userId !== req.user!.id) {
+        res.status(403).json({ message: "Forbidden" });
+        return;
+      }
 
-      orchestrator.resume();
+      if (!getConversationState(conversationId)) {
+        // No live in-memory state. A paused snapshot persisted on the row is
+        // real, recoverable state (the server restarted while the council was
+        // parked): rebuild the live paused state from it, then run the normal
+        // resume below. Anything else keeps the 404.
+        const restored = await restorePausedFromSnapshot(conversationId, broadcastToConversation);
+        if (!restored) {
+          res.status(404).json({ message: "Conversation state not found or not initialized." });
+          return;
+        }
+      }
+
+      new InteractionOrchestrator(conversationId).resume();
       res.status(200).json({ message: "Resume signal sent." });
       
     } catch (error: any) {

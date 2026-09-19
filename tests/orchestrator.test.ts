@@ -53,10 +53,15 @@ vi.mock("../server/ai", () => ({
 // clearAllMocks() clears calls only, so these survive every test.
 mockGetConversation.mockResolvedValue(undefined);
 mockUpdateConversation.mockResolvedValue(undefined);
+// The natural-end path calls generateInsights(...).catch(...); without a
+// resolved default the mock returns undefined and every natural end threw a
+// swallowed TypeError into stderr. Resolve cleanly instead.
+mockGenerateInsights.mockResolvedValue(undefined);
 
 import {
   InteractionOrchestrator,
   getConversationState,
+  isUsableConversationState,
   processMessageTurnBased,
 } from "../server/orchestrator";
 import type { Expert, Message } from "../shared/schema";
@@ -693,6 +698,46 @@ describe("Orchestrator", () => {
 
       state = getConversationState(conversationId);
       expect(state!.currentExpertIndex).toBe(-1);
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────
+  // G8 — isUsableConversationState guard (Invariant 9)
+  // ─────────────────────────────────────────────────────────────────
+
+  describe("G8 isUsableConversationState guard", () => {
+    // A state object that satisfies every field-level check.
+    function usableState(): Record<string, unknown> {
+      return {
+        conversationId: 1,
+        activeExperts: experts,
+        currentExpertIndex: 0,
+        lastUserMessage: null,
+        mode: "processing_sequential",
+        broadcastFn,
+        isAutonomousEnabled: true,
+        maxAutonomousTurns: 6,
+        totalAutonomousTurnsTaken: 0,
+        wasInterrupted: false,
+        pausedFromMode: null,
+        turnInFlight: false,
+        turnChainScheduled: false,
+        lastProgressAt: Date.now(),
+        sequenceExpertContents: [],
+        roundExperts: experts,
+        mentionPairStreak: null,
+        moderatorNoticeSent: false,
+      };
+    }
+
+    it("accepts a state with every field initialized", () => {
+      expect(isUsableConversationState(usableState() as any)).toBe(true);
+    });
+
+    it("rejects a state missing moderatorNoticeSent even when every other check passes", () => {
+      const partial = usableState();
+      delete partial.moderatorNoticeSent;
+      expect(isUsableConversationState(partial as any)).toBe(false);
     });
   });
 
@@ -1766,6 +1811,155 @@ describe("Orchestrator", () => {
       expect(synthesisMessages()).toHaveLength(2); // one per concluded round
       expect(turnNames()).toEqual(["Alice", "Bob", "Carol", "Matt", "Alice", "Bob", "Carol", "Matt"]);
       expect(assistantCount()).toBe(10); // 8 expert turns + 2 syntheses
+
+      await drainToIdle();
+      expect(getConversationState(conversationId)!.mode).toBe("idle");
+    });
+
+    it("does not double-conclude when pause+resume land mid-synthesis (single synthesis stream)", async () => {
+      const conversationId = nextConvId();
+      const { waitForTurns, releaseNextTurn, drainToIdle, turnNames, assistantCount, synthesisMessages, events, waitForEvent } =
+        setupGatedModeratorConversation(conversationId);
+      mockGetModeratorNextSpeakerSuggestion.mockResolvedValue("Conclude");
+
+      // Hold the synthesis mid-stream with the pause already landed, so the
+      // test can resume() while the closing turn is still in flight.
+      let releaseSynthesis: () => void = () => {};
+      const synthesisHeld = new Promise<void>((resolve) => { releaseSynthesis = resolve; });
+      mockSynthesisTurn(conversationId, async () => {
+        new InteractionOrchestrator(conversationId).pause();
+        await synthesisHeld;
+      });
+
+      const userMessage = createMockMessage(1, "Plan my week");
+      await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn);
+
+      for (let i = 1; i <= 4; i++) {
+        await waitForTurns(i);
+        await releaseNextTurn();
+      }
+
+      // The pause landed mid-synthesis...
+      await waitForEvent("concluding");
+      await waitForMode(conversationId, "paused");
+
+      // ...and resume() fires while the synthesis is still streaming. The
+      // resumed chain must bow out on the in-flight synthesis turn instead of
+      // re-running routing and concluding a second time.
+      new InteractionOrchestrator(conversationId).resume();
+
+      // Let the synthesis finish; the sequence must end exactly once.
+      releaseSynthesis();
+      await waitForMode(conversationId, "idle");
+
+      // Exactly one concluding signal, one synthesis stream, one stored
+      // synthesis row, and one insights run.
+      expect(events().filter((e) => e.type === "concluding")).toHaveLength(1);
+      expect(
+        mockGenerateClosingSynthesis.mock.calls.filter((c) => c[0] === conversationId),
+      ).toHaveLength(1);
+      expect(synthesisMessages()).toHaveLength(1);
+      expect(
+        mockGenerateInsights.mock.calls.filter((c) => c[0] === conversationId),
+      ).toHaveLength(1);
+
+      // The sequential round ran normally; no extra expert turn was billed
+      // by the resumed chain.
+      expect(turnNames()).toEqual(["Alice", "Bob", "Carol", "Matt"]);
+      expect(assistantCount()).toBe(5); // 4 expert turns + 1 synthesis
+
+      const state = getConversationState(conversationId)!;
+      expect(state.mode).toBe("idle");
+      expect(state.wasInterrupted).toBe(false);
+      expect(state.totalAutonomousTurnsTaken).toBe(0);
+
+      await drainToIdle();
+      expect(getConversationState(conversationId)!.mode).toBe("idle");
+    });
+
+    it("restarts a full unclobbered round when a message arrives during a pause landed mid-synthesis", async () => {
+      const conversationId = nextConvId();
+      const { waitForTurns, releaseNextTurn, drainToIdle, turnNames, assistantCount, synthesisMessages, events, waitForEvent } =
+        setupGatedModeratorConversation(conversationId);
+      mockGetModeratorNextSpeakerSuggestion.mockResolvedValue("Conclude");
+
+      // Hold the synthesis mid-stream with the pause landed, then deliver the
+      // user's steering message while the parked state still has the closing
+      // turn in flight.
+      let releaseSynthesis: () => void = () => {};
+      const synthesisHeld = new Promise<void>((resolve) => { releaseSynthesis = resolve; });
+      let restartFired = false;
+      mockSynthesisTurn(conversationId, async () => {
+        new InteractionOrchestrator(conversationId).pause();
+        if (restartFired) return;
+        restartFired = true;
+        await synthesisHeld;
+      });
+
+      const userMessage = createMockMessage(1, "Plan my week");
+      await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn);
+
+      for (let i = 1; i <= 4; i++) {
+        await waitForTurns(i);
+        await releaseNextTurn();
+      }
+
+      await waitForEvent("concluding");
+      await waitForMode(conversationId, "paused");
+      await processMessageTurnBased(
+        userId,
+        conversationId,
+        createMockMessage(2, "Wait — one more thing"),
+        broadcastFn,
+      );
+
+      // The in-flight synthesis blocks the immediate restart: the message is
+      // queued as an interrupt instead of racing the zombie conclude chain,
+      // and its context is preserved for the restart.
+      let state = getConversationState(conversationId)!;
+      expect(state.mode).toBe("paused");
+      expect(state.wasInterrupted).toBe(true);
+      expect(state.lastUserMessage!.content).toBe("Wait — one more thing");
+
+      // Autonomous off keeps the endpoint deterministic: the restarted round
+      // ends naturally at idle instead of extending into a second conclusion.
+      new InteractionOrchestrator(conversationId).disableAutonomous();
+
+      // The synthesis finishes; the zombie conclude chain must hand off to
+      // the queued message instead of clobbering it.
+      releaseSynthesis();
+
+      // The restarted sequential round runs the FULL roster on the steering
+      // message — the "sequential round is NEVER cut" invariant.
+      for (let i = 5; i <= 8; i++) {
+        await waitForTurns(i);
+        await releaseNextTurn();
+      }
+      await waitForMode(conversationId, "idle");
+
+      state = getConversationState(conversationId)!;
+      expect(state.mode).toBe("idle");
+      expect(state.wasInterrupted).toBe(false);
+      expect(state.lastUserMessage!.content).toBe("Wait — one more thing");
+
+      // Round 1 (concluded mid-synthesis) + the full restarted round.
+      expect(turnNames()).toEqual([
+        "Alice", "Bob", "Carol", "Matt",
+        "Alice", "Bob", "Carol", "Matt",
+      ]);
+      expect(assistantCount()).toBe(9); // 8 expert turns + 1 synthesis
+      expect(synthesisMessages()).toHaveLength(1); // no second conclusion
+
+      // No autonomous takeover after the restart: past the last paused
+      // badge (disableAutonomous() re-broadcasts with the flag change), the
+      // state machine goes idle → processing_sequential → idle only.
+      const updates = events().filter((e) => e.type === "state_update");
+      const lastPausedIdx = updates.map((u) => u.mode).lastIndexOf("paused");
+      expect(updates.slice(lastPausedIdx + 1).map((u) => u.mode)).toEqual([
+        "idle", // zombie chain's interrupted handoff reset
+        "processing_sequential", // restarted round
+        "idle", // natural end
+      ]);
 
       await drainToIdle();
       expect(getConversationState(conversationId)!.mode).toBe("idle");

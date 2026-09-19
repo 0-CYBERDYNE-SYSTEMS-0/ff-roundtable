@@ -411,4 +411,41 @@ describe("Orchestrator recovery (G7 snapshots)", () => {
     expect(assistantCount()).toBe(9); // full round still ran
     expect(persistedSnapshots().length).toBeGreaterThan(0); // writes were attempted
   });
+
+  it("still reaches storage for every later write after an earlier write rejects", async () => {
+    const conversationId = nextConvId();
+    setupFullRound(conversationId);
+    persistRow(conversationId, null);
+
+    // Write #1 rejects; every later write succeeds. A poisoned chain would
+    // short-circuit on the rejected predecessor and never call storage again.
+    let writes = 0;
+    mockUpdateConversation.mockImplementation(async (_id: number, _updates: any) => {
+      writes++;
+      if (writes === 1) throw new Error("storage down for write #1");
+      return undefined;
+    });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    try {
+      await processMessageTurnBased(
+        userId,
+        conversationId,
+        createMockMessage(8, "The chain must not poison"),
+        broadcastFn,
+      );
+      await drainFullRound(conversationId);
+    } finally {
+      errorSpy.mockRestore();
+    }
+
+    // Every snapshot write of the full round — including writes #2 and #3 —
+    // reached storage: the exact 13-write turn-boundary sequence, unbroken.
+    expect(mockUpdateConversation).toHaveBeenCalledTimes(FULL_ROUND_SNAPSHOT_MODES.length);
+    expect(persistedSnapshots().map((s) => s.mode)).toEqual(FULL_ROUND_SNAPSHOT_MODES);
+
+    // The round itself was unaffected by the failed write.
+    expect(getConversationState(conversationId)?.mode).toBe("idle");
+    expect(assistantCount()).toBe(9);
+  });
 });

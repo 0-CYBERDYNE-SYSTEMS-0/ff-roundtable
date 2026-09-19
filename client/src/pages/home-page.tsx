@@ -692,7 +692,9 @@ export default function HomePage() {
               setIsProcessing(parsedData.mode === "processing_sequential" || parsedData.mode === "autonomous");
               // A (re)started or finished round resolves any pending steering,
               // and a finished or restarted round ends the concluding window.
-              if (parsedData.mode === "processing_sequential" || parsedData.mode === "idle") {
+              // A pause landing mid-synthesis also ends the concluding window:
+              // the council is parked, not concluding.
+              if (parsedData.mode === "processing_sequential" || parsedData.mode === "idle" || parsedData.mode === "paused") {
                 setIsSteering(false);
                 setIsConcluding(false);
               }

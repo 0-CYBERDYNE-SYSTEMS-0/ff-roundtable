@@ -97,9 +97,10 @@ function snapshotsDiffer(a: OrchestratorSnapshot, b: OrchestratorSnapshot): bool
 
 // One serialized write chain per conversation: updateConversationState must
 // stay synchronous, so the write is fired WITHOUT awaiting and chained on the
-// previous write to preserve turn-boundary order. A rejected write is caught
-// (and the caught promise is what the chain stores), so a storage failure is
-// logged once and never throws into the turn loop nor poisons later writes.
+// previous write to preserve turn-boundary order. The chain stores a
+// rejection-proof predecessor (the .catch(() => {}) below): a failed write is
+// logged once by its own .catch, and later writes still reach storage — one
+// storage failure never poisons the chain for the conversation's lifetime.
 const snapshotWriteChains: Map<number, Promise<void>> = new Map();
 
 function persistSnapshot(conversationId: number, snapshot: OrchestratorSnapshot): void {
@@ -112,6 +113,7 @@ function persistSnapshot(conversationId: number, snapshot: OrchestratorSnapshot)
     try {
         const previous = snapshotWriteChains.get(conversationId) ?? Promise.resolve();
         const write = previous
+            .catch(() => {})
             .then(() => storage.updateConversation(conversationId, { orchestratorState: snapshot }))
             .then(() => undefined);
         snapshotWriteChains.set(conversationId, write);
@@ -124,7 +126,7 @@ function persistSnapshot(conversationId: number, snapshot: OrchestratorSnapshot)
     }
 }
 
-function isUsableConversationState(state: ConversationState | undefined): state is ConversationState {
+export function isUsableConversationState(state: ConversationState | undefined): state is ConversationState {
     return Boolean(
         state &&
         typeof state.broadcastFn === "function" &&
@@ -150,6 +152,17 @@ function selectRoundExperts(activeExperts: Expert[], mentions?: string[] | null)
     if (!mentions || mentions.length === 0) return activeExperts;
     const narrowed = activeExperts.filter(e => mentions.includes(e.role));
     return narrowed.length > 0 ? narrowed : activeExperts;
+}
+
+// History scans must never mistake a stored failure for a real expert
+// contribution. Orchestrator-stored provider errors start with "(Error
+// getting response from", cached/legacy error rows start with "(Error
+// generating response", and vision rejections start with "⚠️" — all three
+// families are excluded from "last real expert message" lookups.
+function isRealExpertHistoryMessage(m: Message): boolean {
+    return m.role === "assistant" &&
+        !m.content.startsWith("(Error") &&
+        !m.content.startsWith("⚠️");
 }
 
 // Export this helper function
@@ -237,6 +250,78 @@ function initializeConversationState(conversationId: number, experts: Expert[], 
         maxAutonomousTurns: initialState.maxAutonomousTurns
     });
     return initialState;
+}
+
+// G7 follow-up: rebuild a live paused state from the row's persisted snapshot
+// so POST /resume works after a server restart (the snapshot says paused but
+// no in-memory state exists — the old process took the paused turn chain with
+// it). Returns true when the paused state was restored; false when a live
+// state already exists or the snapshot is missing / anything-but-paused (the
+// caller keeps its existing 404 behavior in that case). Nothing is scheduled
+// here — the caller's resume() claims turnChainScheduled itself.
+export async function restorePausedFromSnapshot(
+    conversationId: number,
+    broadcastFn: (convId: number, data: any) => void
+): Promise<boolean> {
+    if (getConversationState(conversationId)) return false;
+    if (typeof storage.getConversation !== "function" || typeof storage.getConversationExperts !== "function") return false;
+
+    let storedSnapshot: OrchestratorSnapshot | null = null;
+    try {
+        const conversationRow = await storage.getConversation(conversationId);
+        storedSnapshot = conversationRow?.orchestratorState ?? null;
+    } catch (error) {
+        console.error(`Orchestrator: Could not read stored orchestrator snapshot for conversation ${conversationId}:`, error);
+        return false;
+    }
+    if (!storedSnapshot || storedSnapshot.mode !== "paused") return false;
+
+    const experts = await storage.getConversationExperts(conversationId);
+    if (!experts || experts.length === 0) {
+        debugLog(`Orchestrator: no experts for conversation ${conversationId} — cannot restore the paused state.`);
+        return false;
+    }
+
+    // Fresh in-memory state, then restore the pause through the shared update
+    // path so the paused state_update broadcast and the persisted paused
+    // snapshot (carrying the restored index/counters) behave exactly like the
+    // cold-start message path. lastUserMessage stays null: the message that
+    // started the paused sequence belonged to the previous process; a fresh
+    // user message re-steers as usual, and resume() continues the phase the
+    // snapshot was parked in.
+    const restored: ConversationState = {
+        conversationId,
+        activeExperts: experts,
+        currentExpertIndex: Number.isInteger(storedSnapshot.currentExpertIndex)
+            ? storedSnapshot.currentExpertIndex
+            : -1,
+        lastUserMessage: null,
+        mode: "idle",
+        broadcastFn,
+        isAutonomousEnabled: true,
+        maxAutonomousTurns: experts.length * 2, // same cap as a fresh sequence
+        totalAutonomousTurnsTaken: Number.isInteger(storedSnapshot.totalAutonomousTurnsTaken)
+            ? storedSnapshot.totalAutonomousTurnsTaken
+            : 0,
+        wasInterrupted: false,
+        pausedFromMode: null,
+        turnInFlight: false,
+        turnChainScheduled: false,
+        lastProgressAt: Date.now(),
+        sequenceExpertContents: [],
+        roundExperts: experts,
+        mentionPairStreak: null,
+        moderatorNoticeSent: false,
+    };
+    conversationStates.set(conversationId, restored);
+    updateConversationState(conversationId, {
+        mode: "paused",
+        pausedFromMode: storedSnapshot.pausedFromMode === "processing_sequential" || storedSnapshot.pausedFromMode === "autonomous"
+            ? storedSnapshot.pausedFromMode
+            : null
+    });
+    debugLog(`Orchestrator: restored paused state for ${conversationId} from snapshot (from ${storedSnapshot.pausedFromMode ?? "unknown"}, index ${restored.currentExpertIndex}).`);
+    return true;
 }
 
 function scheduleInterruptedMessage(state: ConversationState, pendingMessage: Message): void {
@@ -375,7 +460,9 @@ export class InteractionOrchestrator {
         // synthesis turn has already been streamed inline below. The sequence
         // then ends through the natural-end cleanup. The synthesis is not a
         // normal turn: it never increments totalAutonomousTurnsTaken and
-        // never touches currentExpertIndex/turnInFlight.
+        // never touches currentExpertIndex. It DOES hold the turnInFlight
+        // guard while it streams (see below) so pause/resume treat it as a
+        // real in-flight turn.
         let concludeSynthesisDelivered = false;
         const availableRoles = state.activeExperts.map(e => e.role);
 
@@ -388,7 +475,7 @@ export class InteractionOrchestrator {
             // simply fall through to the Moderator/round-robin below.
             let mentionRouted = false;
             const history = await storage.getConversationMessages(this.conversationId);
-            const lastExpertMessage = history.slice().reverse().find(m => m.role === 'assistant' && !m.content.startsWith("(Error generating response"));
+            const lastExpertMessage = history.slice().reverse().find(isRealExpertHistoryMessage);
             const lastMentions = lastExpertMessage && Array.isArray(lastExpertMessage.mentions)
                 ? lastExpertMessage.mentions
                 : [];
@@ -453,13 +540,22 @@ export class InteractionOrchestrator {
                     // only reach this point from the autonomous branch:
                     // suggestedRole is never computed in
                     // processing_sequential, so the sequential round is never
-                    // cut. An interrupt/pause landing mid-synthesis is
-                    // resolved in "Decide Next Action" below, exactly like
-                    // the natural-end branch handles it.
+                    // cut. The synthesis holds turnInFlight while it streams,
+                    // so a pause landing mid-synthesis is respected by
+                    // resume() (its chain bows out on turnInFlight) and by
+                    // the paused implicit-resume fork; a steering interrupt
+                    // landing mid-synthesis still wins in "Decide Next
+                    // Action" below, exactly like the natural-end branch
+                    // handles it.
                     debugLog(`Orchestrator: Moderator concluded the discussion for ${this.conversationId} — streaming the closing synthesis.`);
                     state.broadcastFn(this.conversationId, { type: "concluding", conversationId: this.conversationId });
-                    await generateClosingSynthesis(this.conversationId, moderator, state.broadcastFn);
-                    concludeSynthesisDelivered = true;
+                    updateConversationState(this.conversationId, { turnInFlight: true });
+                    try {
+                        await generateClosingSynthesis(this.conversationId, moderator, state.broadcastFn);
+                        concludeSynthesisDelivered = true;
+                    } finally {
+                        updateConversationState(this.conversationId, { turnInFlight: false });
+                    }
                 } else if (suggestedRole && suggestedRole !== 'RoundRobin') {
                     const startIndex = (state.currentExpertIndex + 1) % state.activeExperts.length;
                     for (let i = 0; i < state.activeExperts.length; i++) {
@@ -540,7 +636,7 @@ export class InteractionOrchestrator {
             else if (state.mode === "autonomous") { 
                 const history = await storage.getConversationMessages(this.conversationId);
                 // Find the last non-error assistant message
-                const lastExpertMessage = history.slice().reverse().find(m => m.role === 'assistant' && !m.content.startsWith("(Error generating response"));
+                const lastExpertMessage = history.slice().reverse().find(isRealExpertHistoryMessage);
                 if (!lastExpertMessage) {
                      // Should ideally not happen after sequential round, but handle defensively
                      console.error(`Orchestrator: Could not find previous expert message for autonomous turn ${state.totalAutonomousTurnsTaken}. Falling back to generic prompt.`);
