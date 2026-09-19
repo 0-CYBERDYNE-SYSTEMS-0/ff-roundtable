@@ -744,6 +744,26 @@ export async function getExpertResponse(
   }
 }
 
+/**
+ * G8 aux-call hygiene: resolve the model for auxiliary (non-expert-turn) LLM
+ * calls — insight extraction and the Moderator's next-speaker suggestion.
+ * Precedence: the Moderator expert's own model → DEFAULT_AUX_MODEL → the first
+ * expert's model. Null means nothing resolvable: callers must skip the aux
+ * call (or treat it as failed) instead of dialing a hardcoded legacy slug
+ * that is likely dead on fresh installs. Whitespace-only values count as
+ * empty; the returned slug is trimmed.
+ */
+export function resolveAuxModel(
+  moderatorModel: string | null | undefined,
+  firstExpertModel: string | null | undefined
+): string | null {
+  if (moderatorModel?.trim()) return moderatorModel.trim();
+  const envModel = process.env.DEFAULT_AUX_MODEL;
+  if (envModel && envModel.trim()) return envModel.trim();
+  if (firstExpertModel?.trim()) return firstExpertModel.trim();
+  return null;
+}
+
 // Function to generate insights
 export async function generateInsights(conversationId: number, broadcastFn?: (convId: number, data: any) => void): Promise<void> {
   try {
@@ -769,10 +789,21 @@ export async function generateInsights(conversationId: number, broadcastFn?: (co
     Only output the JSON object.
     `;
     
+    // G8: resolve the insights model dynamically (Moderator's model →
+    // DEFAULT_AUX_MODEL → first expert's model). Nothing resolvable means no
+    // insights: log and return instead of calling a dead legacy slug.
+    const experts = await storage.getConversationExperts(conversationId);
+    const moderatorExpert = experts.find(e => e.role === 'Moderator') ?? null;
+    const auxModel = resolveAuxModel(moderatorExpert?.model ?? null, experts[0]?.model ?? null);
+    if (!auxModel) {
+      console.error(`generateInsights: no aux model could be resolved for conversation ${conversationId} (no Moderator model, DEFAULT_AUX_MODEL unset, roster empty) — skipping insights.`);
+      return;
+    }
+
     const response = await callOpenRouterAPI([
       { role: "system", content: "You extract key insights from agricultural conversations. Respond only with the requested JSON format." },
       { role: "user", content: insightPrompt }
-    ], "mistralai/mixtral-8x7b-instruct"); 
+    ], auxModel);
     
     try {
       const insightData = JSON.parse(response.message.content);
@@ -828,8 +859,20 @@ export async function getModeratorNextSpeakerSuggestion(
         { role: "user", content: queryPrompt }
     ];
 
+    // G8: resolve this aux call's model dynamically (Moderator's model →
+    // DEFAULT_AUX_MODEL → first expert's model, via the conversation's
+    // expert roster in order — experts[0] is the first active expert).
+    // Nothing resolvable behaves exactly like a failed call: return null so
+    // the orchestrator falls back to round-robin.
+    const experts = await storage.getConversationExperts(moderatorExpert.conversationId);
+    const auxModel = resolveAuxModel(moderatorExpert.model, experts[0]?.model ?? null);
+    if (!auxModel) {
+        console.error("getModeratorNextSpeakerSuggestion: no aux model could be resolved (Moderator has no model, DEFAULT_AUX_MODEL unset, roster empty) — falling back to round-robin.");
+        return null;
+    }
+
     try {
-        const response = await callOpenRouterAPI(messages, moderatorExpert.model || 'mistralai/mistral-7b-instruct'); 
+        const response = await callOpenRouterAPI(messages, auxModel);
         const suggestedRole = response.message.content.trim().replace(/\.$/, '');
         
         if (availableRoles.includes(suggestedRole) || suggestedRole === 'RoundRobin' || suggestedRole === 'Conclude') {
@@ -895,7 +938,9 @@ Be brief — a farmer should be able to act on this in one read.` + (charter?.tr
       expertRole: "Moderator",
     });
 
-    const response = await callOpenRouterAPIStream(messages, moderatorExpert.model || 'mistralai/mistral-7b-instruct', (token) => {
+    // G8 amendment: no hardcoded fallback slug. The model column is NOT NULL;
+    // an (unexpected) empty value surfaces through the honest-error path below.
+    const response = await callOpenRouterAPIStream(messages, moderatorExpert.model, (token) => {
       broadcastFn(conversationId, {
         type: "expert_stream_token",
         expertId: moderatorExpert.id,

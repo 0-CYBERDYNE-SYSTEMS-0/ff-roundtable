@@ -479,6 +479,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
               conversationId
             }));
           }
+          // Handle G8 degradation notices: informational only (e.g. the
+          // Moderator's routing call failed and the council falls back to
+          // round-robin). Never blocks processing.
+          else if (data.type === "notice") {
+            client.send(JSON.stringify({
+              type: "notice",
+              conversationId,
+              message: data.message
+            }));
+          }
           // Handle error messages
           else if (data.type === "message_error") {
             // Prefer the persisted error message (survives refetch); fall back

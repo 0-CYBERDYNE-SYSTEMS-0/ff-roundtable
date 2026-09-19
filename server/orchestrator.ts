@@ -58,6 +58,12 @@ interface ConversationState {
     // mention-routed turn plus how many consecutive mention-routed turns that
     // pair has logged. null whenever the previous turn was not mention-routed.
     mentionPairStreak: { key: string; count: number } | null;
+    // G8 aux hygiene: the "Moderator unavailable — speaking in round-robin."
+    // notice is broadcast at most ONCE PER SEQUENCE. Set when the notice goes
+    // out; reset when a new sequence starts (startProcessingSequence /
+    // initializeConversationState). In-memory only — never part of the G7
+    // snapshot.
+    moderatorNoticeSent: boolean;
     // We might add turn limits, autonomous rounds etc. later
 }
 
@@ -128,7 +134,11 @@ function isUsableConversationState(state: ConversationState | undefined): state 
         ["idle", "processing_sequential", "paused", "autonomous"].includes(state.mode) &&
         typeof state.lastProgressAt === "number" &&
         Array.isArray(state.sequenceExpertContents) &&
-        Array.isArray(state.roundExperts)
+        Array.isArray(state.roundExperts) &&
+        // G8: fields initializeConversationState always sets must be asserted
+        // here (established invariant) — a partial/stale state object missing
+        // one is re-initialized instead of limping through the sequence.
+        typeof state.moderatorNoticeSent === "boolean"
     );
 }
 
@@ -209,7 +219,8 @@ function initializeConversationState(conversationId: number, experts: Expert[], 
         lastProgressAt: Date.now(),
         sequenceExpertContents: [],
         roundExperts: selectRoundExperts(experts, userMessage.mentions),
-        mentionPairStreak: null
+        mentionPairStreak: null,
+        moderatorNoticeSent: false
     };
     conversationStates.set(conversationId, initialState);
     debugLog(`Initialized state for ${conversationId}, Auto ON (max ${defaultMaxAutonomousTurns} turns)`);
@@ -274,7 +285,8 @@ export class InteractionOrchestrator {
             // processMessageTurnBased → here, so steering messages re-narrow
             // the round the same way.
             roundExperts: selectRoundExperts(state.activeExperts, state.lastUserMessage?.mentions),
-            mentionPairStreak: null // New sequence: mention pair streak starts fresh
+            mentionPairStreak: null, // New sequence: mention pair streak starts fresh
+            moderatorNoticeSent: false // New sequence: the G8 degradation notice may fire once more
         });
 
         debugLog(`Orchestrator starting processing sequence for conv ${this.conversationId}`);
@@ -416,6 +428,21 @@ export class InteractionOrchestrator {
             let suggestedRole: string | null = null;
             if (!mentionRouted && moderator) {
                  suggestedRole = await getModeratorNextSpeakerSuggestion(moderator, history.slice(-6), availableRoles);
+                // G8 aux hygiene: a null verdict (provider failure, invalid
+                // response, or no resolvable aux model) degrades to
+                // round-robin. Surface that to the farmer instead of
+                // degrading silently — broadcast exactly once per sequence
+                // (moderatorNoticeSent gates it; startProcessingSequence
+                // re-arms it). Round-robin continues unchanged either way.
+                const preNoticeState = getConversationState(this.conversationId);
+                if (suggestedRole === null && preNoticeState && !preNoticeState.moderatorNoticeSent) {
+                    updateConversationState(this.conversationId, { moderatorNoticeSent: true });
+                    preNoticeState.broadcastFn(this.conversationId, {
+                        type: "notice",
+                        conversationId: this.conversationId,
+                        message: "Moderator unavailable — speaking in round-robin."
+                    });
+                }
             }
             if (!mentionRouted) {
                 if (suggestedRole === 'Conclude' && moderator) {
