@@ -82,9 +82,20 @@ export function sendWebSocketMessage(socket: WebSocket | null, message: any): bo
     console.error("WebSocket is not connected");
     return false;
   }
-  
+
   socket.send(JSON.stringify(message));
   return true;
+}
+
+// Subscribe the socket to a conversation's broadcasts (G3 scoping): the
+// server only sends events for conversations explicitly subscribed to.
+export function sendWebSocketSubscription(socket: WebSocket | null, conversationId: number): boolean {
+  return sendWebSocketMessage(socket, { type: "subscribe", conversationId });
+}
+
+// Drop a conversation subscription (e.g. after switching conversations).
+export function sendWebSocketUnsubscription(socket: WebSocket | null, conversationId: number): boolean {
+  return sendWebSocketMessage(socket, { type: "unsubscribe", conversationId });
 }
 
 // Create a function to add event listeners to a WebSocket

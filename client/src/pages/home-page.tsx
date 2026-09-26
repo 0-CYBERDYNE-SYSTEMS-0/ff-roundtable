@@ -5,16 +5,29 @@ import Header from "@/components/layout/Header";
 import SidebarPanel from "@/components/sidebar/SidebarPanel";
 import ChatInterface from "@/components/chat/ChatInterface";
 import ExpertSelector from "@/components/roundtable/ExpertSelector";
+import CharterDialog from "@/components/roundtable/CharterDialog";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { queryClient } from "@/lib/queryClient";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { Expert, Message, Insight, File as FileType, Conversation, FarmProfile } from "@shared/schema";
 import FarmProfileModal from "@/components/farm/FarmProfileModal";
-import { useWebSocket } from "@/lib/websocket-utils";
+import { useWebSocket, sendWebSocketSubscription, sendWebSocketUnsubscription } from "@/lib/websocket-utils";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { ZapIcon, ZapOffIcon, Menu } from "lucide-react";
+import { ZapIcon, ZapOffIcon, Menu, PauseIcon, PlayIcon, ScrollText, XIcon } from "lucide-react";
+
+// G9 quiet console: per-event chatter is gated behind a debug flag so the
+// browser console stays readable in production. Force it per-tab with
+// localStorage.setItem("ffDebug", "1"). console.error/console.warn for
+// genuine failures are never gated.
+const ffDebug =
+  import.meta.env.DEV ||
+  (typeof localStorage !== "undefined" && localStorage.getItem("ffDebug") === "1");
+
+const debugLog = (...args: unknown[]) => {
+  if (ffDebug) console.log(...args);
+};
 
 // Define the type for interaction modes matching the backend
 type InteractionMode = 
@@ -41,13 +54,34 @@ export default function HomePage() {
   // We might also want to store maxAutonomousTurns if we allow setting it from UI
   // const [maxAutonomousTurns, setMaxAutonomousTurns] = useState<number>(0);
 
-  // Message queue state for continuous input
-  const [pendingMessages, setPendingMessages] = useState<string[]>([]);
-  const [isQueueProcessing, setIsQueueProcessing] = useState(false);
+  // Steering: a message sent mid-sequence is handled by the server's
+  // interrupt path — the current expert finishes, then the round restarts on
+  // the new message. The banner clears on the next processing state_update.
+  const [isSteering, setIsSteering] = useState<boolean>(false);
+
+  // G5: the Moderator decided the discussion is done and is delivering the
+  // closing synthesis. Cleared alongside the other transient flags.
+  const [isConcluding, setIsConcluding] = useState<boolean>(false);
+
+  // G6: council charter editor + one-time nudge. The dismissal is persisted
+  // so the nudge never comes back once dismissed.
+  const [charterDialogOpen, setCharterDialogOpen] = useState<boolean>(false);
+  const [charterNudgeDismissed, setCharterNudgeDismissed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("ffCharterNudgeDismissed") === "1";
+    } catch {
+      return false;
+    }
+  });
 
   // Streaming state
   const [streamingMessages, setStreamingMessages] = useState<Map<number, { content: string; expertName: string; expertRole: string }>>(new Map());
   const [typingExpertIds, setTypingExpertIds] = useState<Set<number>>(new Set());
+
+  // G9: expert announced by the server's next_speaker broadcast — the Expert
+  // Panel shows an "up next" treatment on their row until their stream starts
+  // (typing state takes over) or the round/session resets.
+  const [upNextExpertId, setUpNextExpertId] = useState<number | null>(null);
 
   // WebSocket connection for real-time updates
   const { socket, status: socketStatus, reconnectAttempts } = useWebSocket();
@@ -257,31 +291,13 @@ export default function HomePage() {
     },
   });
 
-  // Queue-aware send message handler
+  // Send immediately — always. A message typed during an active sequence is
+  // accepted by the server as steering (it finishes the current expert and
+  // restarts the round on the newest message). Double-click safety is covered
+  // server-side by the duplicate-submission gate.
   const handleSendMessage = (content: string) => {
-    if (isProcessing || sendMessageMutation.isPending) {
-      // Queue the message instead of blocking
-      setPendingMessages(prev => [...prev, content]);
-    } else {
-      // Send immediately if idle
-      sendMessageMutation.mutate(content);
-    }
+    sendMessageMutation.mutate(content);
   };
-
-  // Queue processor - auto-process queued messages when system is idle
-  useEffect(() => {
-    if (!isProcessing &&
-        !sendMessageMutation.isPending &&
-        pendingMessages.length > 0 &&
-        !isQueueProcessing) {
-      setIsQueueProcessing(true);
-      const nextMessage = pendingMessages[0];
-      setPendingMessages(prev => prev.slice(1));
-      sendMessageMutation.mutate(nextMessage, {
-        onSettled: () => setIsQueueProcessing(false)
-      });
-    }
-  }, [isProcessing, sendMessageMutation.isPending, pendingMessages, isQueueProcessing]);
 
   // Upload file mutation
   const uploadFileMutation = useMutation({
@@ -388,6 +404,41 @@ export default function HomePage() {
       });
     },
   });
+
+  // Pause the running round — the current expert finishes, then the council
+  // parks. A paused round is escapable via Resume or by sending a message.
+  const pauseMutation = useMutation({
+    mutationFn: async () => {
+      if (!activeConversation) throw new Error("No active conversation");
+      const res = await apiRequest("POST", `/api/protected/conversations/${activeConversation}/pause`);
+      return await res.json();
+    },
+    // No success toast: the paused state arrives via WebSocket state_update.
+    onError: (error: Error) => {
+      toast({
+        title: "Failed to pause",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
+  });
+
+  // Resume a parked round.
+  const resumeMutation = useMutation({
+    mutationFn: async () => {
+      if (!activeConversation) throw new Error("No active conversation");
+      const res = await apiRequest("POST", `/api/protected/conversations/${activeConversation}/resume`);
+      return await res.json();
+    },
+    // No success toast: the resumed state arrives via WebSocket state_update.
+    onError: (error: Error) => {
+      toast({
+        title: "Failed to resume",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
+  });
   
   // Export conversation as markdown
   const exportMarkdown = () => {
@@ -407,6 +458,29 @@ export default function HomePage() {
   // Enabled only when the conversation has artifacts or files to schedule from.
   const hasSchedulableSource =
     (messages ?? []).some((m) => (m.artifacts?.length ?? 0) > 0) || (files ?? []).length > 0;
+
+  // The active conversation's record from the list query (title, charter).
+  const activeConversationData =
+    conversations?.find((conversation) => conversation.id === activeConversation) ?? null;
+
+  // Charter badge/nudge: a blank string counts as "no charter".
+  const activeHasCharter = !!activeConversationData?.charter;
+  const showCharterNudge =
+    !charterNudgeDismissed &&
+    !isLoadingConversations &&
+    !charterDialogOpen &&
+    !!activeConversationData &&
+    (experts ?? []).length > 0 &&
+    !activeHasCharter;
+
+  const handleDismissCharterNudge = () => {
+    setCharterNudgeDismissed(true);
+    try {
+      localStorage.setItem("ffCharterNudgeDismissed", "1");
+    } catch {
+      // Persistence is best-effort; the nudge stays hidden for this session.
+    }
+  };
   const exportIcs = () => {
     if (!activeConversation) {
       toast({
@@ -464,12 +538,13 @@ export default function HomePage() {
 
   const handleSelectConversation = (conversationId: number) => {
     setActiveConversation(conversationId);
-    setPendingMessages([]);
-    setIsQueueProcessing(false);
     setStreamingMessages(new Map());
     setTypingExpertIds(new Set());
+    setUpNextExpertId(null);
     setInteractionMode("idle");
     setIsProcessing(false);
+    setIsSteering(false);
+    setIsConcluding(false);
     setSidebarOpen(false);
   };
   
@@ -514,10 +589,43 @@ export default function HomePage() {
 
     setStreamingMessages(new Map());
     setTypingExpertIds(new Set());
+    setUpNextExpertId(null);
     setIsProcessing(false);
     setInteractionMode("idle");
+    setIsSteering(false);
+    setIsConcluding(false);
   }, [socketStatus, activeConversation]);
   
+  // === WebSocket Conversation Subscription (G3) ===
+  // The server only broadcasts to sockets that subscribed to the conversation.
+  // The useWebSocket hook creates a NEW WebSocket object on every reconnect,
+  // so re-running this effect (socket change) re-subscribes the new socket.
+  useEffect(() => {
+    if (!socket || !activeConversation) return;
+    const conversationId = activeConversation;
+    let subscribed = false;
+
+    const subscribe = () => {
+      sendWebSocketSubscription(socket, conversationId);
+      subscribed = true;
+    };
+
+    if (socket.readyState === WebSocket.OPEN) {
+      subscribe();
+    } else {
+      socket.addEventListener("open", subscribe, { once: true });
+    }
+
+    // On conversation switch: unsubscribe the previous conversation. On socket
+    // change/unmount the old socket is gone (the unsubscribe is a no-op there).
+    return () => {
+      socket.removeEventListener("open", subscribe);
+      if (subscribed) {
+        sendWebSocketUnsubscription(socket, conversationId);
+      }
+    };
+  }, [socket, activeConversation]);
+
   // === WebSocket Message Handling ===
   useEffect(() => {
     if (!socket || !activeConversation) return;
@@ -526,11 +634,11 @@ export default function HomePage() {
     const handleWebSocketMessage = (event: MessageEvent) => {
       try {
         const parsedData = JSON.parse(event.data);
-        console.log("WebSocket received:", parsedData);
+        debugLog("WebSocket received:", parsedData);
 
         // Check if the message is for the active conversation
         if (parsedData.conversationId !== activeConversation) {
-            console.log("WS message ignored (wrong conversation)");
+            debugLog("WS message ignored (wrong conversation)");
             return;
         }
 
@@ -576,27 +684,52 @@ export default function HomePage() {
             break;
           
           case "state_update":
-            console.log("WebSocket: Received state_update signal", parsedData);
+            debugLog("WebSocket: Received state_update signal", parsedData);
             if (parsedData.mode) {
-              console.log(`[UI State] Setting interactionMode to: ${parsedData.mode}`);
+              debugLog(`[UI State] Setting interactionMode to: ${parsedData.mode}`);
               setInteractionMode(parsedData.mode as InteractionMode);
               // Set isProcessing to true when entering processing_sequential or autonomous mode
               setIsProcessing(parsedData.mode === "processing_sequential" || parsedData.mode === "autonomous");
+              // A (re)started or finished round resolves any pending steering,
+              // and a finished or restarted round ends the concluding window.
+              // A pause landing mid-synthesis also ends the concluding window:
+              // the council is parked, not concluding.
+              if (parsedData.mode === "processing_sequential" || parsedData.mode === "idle" || parsedData.mode === "paused") {
+                setIsSteering(false);
+                setIsConcluding(false);
+              }
               // Clear streaming state when returning to idle
               if (parsedData.mode === "idle") {
                 setStreamingMessages(new Map());
                 setTypingExpertIds(new Set());
+                setUpNextExpertId(null);
               }
             }
             if (typeof parsedData.isAutonomousEnabled === 'boolean') {
-              console.log(`[UI State] Setting isAutonomousEnabled to: ${parsedData.isAutonomousEnabled}`);
+              debugLog(`[UI State] Setting isAutonomousEnabled to: ${parsedData.isAutonomousEnabled}`);
               setIsAutonomousEnabled(parsedData.isAutonomousEnabled);
             }
             break;
 
+          case "steering":
+            // The server accepted a mid-sequence message; it will restart the
+            // round on it once the current expert finishes.
+            debugLog("WebSocket: Steering acknowledged");
+            setIsSteering(true);
+            break;
+
+          case "concluding":
+            // G5: the Moderator decided the discussion is done. The closing
+            // synthesis message follows through the normal stream flow.
+            setIsConcluding(true);
+            break;
+
           // --- Streaming message handlers ---
           case "expert_stream_start":
-            console.log(`[Stream] Expert ${parsedData.expertName} started typing`);
+            debugLog(`[Stream] Expert ${parsedData.expertName} started typing`);
+            // G9: the announced expert is now typing, so the "up next"
+            // preview yields to the existing typing indicator.
+            setUpNextExpertId(null);
             setTypingExpertIds(prev => new Set(prev).add(parsedData.expertId));
             setStreamingMessages(prev => {
               const next = new Map(prev);
@@ -624,7 +757,7 @@ export default function HomePage() {
             break;
 
           case "expert_stream_done":
-            console.log(`[Stream] Expert ${parsedData.expertId} done`);
+            debugLog(`[Stream] Expert ${parsedData.expertId} done`);
             setTypingExpertIds(prev => {
               const next = new Set(prev);
               next.delete(parsedData.expertId);
@@ -647,7 +780,7 @@ export default function HomePage() {
             break;
 
           case "insights":
-             console.log("WebSocket: Received insights signal");
+             debugLog("WebSocket: Received insights signal");
              queryClient.invalidateQueries({ queryKey: [`/api/protected/conversations/${activeConversation}/insights`] });
              break;
 
@@ -662,17 +795,48 @@ export default function HomePage() {
             });
             setStreamingMessages(new Map());
             setTypingExpertIds(new Set());
+            setUpNextExpertId(null);
             setIsProcessing(false);
             setInteractionMode("idle");
+            setIsSteering(false);
+            setIsConcluding(false);
+            break;
+
+          // G8: the Moderator's auxiliary call failed and the server fell
+          // back (e.g. round-robin). Ephemeral toast only — never a chat
+          // message, and no pipeline state is touched.
+          case "notice":
+            toast({ description: parsedData.message });
+            break;
+
+          // G9: the next expert turn is announced before its stream starts —
+          // the Expert Panel previews it until expert_stream_start arrives.
+          case "next_speaker":
+            setUpNextExpertId(parsedData.expertId);
             break;
 
           // Handle other types like connection confirmation, file updates etc. if needed
           case "connection":
-            console.log("WebSocket: Connection confirmed.");
+            debugLog("WebSocket: Connection confirmed.");
+            break;
+
+          case "subscribed":
+            // Acknowledgment only; a state_update replay follows separately
+            // when orchestrator state exists for the conversation.
+            break;
+
+          case "subscribe_denied":
+            // The server refused the subscription (not the owner or the
+            // conversation no longer exists) — broadcasts will not arrive.
+            console.warn("WebSocket: Subscription denied for conversation", parsedData.conversationId);
+            toast({
+              title: "Couldn't subscribe to conversation updates",
+              variant: "destructive",
+            });
             break;
 
           default:
-            console.log("WebSocket: Received unhandled message type:", parsedData.type);
+            debugLog("WebSocket: Received unhandled message type:", parsedData.type);
         }
       } catch (error) {
         console.error("Error processing WebSocket message:", error);
@@ -692,23 +856,23 @@ export default function HomePage() {
 
   // Handler specifically for Enabling Auto Mode
   const handleEnableAutonomous = () => {
-    console.log("[UI Click] Handle Enable Autonomous triggered.");
+    debugLog("[UI Click] Handle Enable Autonomous triggered.");
     if (activeConversation) {
-        console.log("[UI Click] Calling enableAutoMutation.mutate(undefined)");
-        enableAutoMutation.mutate(undefined); 
+        debugLog("[UI Click] Calling enableAutoMutation.mutate(undefined)");
+        enableAutoMutation.mutate(undefined);
     } else {
-         console.log("[UI Click] Enable Autonomous condition not met (no active conversation).");
+         debugLog("[UI Click] Enable Autonomous condition not met (no active conversation).");
     }
   };
 
   // Handler specifically for Disabling Auto Mode
   const handleDisableAutonomous = () => {
-    console.log("[UI Click] Handle Disable Autonomous triggered.");
+    debugLog("[UI Click] Handle Disable Autonomous triggered.");
     if (activeConversation) {
-        console.log("[UI Click] Calling disableAutoMutation.mutate()");
+        debugLog("[UI Click] Calling disableAutoMutation.mutate()");
         disableAutoMutation.mutate();
     } else {
-         console.log("[UI Click] Disable Autonomous condition not met (no active conversation).");
+         debugLog("[UI Click] Disable Autonomous condition not met (no active conversation).");
     }
   };
   
@@ -764,6 +928,24 @@ export default function HomePage() {
                 {reconnectAttempts > 0 && <span className="text-xs">Attempt {reconnectAttempts}</span>}
               </div>
             )}
+            {isSteering && (
+              <div
+                role="status"
+                aria-live="polite"
+                className="flex flex-wrap items-center gap-2 px-4 py-2 text-sm bg-farm-yellow/20 text-yellow-900 border-b border-farm-yellow/40"
+              >
+                <span>Steering — the council takes this after the current expert finishes.</span>
+              </div>
+            )}
+            {isConcluding && (
+              <div
+                role="status"
+                aria-live="polite"
+                className="flex flex-wrap items-center gap-2 px-4 py-2 text-sm bg-farm-yellow/20 text-yellow-900 border-b border-farm-yellow/40"
+              >
+                <span>The council is concluding…</span>
+              </div>
+            )}
             {/* === Interaction Control Bar (Positioned at the top of this column) === */}
             {activeConversation && (
                  <div className="flex-shrink-0 flex items-center justify-between px-6 py-3 border-b border-farm-tan/30 bg-gradient-to-r from-farm-powder/20 to-white shadow-sm">
@@ -791,14 +973,60 @@ export default function HomePage() {
                                 className={`${isAutonomousEnabled ? 'bg-farm-blue/20 text-farm-blue border-farm-blue' : 'bg-neutral-200 text-neutral-600'} font-medium`}>
                              {isAutonomousEnabled ? 'Enabled' : 'Disabled'}
                          </Badge>
-                         {pendingMessages.length > 0 && (
-                           <Badge variant="outline" className="ml-2 bg-farm-yellow/20 text-yellow-800 border-farm-yellow font-medium">
-                             {pendingMessages.length} queued
+                         {activeHasCharter && (
+                           <Badge
+                             variant="outline"
+                             aria-label="This conversation has a council charter"
+                             className="bg-farm-tan/30 text-yellow-900 border-farm-tan/50 font-medium"
+                           >
+                             <ScrollText className="h-3 w-3 mr-1" />
+                             Charter
                            </Badge>
                          )}
                      </div>
                      <div className="flex items-center gap-3">
-                          {/* Buttons moved here, removed pause/resume */}
+                          {/* G6: view/edit the council charter for the active conversation */}
+                          <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => setCharterDialogOpen(true)}
+                              aria-label="Edit the council charter"
+                              className="border-farm-tan/60 text-yellow-900 hover:bg-farm-tan/40 hover:text-neutral-900 transition-all duration-200 font-medium"
+                          >
+                              <ScrollText className="h-4 w-4 mr-1.5" />
+                              Charter
+                          </Button>
+
+                          {/* Pause the running round — the current expert finishes, then the council parks */}
+                          {(interactionMode === "processing_sequential" || interactionMode === "autonomous") && (
+                            <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => pauseMutation.mutate()}
+                                disabled={pauseMutation.isPending}
+                                aria-label="Pause the roundtable"
+                                className="border-farm-yellow text-yellow-800 hover:bg-farm-yellow hover:text-neutral-900 transition-all duration-200 font-medium"
+                            >
+                                <PauseIcon className="h-4 w-4 mr-1.5" />
+                                Pause
+                            </Button>
+                          )}
+
+                          {/* Resume a paused round */}
+                          {interactionMode === "paused" && (
+                            <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => resumeMutation.mutate()}
+                                disabled={resumeMutation.isPending}
+                                aria-label="Resume the roundtable"
+                                className="border-farm-green text-farm-green hover:bg-farm-green hover:text-white transition-all duration-200 font-medium"
+                            >
+                                <PlayIcon className="h-4 w-4 mr-1.5" />
+                                Resume
+                            </Button>
+                          )}
+
                           {/* Conditionally Render Disable Button */}
                          {isAutonomousEnabled && (
                             <Button
@@ -829,10 +1057,28 @@ export default function HomePage() {
                              </Button>
                          )}
                      </div>
-                 </div>
+                </div>
+             )}
+
+            {/* G6: one-time nudge to set a charter — dismissed via X and persisted */}
+            {showCharterNudge && (
+              <div className="flex items-center justify-between gap-2 px-4 py-1.5 text-xs bg-farm-powder/30 text-farm-blue border-b border-farm-tan/30">
+                <span className="flex items-center gap-1.5 min-w-0">
+                  <ScrollText className="h-3.5 w-3.5 flex-shrink-0" />
+                  <span className="truncate">Set a council charter so your experts share one goal and know when to conclude.</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={handleDismissCharterNudge}
+                  aria-label="Dismiss charter suggestion"
+                  className="p-1 rounded hover:bg-farm-powder/50 transition-colors flex-shrink-0"
+                >
+                  <XIcon className="h-3.5 w-3.5" />
+                </button>
+              </div>
             )}
 
-            {/* === Chat Area (Takes remaining space) === */} 
+            {/* === Chat Area (Takes remaining space) === */}
              <div className="flex-1 overflow-y-auto">
                  {activeConversation ? (
                     <ChatInterface
@@ -849,6 +1095,7 @@ export default function HomePage() {
                         visualizations={[]}
                         streamingMessages={streamingMessages}
                         typingExpertIds={typingExpertIds}
+                        upNextExpertId={upNextExpertId}
                     />
                 ) : (
                     <div className="flex-1 flex items-center justify-center bg-gradient-to-br from-farm-powder/10 via-white to-farm-tan/10">
@@ -898,6 +1145,14 @@ export default function HomePage() {
           setShowFarmProfileModal(false);
           queryClient.invalidateQueries({ queryKey: ["/api/protected/farm-profile"] });
         }}
+      />
+
+      {/* G6: council charter editor for the active conversation */}
+      <CharterDialog
+        open={charterDialogOpen}
+        conversationId={activeConversation}
+        currentCharter={activeConversationData?.charter ?? null}
+        onClose={() => setCharterDialogOpen(false)}
       />
     </div>
   );

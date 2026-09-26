@@ -30,6 +30,11 @@ export interface IStorage {
   createConversation(conversation: InsertConversation): Promise<Conversation>;
   getConversation(id: number): Promise<Conversation | undefined>;
   getUserConversations(userId: number): Promise<Conversation[]>;
+  // Partial update (G6): only provided keys change. `charter: null` clears
+  // the charter; an omitted charter key leaves it untouched.
+  // G7: `orchestratorState` joins the allowlist so the orchestrator can
+  // persist its survivable snapshot at turn boundaries.
+  updateConversation(id: number, updates: Partial<Pick<Conversation, "title" | "charter" | "orchestratorState">>): Promise<Conversation | undefined>;
   
   // Expert operations
   createExpert(expert: InsertExpert): Promise<Expert>;
@@ -222,10 +227,16 @@ export class MemStorage implements IStorage {
   async createConversation(insertConversation: InsertConversation): Promise<Conversation> {
     const id = this.conversationId++;
     const now = new Date();
+    // G7: the orchestrator snapshot is server-owned — a fresh conversation
+    // always starts stateless, whatever the (loosely jsonb-typed) insert
+    // payload carries.
+    const { orchestratorState: _ignoredSnapshot, ...rest } = insertConversation;
     const conversation: Conversation = {
-      ...insertConversation,
+      ...rest,
       id,
       title: insertConversation.title ?? "New Conversation",
+      charter: insertConversation.charter ?? null,
+      orchestratorState: null,
       createdAt: now,
     };
     this.conversations.set(id, conversation);
@@ -240,6 +251,23 @@ export class MemStorage implements IStorage {
     return Array.from(this.conversations.values())
       .filter(conversation => conversation.userId === userId)
       .sort((a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0));
+  }
+
+  async updateConversation(id: number, updates: Partial<Pick<Conversation, "title" | "charter" | "orchestratorState">>): Promise<Conversation | undefined> {
+    const conversation = this.conversations.get(id);
+    if (!conversation) return undefined;
+
+    // Explicit undefined-checks (not a plain spread) so an omitted key keeps
+    // its current value while `charter: null` clears it.
+    const updated: Conversation = {
+      ...conversation,
+      ...(updates.title !== undefined && { title: updates.title }),
+      ...(updates.charter !== undefined && { charter: updates.charter }),
+      ...(updates.orchestratorState !== undefined && { orchestratorState: updates.orchestratorState }),
+    };
+
+    this.conversations.set(id, updated);
+    return updated;
   }
   
   // Expert operations
@@ -293,6 +321,10 @@ export class MemStorage implements IStorage {
       expertName: insertMessage.expertName ?? null,
       expertRole: insertMessage.expertRole ?? null,
       artifacts: Array.isArray(insertMessage.artifacts) ? insertMessage.artifacts as Message["artifacts"] : [],
+      // G4 mentions: pass the parsed @-tag list through (null when unset).
+      mentions: Array.isArray(insertMessage.mentions) ? insertMessage.mentions : null,
+      // G5 synthesis: pass the closing-synthesis flag through (null when unset).
+      isSynthesis: insertMessage.isSynthesis ?? null,
       timestamp: now,
     };
     this.messages.set(id, message);
@@ -511,7 +543,11 @@ export class PostgresStorage implements IStorage {
   // ── Conversation operations ────────────────────────────────────────────────
 
   async createConversation(insertConversation: InsertConversation): Promise<Conversation> {
-    const result = await this.db.insert(conversations).values(insertConversation).returning();
+    // G7: the orchestrator snapshot is server-owned — a fresh conversation
+    // always starts stateless, whatever the (loosely jsonb-typed) insert
+    // payload carries.
+    const { orchestratorState: _ignoredSnapshot, ...values } = insertConversation;
+    const result = await this.db.insert(conversations).values(values).returning();
     return result[0];
   }
 
@@ -526,6 +562,25 @@ export class PostgresStorage implements IStorage {
       .from(conversations)
       .where(eq(conversations.userId, userId))
       .orderBy(desc(conversations.createdAt));
+  }
+
+  async updateConversation(id: number, updates: Partial<Pick<Conversation, "title" | "charter" | "orchestratorState">>): Promise<Conversation | undefined> {
+    // Only allow updating title, charter and the G7 orchestrator snapshot.
+    // Explicit undefined-checks (not a plain spread) so an omitted key stays
+    // untouched while `charter: null` clears the column.
+    const allowed: Partial<Pick<Conversation, "title" | "charter" | "orchestratorState">> = {
+      ...(updates.title !== undefined && { title: updates.title }),
+      ...(updates.charter !== undefined && { charter: updates.charter }),
+      ...(updates.orchestratorState !== undefined && { orchestratorState: updates.orchestratorState }),
+    };
+
+    const result = await this.db
+      .update(conversations)
+      .set(allowed)
+      .where(eq(conversations.id, id))
+      .returning();
+
+    return result[0];
   }
 
   // ── Expert operations ──────────────────────────────────────────────────────
@@ -570,6 +625,9 @@ export class PostgresStorage implements IStorage {
   // ── Message operations ─────────────────────────────────────────────────────
 
   async createMessage(insertMessage: InsertMessage): Promise<Message> {
+    // The spread carries every column (incl. the G4 mentions jsonb and the
+    // G5 is_synthesis flag) through the camelCase -> snake_case mapping;
+    // unset optional columns are omitted.
     const values = { ...insertMessage, artifacts: insertMessage.artifacts || [] };
     const result = await this.db.insert(messages).values(values).returning();
     const raw = result[0];

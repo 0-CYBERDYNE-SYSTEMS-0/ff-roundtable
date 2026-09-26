@@ -376,6 +376,12 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
 
   const selectedCount = localSelectedExperts.length;
 
+  // G8: a council without a Moderator can't route turns or conclude on its
+  // own. Non-blocking hint only — adding one stays the farmer's choice.
+  const pendingHasModerator = localSelectedExperts.some(
+    (item) => availableExperts[item.expertIndex]?.role === "Moderator"
+  );
+
   // Check if an expert is selected
   const isExpertSelected = (index: number) => {
     return localSelectedExperts.some(e => e.expertIndex === index);
@@ -528,6 +534,13 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
             <p className="text-sm text-red-600">Maximum {maxExperts} experts allowed on your plan</p>
           ) : (
             <p className="text-sm text-green-600">Your team is ready to join the conversation</p>
+          )}
+          {/* G8: subtle Moderator suggestion — clears once one is among the pending selection */}
+          {!pendingHasModerator && (
+            <p className="mt-1 flex items-center justify-center gap-1.5 text-xs text-yellow-700/80 sm:justify-start">
+              <Info className="h-3 w-3 flex-shrink-0" />
+              Add a Moderator so the council can route itself and conclude on its own.
+            </p>
           )}
         </div>
         <Button

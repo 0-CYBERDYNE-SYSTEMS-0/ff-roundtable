@@ -1,4 +1,4 @@
-import { pgTable, text, serial, integer, boolean, timestamp, json } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, integer, boolean, timestamp, json, jsonb } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -15,10 +15,28 @@ export const users = pgTable("users", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
+// G7: minimal orchestrator snapshot persisted per turn boundary so a server
+// restart can recover honest state — dead loops (processing_*/autonomous)
+// recover to idle; paused restores paused. Never written per token.
+export interface OrchestratorSnapshot {
+  mode: "idle" | "processing_sequential" | "paused" | "autonomous";
+  currentExpertIndex: number;
+  totalAutonomousTurnsTaken: number;
+  wasInterrupted: boolean;
+  pausedFromMode: string | null;
+}
+
 export const conversations = pgTable("conversations", {
   id: serial("id").primaryKey(),
   userId: integer("user_id").notNull().references(() => users.id),
   title: text("title").default("New Conversation"),
+  // G6: farmer-authored council charter (goal, depth, stop criteria) that
+  // governs the whole roundtable — injected into every expert, Moderator,
+  // and synthesis prompt. Nullable: optional. Hard-capped at 2,000 chars
+  // on write (API-level).
+  charter: text("charter"),
+  // G7: last known orchestrator state, written at turn boundaries only.
+  orchestratorState: jsonb("orchestrator_state").$type<OrchestratorSnapshot>(),
   createdAt: timestamp("created_at").defaultNow(),
 });
 
@@ -43,6 +61,13 @@ export const messages = pgTable("messages", {
   expertName: text("expert_name"),
   expertRole: text("expert_role"),
   artifacts: json("artifacts").default([]),
+  // G4: roles @-tagged in this message, parsed once on creation (user
+  // messages in routes.ts, expert messages in ai.ts) and routed on by the
+  // orchestrator. Nullable: legacy rows have no value.
+  mentions: jsonb("mentions").$type<string[]>(),
+  // G5: true for the Moderator's closing synthesis message that ends a
+  // roundtable ('Conclude'). Nullable: legacy rows have no value.
+  isSynthesis: boolean("is_synthesis"),
   timestamp: timestamp("timestamp").defaultNow(),
 });
 
@@ -153,10 +178,19 @@ export type Conversation = typeof conversations.$inferSelect;
 export type InsertExpert = z.infer<typeof insertExpertSchema>;
 export type Expert = typeof experts.$inferSelect;
 
-export type InsertMessage = z.infer<typeof insertMessageSchema>;
+// drizzle-zod's inferred jsonb shape does not line up with the column's
+// $type<string[]> on the insert path — pin mentions to the canonical type.
+export type InsertMessage = Omit<z.infer<typeof insertMessageSchema>, 'mentions' | 'isSynthesis'> & {
+  mentions?: string[] | null;
+  // G5: pinned like mentions so object literals can omit the nullable flag.
+  isSynthesis?: boolean | null;
+};
 // Extend Message type to properly type artifacts as Artifact[]
-export type Message = Omit<typeof messages.$inferSelect, 'artifacts'> & {
+// (and keep the nullable G4/G5 columns optional for object literals)
+export type Message = Omit<typeof messages.$inferSelect, 'artifacts' | 'mentions' | 'isSynthesis'> & {
   artifacts?: Artifact[];
+  mentions?: string[] | null;
+  isSynthesis?: boolean | null;
 };
 
 export type InsertFile = z.infer<typeof insertFileSchema>;

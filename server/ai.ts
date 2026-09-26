@@ -2,6 +2,7 @@ import { storage } from "./storage";
 // Import shared DB types
 import type { InsertMessage, Expert, InsertFile, Message, File, Artifact, FarmProfile } from "@shared/schema"; 
 import { extractArtifacts } from "./artifact-extractor";
+import { extractMentions } from "@shared/mentions";
 import OpenAI from "openai";
 import path from "path";
 import fs from "fs";
@@ -13,6 +14,8 @@ import { collectImageParts, isImageFile, MAX_IMAGE_PARTS, analyzedImageNote, mak
 const AI_REQUEST_TIMEOUT_MS = 120_000;
 const MAX_MODEL_MESSAGE_CHARS = 12_000;
 const MAX_FILE_CONTEXT_FILES = 10;
+// G9: cap on the carried-forward PRIOR DECISIONS system block.
+const PRIOR_DECISIONS_MAX_CHARS = 1200;
 
 function truncateForModel(content: string, maxChars = MAX_MODEL_MESSAGE_CHARS): string {
   return content.length > maxChars
@@ -46,12 +49,14 @@ export interface AIModelResponse {
 }
 
 // Generate a system prompt for an expert
-// Pass availableRoles separately, plus optional farm context and weather
+// Pass availableRoles separately, plus optional farm context, weather, and the
+// conversation's council charter (G6 — governs every expert when present).
 export function generateSystemPrompt(
-  expert: Expert, 
+  expert: Expert,
   availableRoles?: string[],
   farmContext?: string,
-  weatherContext?: string
+  weatherContext?: string,
+  charter?: string | null
 ): string {
   let basePrompt = `You are an AI expert in the role of ${expert.role} participating in a roundtable discussion on agricultural topics.
 As a ${expert.role}, your expertise is highly valued, and you should focus on providing insights specific to your domain.
@@ -65,6 +70,12 @@ You are part of a team of experts: [${availableRoles?.join(', ') || 'various rol
     basePrompt += `\n📌 CUSTOM INSTRUCTIONS FROM THE FARMER (follow these closely):\n${expert.customInstructions.trim()}\n`;
   }
 
+  // G6: inject the farmer's council charter. It governs the whole roundtable
+  // (goal, depth, stop criteria), so it sits above per-farm context.
+  if (charter?.trim()) {
+    basePrompt += `\n📜 COUNCIL CHARTER (governs this roundtable — all experts):\n${charter.trim()}\nAll experts follow this charter.\n`;
+  }
+
   // Inject farm profile context if available
   if (farmContext) {
     basePrompt += `\n🌾 FARMER CONTEXT — You are advising a REAL farmer with this operation:\n${farmContext}\n\nCRITICAL: Tailor ALL your advice to this specific farm. Reference their crops, acreage, soil type, location, and water situation directly. Do NOT give generic advice that ignores these details.\n`;
@@ -76,7 +87,7 @@ You are part of a team of experts: [${availableRoles?.join(', ') || 'various rol
   }
 
   const interactionPrompt = `During discussion, actively engage with other experts. Reference their points and ask clarifying questions.
-If you want to direct a comment or question to a specific expert, use '@[Role Name]' (e.g., '@Soil Scientist').
+You can direct the discussion: if you write @[Role Name], that expert will be asked to speak next. Tag only when their expertise is genuinely needed; otherwise speak to the whole table.
 Be concise and clear in your responses.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -225,8 +236,9 @@ When appropriate, explain how weather conditions impact farming decisions and ri
 Uploaded images are delivered to you directly as native vision input — describe and analyze what you actually see in them.`;
       break;
     case "Moderator":
-      roleInstructions = `Facilitate the discussion, summarize key points, ensure all experts contribute, and manage conversation flow. 
-      When asked who should speak next, analyze the last few messages and the overall goal. Respond ONLY with the role name of the expert who should speak next (e.g., 'Crop Specialist'). Do not add any other text. If unsure, suggest 'RoundRobin'.`;
+      roleInstructions = `Facilitate the discussion, summarize key points, ensure all experts contribute, and manage conversation flow.
+      When asked who should speak next, analyze the last few messages and the overall goal. Respond ONLY with the role name of the expert who should speak next (e.g., 'Crop Specialist'). Do not add any other text.
+      G5: you may also end the roundtable — if the discussion has run its course (the farmer's question is answered, decisions are made, and further turns would only repeat the table), respond ONLY with 'Conclude' and the council will close with a final synthesis from you. If unsure, suggest 'RoundRobin'.`;
       break;
     default:
       roleInstructions = `Provide insights based on your general agricultural knowledge.`;
@@ -462,6 +474,57 @@ function visionRejectionMessage(expertName: string): string {
     return `⚠️ ${expertName} could not analyze the image — this model doesn't accept image input. Try a vision-capable model (e.g. switch this expert to one, or use BYOK).`;
 }
 
+/**
+ * G9 legibility: the structural slice of a stored Insight the carried-forward
+ * block needs (a plain Insight satisfies this). id/createdAt are optional so
+ * synthetic entries remain testable; the latest-insight pick falls back
+ * through id → createdAt → insertion order.
+ */
+export interface PriorDecisionInsight {
+    title: string;
+    // Nullable to accept the drizzle select type of the insights.points
+    // array column directly; non-array values are filtered out below.
+    points: string[] | null | undefined;
+    id?: number;
+    createdAt?: Date | string | null;
+}
+
+/**
+ * G9 legibility: build the compact "PRIOR DECISIONS" system block injected
+ * into expert turns so the council builds on settled decisions from a prior
+ * sequence instead of re-litigating them. Zero extra model calls — the block
+ * is assembled from the insights already stored by generateInsights.
+ *
+ * Pure and unit-testable. Returns the block for the LATEST insight (highest
+ * id, else newest createdAt, else last array entry — storage order is not
+ * relied upon), or null when there is nothing usable. The whole block is
+ * truncated to PRIOR_DECISIONS_MAX_CHARS via the shared truncator.
+ */
+export function buildPriorDecisionsBlock(insights: PriorDecisionInsight[]): string | null {
+    if (!Array.isArray(insights) || insights.length === 0) return null;
+    const withPoints = insights.filter(
+        (i) => i && Array.isArray(i.points) && i.points.some((p) => typeof p === "string" && p.trim())
+    );
+    if (withPoints.length === 0) return null;
+    const rank = (i: PriorDecisionInsight): number => {
+        if (typeof i.id === "number") return i.id;
+        const t = i.createdAt ? new Date(i.createdAt).getTime() : 0;
+        return Number.isNaN(t) ? 0 : t;
+    };
+    const latest = withPoints.reduce((a, b) => (rank(b) >= rank(a) ? b : a));
+    // The filter above guarantees an array, but narrowing doesn't survive
+    // reduce — assert it locally.
+    const latestPoints: string[] = Array.isArray(latest.points) ? latest.points : [];
+    const bullets = latestPoints
+        .filter((p) => typeof p === "string" && p.trim())
+        .map((p) => `- ${p.trim()}`);
+    if (bullets.length === 0) return null;
+    return truncateForModel(
+        `PRIOR DECISIONS (settled in an earlier round — do not re-litigate; build on these):\n${bullets.join("\n")}`,
+        PRIOR_DECISIONS_MAX_CHARS
+    );
+}
+
 // Function to generate response for a single expert WITH STREAMING
 // Calls onToken for each token chunk, returns the final InsertMessage
 export async function getExpertResponseStream(
@@ -498,7 +561,7 @@ export async function getExpertResponseStream(
     }
   }
   
-  const systemPrompt = generateSystemPrompt(expert, availableRoles, farmContext, weatherContext);
+  const systemPrompt = generateSystemPrompt(expert, availableRoles, farmContext, weatherContext, conversation?.charter ?? null);
 
   const messages: AIMessage[] = [
     { role: "system", content: systemPrompt }
@@ -513,6 +576,19 @@ export async function getExpertResponseStream(
       role: mapDbRoleToApiRole(msg.role),
       content: truncateForModel(msg.content)
    })).slice(-15));
+
+   // G9 legibility: carried-forward context — the latest insight from a prior
+   // sequence rides along as a compact system block (zero extra model calls).
+   // Optional context: any storage hiccup is logged and skipped, never fatal.
+   try {
+     const priorInsights = await storage.getConversationInsights(expert.conversationId);
+     const priorDecisionsBlock = buildPriorDecisionsBlock(priorInsights ?? []);
+     if (priorDecisionsBlock) {
+       messages.push({ role: "system", content: priorDecisionsBlock });
+     }
+   } catch (priorErr) {
+     console.warn("[STREAM] Could not load prior decisions:", (priorErr as Error).message);
+   }
 
    // With image parts present, the user message becomes a multimodal content
    // array. The 12k-char truncation applies to the TEXT part only — the
@@ -577,7 +653,7 @@ export async function getExpertResponseStream(
     }
     
     const { artifacts, cleanContent } = extractArtifacts(response.message.content);
-    
+
     return {
       conversationId: expert.conversationId,
       expertId: expert.id,
@@ -586,7 +662,11 @@ export async function getExpertResponseStream(
       role: "assistant",
       expertName: expert.name,
       expertRole: expert.role,
-      artifacts: artifacts
+      artifacts: artifacts,
+      // G4: parse the @-tags the model actually wrote so the orchestrator
+      // can route on them (and the client can render chips) without
+      // re-parsing the stored content.
+      mentions: extractMentions(cleanContent, availableRoles)
     };
 
   } catch (error) {
@@ -616,7 +696,10 @@ export async function getExpertResponse(
   availableRoles: string[] 
 ): Promise<InsertMessage> { 
   console.log(`Generating response for expert: ${expert.name} (${expert.role})`);
-  const systemPrompt = generateSystemPrompt(expert, availableRoles); 
+  // G6: fetch the conversation for its council charter (farm/weather context
+  // is only wired into the streaming path).
+  const conversation = await storage.getConversation(expert.conversationId);
+  const systemPrompt = generateSystemPrompt(expert, availableRoles, undefined, undefined, conversation?.charter ?? null);
   
   const messages: AIMessage[] = [
     { role: "system", content: systemPrompt }
@@ -634,6 +717,18 @@ export async function getExpertResponse(
       role: mapDbRoleToApiRole(msg.role),
       content: truncateForModel(msg.content)
    })).slice(-15));
+
+   // G9 legibility: same carried-forward PRIOR DECISIONS block as the
+   // streaming path. Optional context: storage hiccups are skipped.
+   try {
+     const priorInsights = await storage.getConversationInsights(expert.conversationId);
+     const priorDecisionsBlock = buildPriorDecisionsBlock(priorInsights ?? []);
+     if (priorDecisionsBlock) {
+       messages.push({ role: "system", content: priorDecisionsBlock });
+     }
+   } catch (priorErr) {
+     console.warn("Could not load prior decisions:", (priorErr as Error).message);
+   }
 
    // With image parts present, the user message becomes a multimodal content
    // array. The 12k-char truncation applies to the TEXT part only — the
@@ -694,7 +789,7 @@ export async function getExpertResponse(
     }
     
     const { artifacts, cleanContent } = extractArtifacts(response.message.content);
-    
+
     return {
       conversationId: expert.conversationId,
       expertId: expert.id,
@@ -703,7 +798,11 @@ export async function getExpertResponse(
       role: "assistant",
       expertName: expert.name,
       expertRole: expert.role,
-      artifacts: artifacts
+      artifacts: artifacts,
+      // G4: parse the @-tags the model actually wrote so the orchestrator
+      // can route on them (and the client can render chips) without
+      // re-parsing the stored content.
+      mentions: extractMentions(cleanContent, availableRoles)
     };
 
   } catch (error) {
@@ -721,6 +820,26 @@ export async function getExpertResponse(
       expertRole: expert.role,
     };
   }
+}
+
+/**
+ * G8 aux-call hygiene: resolve the model for auxiliary (non-expert-turn) LLM
+ * calls — insight extraction and the Moderator's next-speaker suggestion.
+ * Precedence: the Moderator expert's own model → DEFAULT_AUX_MODEL → the first
+ * expert's model. Null means nothing resolvable: callers must skip the aux
+ * call (or treat it as failed) instead of dialing a hardcoded legacy slug
+ * that is likely dead on fresh installs. Whitespace-only values count as
+ * empty; the returned slug is trimmed.
+ */
+export function resolveAuxModel(
+  moderatorModel: string | null | undefined,
+  firstExpertModel: string | null | undefined
+): string | null {
+  if (moderatorModel?.trim()) return moderatorModel.trim();
+  const envModel = process.env.DEFAULT_AUX_MODEL;
+  if (envModel && envModel.trim()) return envModel.trim();
+  if (firstExpertModel?.trim()) return firstExpertModel.trim();
+  return null;
 }
 
 // Function to generate insights
@@ -748,10 +867,21 @@ export async function generateInsights(conversationId: number, broadcastFn?: (co
     Only output the JSON object.
     `;
     
+    // G8: resolve the insights model dynamically (Moderator's model →
+    // DEFAULT_AUX_MODEL → first expert's model). Nothing resolvable means no
+    // insights: log and return instead of calling a dead legacy slug.
+    const experts = await storage.getConversationExperts(conversationId);
+    const moderatorExpert = experts.find(e => e.role === 'Moderator') ?? null;
+    const auxModel = resolveAuxModel(moderatorExpert?.model ?? null, experts[0]?.model ?? null);
+    if (!auxModel) {
+      console.error(`generateInsights: no aux model could be resolved for conversation ${conversationId} (no Moderator model, DEFAULT_AUX_MODEL unset, roster empty) — skipping insights.`);
+      return;
+    }
+
     const response = await callOpenRouterAPI([
       { role: "system", content: "You extract key insights from agricultural conversations. Respond only with the requested JSON format." },
       { role: "user", content: insightPrompt }
-    ], "mistralai/mixtral-8x7b-instruct"); 
+    ], auxModel);
     
     try {
       const insightData = JSON.parse(response.message.content);
@@ -788,8 +918,15 @@ export async function getModeratorNextSpeakerSuggestion(
         return null;
     }
     console.log("Asking Moderator for next speaker suggestion...");
-    const moderatorSystemPrompt = generateSystemPrompt(moderatorExpert, availableRoles);
-    const queryPrompt = `Based on the recent conversation history, which expert should speak next to best advance the discussion towards resolution or new insights? The available expert roles are: [${availableRoles.join(', ')}]. Respond only with the role name or 'RoundRobin'.`;
+    // G6: the speak-next / conclude judgment is charter-aware — the Moderator
+    // weighs the charter's goal and stop criteria.
+    const conversation = await storage.getConversation(moderatorExpert.conversationId);
+    const charter = conversation?.charter ?? null;
+    const moderatorSystemPrompt = generateSystemPrompt(moderatorExpert, availableRoles, undefined, undefined, charter);
+    let queryPrompt = `Based on the recent conversation history, which expert should speak next to best advance the discussion towards resolution or new insights? The available expert roles are: [${availableRoles.join(', ')}]. If the discussion has already run its course — the question is resolved and another turn would only repeat the table — answer 'Conclude' instead. Respond only with the role name, 'Conclude', or 'RoundRobin'.`;
+    if (charter?.trim()) {
+      queryPrompt += ` The council charter in your instructions states this roundtable's goal and stop criteria — factor them into the decision.`;
+    }
 
     const messages: AIMessage[] = [
         { role: "system", content: moderatorSystemPrompt },
@@ -800,11 +937,23 @@ export async function getModeratorNextSpeakerSuggestion(
         { role: "user", content: queryPrompt }
     ];
 
+    // G8: resolve this aux call's model dynamically (Moderator's model →
+    // DEFAULT_AUX_MODEL → first expert's model, via the conversation's
+    // expert roster in order — experts[0] is the first active expert).
+    // Nothing resolvable behaves exactly like a failed call: return null so
+    // the orchestrator falls back to round-robin.
+    const experts = await storage.getConversationExperts(moderatorExpert.conversationId);
+    const auxModel = resolveAuxModel(moderatorExpert.model, experts[0]?.model ?? null);
+    if (!auxModel) {
+        console.error("getModeratorNextSpeakerSuggestion: no aux model could be resolved (Moderator has no model, DEFAULT_AUX_MODEL unset, roster empty) — falling back to round-robin.");
+        return null;
+    }
+
     try {
-        const response = await callOpenRouterAPI(messages, moderatorExpert.model || 'mistralai/mistral-7b-instruct'); 
+        const response = await callOpenRouterAPI(messages, auxModel);
         const suggestedRole = response.message.content.trim().replace(/\.$/, '');
         
-        if (availableRoles.includes(suggestedRole) || suggestedRole === 'RoundRobin') {
+        if (availableRoles.includes(suggestedRole) || suggestedRole === 'RoundRobin' || suggestedRole === 'Conclude') {
              console.log(`Moderator suggested next speaker: ${suggestedRole}`);
             return suggestedRole;
         } else {
@@ -815,4 +964,119 @@ export async function getModeratorNextSpeakerSuggestion(
         console.error("Error querying Moderator for next speaker:", error);
         return null;
     }
+}
+
+/**
+ * G5 semantic conclusion: after the Moderator answers 'Conclude', stream the
+ * council's closing synthesis as one full Moderator turn. Broadcasts the same
+ * lifecycle as a normal expert turn (expert_stream_start → tokens →
+ * expert_stream_done with the stored message) and persists the message with
+ * isSynthesis: true so the client (and history) can tell it apart. Never
+ * throws — provider failures store an honest "(Error generating response …)"
+ * assistant message (still flagged isSynthesis) and broadcast done.
+ *
+ * G6: charter-aware — the conversation's council charter is injected into the
+ * Moderator's system prompt and the closing prompt, so the summary honors the
+ * charter's goal and stop criteria.
+ */
+export async function generateClosingSynthesis(
+  conversationId: number,
+  moderatorExpert: Expert,
+  broadcastFn: (convId: number, data: any) => void
+): Promise<void> {
+  console.log(`[SYNTHESIS] Generating closing synthesis for conversation ${conversationId}`);
+  try {
+    const history = await storage.getConversationMessages(conversationId);
+    const experts = await storage.getConversationExperts(conversationId);
+    const availableRoles = experts.map(e => e.role);
+    const conversation = await storage.getConversation(conversationId);
+    const charter = conversation?.charter ?? null;
+    const systemPrompt = generateSystemPrompt(moderatorExpert, availableRoles, undefined, undefined, charter);
+
+    const closingPrompt = `The discussion has run its course and the council is closing. Write the council's closing synthesis for the farmer:
+- Summarize the consensus the council reached and the concrete decisions made.
+- Name the open disagreements or unanswered questions, if any remain.
+- List the concrete next actions for the farmer, in order.
+- Name the experts who contributed key points.
+Be brief — a farmer should be able to act on this in one read.` + (charter?.trim() ? `\nMeasure the summary against the council charter: state how the outcome fulfills its goal and stop criteria.` : ``);
+
+    const messages: AIMessage[] = [
+      { role: "system", content: systemPrompt },
+      ...history.map(msg => ({
+        role: mapDbRoleToApiRole(msg.role),
+        content: truncateForModel(msg.content)
+      })).slice(-15),
+      { role: "user", content: closingPrompt }
+    ];
+
+    broadcastFn(conversationId, {
+      type: "expert_stream_start",
+      expertId: moderatorExpert.id,
+      expertName: moderatorExpert.name,
+      expertRole: "Moderator",
+    });
+
+    // G8 amendment: no hardcoded fallback slug. The model column is NOT NULL;
+    // an (unexpected) empty value surfaces through the honest-error path below.
+    const response = await callOpenRouterAPIStream(messages, moderatorExpert.model, (token) => {
+      broadcastFn(conversationId, {
+        type: "expert_stream_token",
+        expertId: moderatorExpert.id,
+        token,
+      });
+    });
+    const content = response.message.content;
+
+    const storedMessage = await storage.createMessage({
+      conversationId,
+      expertId: moderatorExpert.id,
+      userId: null,
+      content,
+      role: "assistant",
+      expertName: moderatorExpert.name,
+      expertRole: "Moderator",
+      isSynthesis: true,
+      mentions: extractMentions(content, availableRoles),
+    });
+    broadcastFn(conversationId, {
+      type: "expert_stream_done",
+      expertId: moderatorExpert.id,
+      message: storedMessage,
+    });
+    console.log(`[SYNTHESIS] Closing synthesis stored and broadcast for conversation ${conversationId}`);
+  } catch (error) {
+    console.error(`[SYNTHESIS] Error generating closing synthesis for conversation ${conversationId}:`, error);
+    // Honest-error convention: persist the failure (survives refetches), keep
+    // the synthesis flag, and still close the stream so the client is never
+    // left with a spinner. Re-throw nothing — the orchestrator chain continues
+    // into the natural-end cleanup.
+    const errorMsg = `(Error generating response from ${moderatorExpert.name}: ${error instanceof Error ? error.message : String(error)})`;
+    broadcastFn(conversationId, {
+      type: "expert_stream_token",
+      expertId: moderatorExpert.id,
+      token: errorMsg,
+    });
+    let storedMessage: Message | undefined;
+    try {
+      storedMessage = await storage.createMessage({
+        conversationId,
+        expertId: moderatorExpert.id,
+        userId: null,
+        content: errorMsg,
+        role: "assistant",
+        expertName: moderatorExpert.name,
+        expertRole: "Moderator",
+        isSynthesis: true,
+      });
+    } catch (storeError) {
+      console.error("[SYNTHESIS] Failed to store synthesis error message:", storeError);
+    }
+    if (storedMessage) {
+      broadcastFn(conversationId, {
+        type: "expert_stream_done",
+        expertId: moderatorExpert.id,
+        message: storedMessage,
+      });
+    }
+  }
 }

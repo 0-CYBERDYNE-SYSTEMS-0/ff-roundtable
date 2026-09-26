@@ -10,19 +10,19 @@
     {
       "name": "James Patterson",
       "role": "Crop Specialist",
-      "model": "z-ai/glm-4.5-air:free",
+      "model": "z-ai/glm-5.2:free",
       "avatarUrl": "https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?ixlib=rb-1.2.1&auto=format&fit=facearea&facepad=2&w=256&h=256&q=80"
     },
     {
       "name": "Dr. Maria Rodriguez",
       "role": "Irrigation Engineer",
-      "model": "minimax/minimax-m2.5:free",
+      "model": "z-ai/glm-5.2:free",
       "avatarUrl": "https://images.unsplash.com/photo-1438761681033-6461ffad8d80?ixlib=rb-1.2.1&auto=format&fit=facearea&facepad=2&w=256&h=256&q=80"
     },
     {
       "name": "Research Scout",
       "role": "Research Analyst",
-      "model": "inclusionai/ring-2.6-1t:free",
+      "model": "deepseek/deepseek-v4-flash-0731:free",
       "avatarUrl": "https://images.unsplash.com/photo-1551836022-d5d88e9218df?ixlib=rb-1.2.1&auto=format&fit=facearea&facepad=2&w=256&h=256&q=80"
     }
   ]

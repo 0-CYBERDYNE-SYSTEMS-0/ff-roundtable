@@ -4,15 +4,17 @@ import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { setupAuth } from "./auth";
 import { callOpenRouterAPI, callPerplexityAPI, generateSystemPrompt, getExpertResponse, generateInsights } from "./ai";
-import { processMessageTurnBased, InteractionOrchestrator, getConversationState } from "./orchestrator";
+import { processMessageTurnBased, InteractionOrchestrator, getConversationState, restorePausedFromSnapshot } from "./orchestrator";
 import { encryptApiKey, decryptApiKey, maskApiKey } from "./crypto";
 import multer from "multer";
 import path from "path";
 import fs from "fs";
-import { randomBytes } from "crypto";
+import { createHmac, randomBytes, timingSafeEqual } from "crypto";
 import Stripe from "stripe";
-import { WebSocketServer } from "ws";
+import { WebSocketServer, type RawData } from "ws";
 import { InsertConversation, InsertExpert, InsertMessage, Message, insertFarmProfileSchema } from "@shared/schema";
+import { z } from "zod";
+import { extractMentions } from "@shared/mentions";
 import { buildVCalendar } from "@shared/ics";
 import { extractScheduleRows, parseIsoDate, nextMondayFrom, resolveRowStartDate, buildRowSummary } from "@shared/schedule-extract";
 import { generateComprehensiveMarkdown } from './export-utils';
@@ -67,6 +69,68 @@ function getSubscriptionClientSecret(subscription: Stripe.Subscription): string 
 
 // Development mode flag - uses NODE_ENV to determine dev vs production
 const DEVELOPMENT_MODE = process.env.NODE_ENV !== "production";
+
+// G6: body for PUT /api/protected/conversations/:id — update title and/or the
+// council charter. Strict: unknown fields are rejected, not silently dropped.
+// Title caps at 500 chars (the length the create path already accepts);
+// charter caps hard at 2,000 chars.
+const updateConversationSchema = z.object({
+  title: z.string().trim().min(1, "Title cannot be empty").max(500, "Title must be at most 500 characters").optional(),
+  charter: z.string().max(2000, "Charter must be at most 2,000 characters").nullable().optional(),
+});
+
+// Extract and VERIFY the express-session id from a WS upgrade request's
+// Cookie header. express-session signs the value as `s:<sessionId>.<signature>`
+// where signature = base64(HMAC-SHA256(secret, sessionId)) with trailing "="
+// padding stripped (cookie-signature's sign()). The signature must be
+// verified, never merely stripped — a leaked or guessed raw session id must
+// not be enough to mint an authenticated socket. `cookie-signature` is a
+// transitive dep of express-session but ships no type declarations, so the
+// equivalent check is hand-rolled with node:crypto and compared with
+// timingSafeEqual. Mirrors cookie-signature's unsign(): the sid/signature
+// split happens at the LAST dot of the signed portion.
+function getVerifiedSessionIdFromUpgradeRequest(req: { headers: { cookie?: string } }): string | null {
+  const secret = process.env.SESSION_SECRET;
+  // No secret configured means express-session signed cookies with a random
+  // per-process string we cannot reproduce — fail closed.
+  if (!secret) return null;
+
+  const cookieHeader = req.headers.cookie;
+  if (!cookieHeader) return null;
+  for (const part of cookieHeader.split(";")) {
+    const eq = part.indexOf("=");
+    if (eq === -1) continue;
+    const name = part.slice(0, eq).trim();
+    if (name !== "connect.sid") continue;
+    let value: string;
+    try {
+      value = decodeURIComponent(part.slice(eq + 1).trim());
+    } catch {
+      return null;
+    }
+    if (!value.startsWith("s:")) return null;
+    const signed = value.slice(2);
+    const dot = signed.lastIndexOf(".");
+    if (dot === -1) return null;
+    const sid = signed.slice(0, dot);
+    const providedSignature = signed.slice(dot + 1);
+    if (!sid || !providedSignature) return null;
+
+    const expectedSignature = createHmac("sha256", secret)
+      .update(sid)
+      .digest("base64")
+      .replace(/=+$/, "");
+    const expected = Buffer.from(expectedSignature);
+    const provided = Buffer.from(providedSignature);
+    // timingSafeEqual throws on length mismatch; unequal length is already a
+    // failed verification.
+    if (expected.length !== provided.length || !timingSafeEqual(expected, provided)) {
+      return null;
+    }
+    return sid;
+  }
+  return null;
+}
 
 export async function registerRoutes(app: Express): Promise<Server> {
   // Setup authentication routes
@@ -209,36 +273,148 @@ export async function registerRoutes(app: Express): Promise<Server> {
   
   console.log("WebSocket server initialized on path: /ws");
   
-  wss.on("connection", (ws) => {
+  wss.on("connection", (ws, req) => {
     console.log("WebSocket client connected");
-    
-    // Send an initial connection confirmation
-    ws.send(JSON.stringify({
-      type: "connection", 
-      data: { status: "connected" }
-    }));
-    
-    ws.on("message", (message) => {
-      try {
-        console.log("Received WebSocket message:", message.toString());
-      } catch (error) {
-        console.error("Error processing WebSocket message:", error);
-      }
-    });
-    
+
     ws.on("error", (error) => {
       console.error("WebSocket error:", error);
     });
-    
+
     ws.on("close", () => {
       console.log("WebSocket client disconnected");
     });
+
+    // G3: authenticate the upgrade against the same express-session store the
+    // HTTP routes use. Without this, every connected socket receives every
+    // conversation's streaming tokens.
+    const rejectUnauthenticated = () => ws.close(4401, "Unauthenticated");
+    const sid = getVerifiedSessionIdFromUpgradeRequest(req);
+
+    if (!sid) {
+      rejectUnauthenticated();
+      return;
+    }
+
+    // Frames can arrive while the session-store lookup is still in flight —
+    // with the pg store that lookup is a real round-trip, and a subscribe
+    // sent immediately after the handshake would otherwise be dropped (no
+    // message listener attached yet). Queue every early frame and drain it
+    // in order once the socket is authenticated.
+    const earlyFrames: RawData[] = [];
+    let authenticatedMessageHandler: ((message: RawData) => void) | null = null;
+    ws.on("message", (message) => {
+      if (authenticatedMessageHandler) {
+        authenticatedMessageHandler(message);
+      } else {
+        earlyFrames.push(message);
+      }
+    });
+
+    storage.sessionStore.get(sid, (err: any, session: any) => {
+      // The socket may have closed while the store lookup was in flight.
+      if (ws.readyState !== 1) return;
+
+      const userId = session?.passport?.user;
+      if (err || userId == null) {
+        rejectUnauthenticated();
+        return;
+      }
+
+      (ws as any).userId = userId;
+      (ws as any).subscriptions = new Set<number>();
+
+      // Send an initial connection confirmation
+      ws.send(JSON.stringify({
+        type: "connection",
+        data: { status: "connected" }
+      }));
+
+      const handleMessage = (message: RawData) => {
+        try {
+          let parsed: any;
+          try {
+            parsed = JSON.parse(message.toString());
+          } catch {
+            return; // Not JSON — ignore silently.
+          }
+
+          if (parsed?.type === "subscribe" && Number.isInteger(parsed.conversationId)) {
+            const conversationId = parsed.conversationId;
+            storage.getConversation(conversationId).then((conversation) => {
+              if (conversation && conversation.userId === (ws as any).userId) {
+                (ws as any).subscriptions.add(conversationId);
+                ws.send(JSON.stringify({ type: "subscribed", conversationId }));
+                // Replay the current orchestrator state so reconnects restore
+                // the mode badge without a refetch.
+                const state = getConversationState(conversationId);
+                if (state) {
+                  ws.send(JSON.stringify({
+                    type: "state_update",
+                    conversationId,
+                    mode: state.mode,
+                    isAutonomousEnabled: state.isAutonomousEnabled,
+                    maxAutonomousTurns: state.maxAutonomousTurns
+                  }));
+                } else {
+                  // G7: no live in-memory state — the snapshot stored on the
+                  // row (already loaded for the ownership check) is the only
+                  // remaining truth. A processing_*/autonomous snapshot is a
+                  // dead turn chain from before a restart: correct the badge
+                  // to idle instead of letting the client assume nothing.
+                  // Paused is real recoverable state: show the Paused badge —
+                  // the next message's cold-start path restores it for real.
+                  // Storage is intentionally not mutated here; the next
+                  // message's cold-start path owns snapshot corrections.
+                  // isAutonomousEnabled/maxAutonomousTurns are intentionally
+                  // OMITTED: they are not part of the snapshot, and hardcoding
+                  // a value here would flip the client's Enabled/Disabled
+                  // badge on every reconnect (the client guards both fields
+                  // with a typeof check and keeps its current value when
+                  // they're absent). The real values arrive with the next
+                  // live state_update.
+                  const snapshot = conversation.orchestratorState;
+                  if (snapshot && (snapshot.mode === "processing_sequential" || snapshot.mode === "autonomous")) {
+                    ws.send(JSON.stringify({
+                      type: "state_update",
+                      conversationId,
+                      mode: "idle"
+                    }));
+                  } else if (snapshot && snapshot.mode === "paused") {
+                    ws.send(JSON.stringify({
+                      type: "state_update",
+                      conversationId,
+                      mode: "paused"
+                    }));
+                  }
+                }
+              } else {
+                ws.send(JSON.stringify({ type: "subscribe_denied", conversationId }));
+              }
+            }).catch((error) => {
+              console.error("Error handling WebSocket subscribe:", error);
+            });
+          } else if (parsed?.type === "unsubscribe" && Number.isInteger(parsed.conversationId)) {
+            (ws as any).subscriptions.delete(parsed.conversationId);
+          }
+          // Everything else is ignored silently.
+        } catch (error) {
+          console.error("Error processing WebSocket message:", error);
+        }
+      };
+
+      authenticatedMessageHandler = handleMessage;
+      // Drain any frames that arrived during the session lookup, in order.
+      for (const frame of earlyFrames.splice(0)) {
+        handleMessage(frame);
+      }
+    });
   });
   
-  // Create a broadcast function
+  // Create a broadcast function. G3: send only to sockets that subscribed to
+  // this conversation (ownership was verified at subscribe time).
   const broadcastToConversation = (conversationId: number, data: any) => {
     wss.clients.forEach((client) => {
-      if (client.readyState === 1) { // OPEN
+      if (client.readyState === 1 && (client as any).subscriptions?.has(conversationId)) { // OPEN
         try {
           // Handle state_update messages (mode, autonomous status)
           if (data.type === "state_update") {
@@ -281,6 +457,43 @@ export async function registerRoutes(app: Express): Promise<Server> {
             client.send(JSON.stringify({
               type: "insights",
               conversationId
+            }));
+          }
+          // Handle steering acknowledgments: a message arrived during an
+          // active sequence; the current expert finishes, then the round
+          // restarts on the new message.
+          else if (data.type === "steering") {
+            client.send(JSON.stringify({
+              type: "steering",
+              conversationId
+            }));
+          }
+          // Handle G5 conclusion: the Moderator ended the round; the closing
+          // synthesis turn streams next.
+          else if (data.type === "concluding") {
+            client.send(JSON.stringify({
+              type: "concluding",
+              conversationId
+            }));
+          }
+          // Handle G8 degradation notices: informational only (e.g. the
+          // Moderator's routing call failed and the council falls back to
+          // round-robin). Never blocks processing.
+          else if (data.type === "notice") {
+            client.send(JSON.stringify({
+              type: "notice",
+              conversationId,
+              message: data.message
+            }));
+          }
+          // Handle G9 next-speaker preview: who is about to speak, sent just
+          // before their expert_stream_start.
+          else if (data.type === "next_speaker") {
+            client.send(JSON.stringify({
+              type: "next_speaker",
+              conversationId,
+              expertId: data.expertId,
+              expertRole: data.expertRole
             }));
           }
           // Handle error messages
@@ -588,12 +801,43 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const conversationId = parseInt(req.params.id);
       const conversation = await storage.getConversation(conversationId);
-      
+
       if (!conversation || conversation.userId !== req.user!.id) {
         return res.status(404).json({ message: "Conversation not found" });
       }
-      
+
       res.json(conversation);
+    } catch (error: any) {
+      res.status(500).json({ message: error.message });
+    }
+  });
+
+  // Update a conversation's title and/or council charter (G6). Ownership is
+  // enforced exactly like the sibling protected conversation routes (a
+  // mismatched or missing conversation is a 404 — no existence leak).
+  app.put("/api/protected/conversations/:id", async (req, res) => {
+    try {
+      const conversationId = parseInt(req.params.id);
+      const conversation = await storage.getConversation(conversationId);
+
+      if (!conversation || conversation.userId !== req.user!.id) {
+        return res.status(404).json({ message: "Conversation not found" });
+      }
+
+      const parsed = updateConversationSchema.strict().safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ message: "Invalid conversation update", errors: parsed.error.flatten() });
+      }
+      if (Object.keys(parsed.data).length === 0) {
+        return res.status(400).json({ message: "Nothing to update: provide a title and/or charter" });
+      }
+
+      const updatedConversation = await storage.updateConversation(conversationId, parsed.data);
+      if (!updatedConversation) {
+        return res.status(404).json({ message: "Conversation not found" });
+      }
+
+      res.json(updatedConversation);
     } catch (error: any) {
       res.status(500).json({ message: error.message });
     }
@@ -775,13 +1019,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(200).json(lastExistingMessage);
       }
 
-      // Store user message
+      // Store user message — G4: parse @-mentions once against this
+      // conversation's expert roles and persist them on the message. The
+      // orchestrator reads the stored field (selective wake for the
+      // sequential round); the field rides every broadcast so the client
+      // never re-parses.
+      const conversationExperts = await storage.getConversationExperts(conversationId);
+      const knownRoles = conversationExperts.map(e => e.role);
       const userMessage: InsertMessage = {
         conversationId,
         userId,
         expertId: null,
         content,
-        role: "user"
+        role: "user",
+        mentions: extractMentions(content, knownRoles)
       };
       const storedMessage: Message = await storage.createMessage(userMessage);
 
@@ -1099,10 +1350,33 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.post("/api/protected/conversations/:id/resume", async (req, res) => {
     try {
-      const orchestrator = await getOrchestratorForRequest(req, res);
-      if (!orchestrator) return;
+      const conversationId = parseInt(req.params.id);
+      // Ownership gate first — the same checks getOrchestratorForRequest
+      // applies, but WITHOUT its missing-state 404: a paused snapshot on the
+      // row is recoverable below, and this endpoint must answer exactly once.
+      const conversation = await storage.getConversation(conversationId);
+      if (!conversation) {
+        res.status(404).json({ message: "Conversation state not found or not initialized." });
+        return;
+      }
+      if (conversation.userId !== req.user!.id) {
+        res.status(403).json({ message: "Forbidden" });
+        return;
+      }
 
-      orchestrator.resume();
+      if (!getConversationState(conversationId)) {
+        // No live in-memory state. A paused snapshot persisted on the row is
+        // real, recoverable state (the server restarted while the council was
+        // parked): rebuild the live paused state from it, then run the normal
+        // resume below. Anything else keeps the 404.
+        const restored = await restorePausedFromSnapshot(conversationId, broadcastToConversation);
+        if (!restored) {
+          res.status(404).json({ message: "Conversation state not found or not initialized." });
+          return;
+        }
+      }
+
+      new InteractionOrchestrator(conversationId).resume();
       res.status(200).json({ message: "Resume signal sent." });
       
     } catch (error: any) {
