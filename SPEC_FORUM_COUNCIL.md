@@ -1,6 +1,6 @@
 # SPEC — Forum Council: A Roundtable That Behaves Like Real Experts
 
-**Branch:** `feat/forum-council` (from `feat/autonomous-council` / PR #5; rebase onto `main` once #5 merges)
+**Branch:** `feat/forum-council` (from `main` @ `fffc585`, after PR #5 merged)
 **Status:** APPROVED 2026-09-25 — budget default 25 turns + "let it run"; G11 retires newest-message-wins/full-round-restart
 **Builds on:** `SPEC_AUTONOMOUS_COUNCIL.md` (G1–G9). Goal IDs continue at G10.
 

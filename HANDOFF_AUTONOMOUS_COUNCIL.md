@@ -1,5 +1,7 @@
 # HANDOFF — Autonomous Council Implementation (feat/autonomous-council)
 
+> **STATUS: COMPLETE (historical).** G1–G9 shipped to `main` via PR #5 (`fffc585`). Current work: `SPEC_FORUM_COUNCIL.md` + `HANDOFF_FORUM_COUNCIL.md`. The §2 invariants below still apply except where `SPEC_FORUM_COUNCIL.md` changes them (G11 retires newest-message-wins/full-round restart; G13 replaces the 2×N cap).
+
 **For:** incoming dev team
 **From:** lead of the three-specialist crew (Patch-Surgeon / WS-Security-Surgeon / Red-Team rotation), 2026-09-16
 **Mission:** Implement SPEC_AUTONOMOUS_COUNCIL.md (G1–G9), verify in-app, ship PR to `origin/main`.
