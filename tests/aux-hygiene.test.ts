@@ -7,8 +7,8 @@
  *    count as empty; results are trimmed.
  *  - Moderator routing degradation: a null verdict (provider failure /
  *    invalid verdict / no resolvable aux model) falls back to round-robin in
- *    roster order and broadcasts exactly ONE "notice" per sequence — even
- *    across multiple autonomous turns — and re-arms for the next sequence.
+ *    active roster order and broadcasts exactly ONE "notice" per sequence —
+ *    even across multiple autonomous turns — and re-arms for the next one.
  *    A successful verdict broadcasts no notice.
  *
  * Mirrors tests/orchestrator.test.ts idioms (vi.mock of server/ai at the
@@ -251,14 +251,14 @@ describe("G8 moderator degradation notice", () => {
 
     const userMessage = createMockMessage(1, "Plan my week");
     await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn);
-    // Tight cap: the autonomous extension runs exactly 2 turns.
+    // Tight cap: the direct-autonomous run takes exactly 2 turns.
     new InteractionOrchestrator(conversationId).enableAutonomous(2);
 
     await waitForIdle();
 
-    // Round-robin order preserved: three active experts, then the 2-turn
-    // autonomous extension continues from the top of the active roster.
-    expect(turnNames()).toEqual(["Alice", "Bob", "Carol", "Alice", "Bob"]);
+    // Round-robin uses the active roster; the Moderator is not an ordinary
+    // turn and the two-turn direct run starts at the top.
+    expect(turnNames()).toEqual(["Alice", "Bob"]);
 
     // The Moderator was consulted before BOTH autonomous turns and returned
     // null both times — yet the notice went out exactly once.
@@ -292,9 +292,9 @@ describe("G8 moderator degradation notice", () => {
 
     await waitForIdle();
 
-    // The Moderator WAS consulted (autonomous extension ran) and answered.
+    // The Moderator WAS consulted before the direct-autonomous responder.
     expect(mockGetModeratorNextSpeakerSuggestion).toHaveBeenCalledTimes(1);
-    expect(turnNames()).toEqual(["Alice", "Bob", "Carol", "Alice"]);
+    expect(turnNames()).toEqual(["Alice"]);
     expect(notices()).toHaveLength(0);
     expect(getConversationState(conversationId)!.mode).toBe("idle");
   });
@@ -303,17 +303,18 @@ describe("G8 moderator degradation notice", () => {
     const conversationId = nextConvId();
     const { notices, waitForIdle } = setupModeratorRound(conversationId);
 
-    // Sequence 1: 3 sequential + 1 autonomous turn → one notice.
+    // Sequence 1: one direct-autonomous responder → one notice.
     const userMessage1 = createMockMessage(1, "First question");
     await processMessageTurnBased(userId, conversationId, userMessage1, broadcastFn);
     new InteractionOrchestrator(conversationId).enableAutonomous(1);
     await waitForIdle();
     expect(notices()).toHaveLength(1);
 
-    // Sequence 2: a fresh message after idle restarts the sequence; the
-    // Moderator fails again → the notice fires once more (reset worked).
+    // Sequence 2: a fresh idle message starts another direct-autonomous run;
+    // the Moderator fails again and the per-sequence notice re-arms.
     const userMessage2 = createMockMessage(2, "Second question");
     await processMessageTurnBased(userId, conversationId, userMessage2, broadcastFn);
+    new InteractionOrchestrator(conversationId).enableAutonomous(1);
     await waitForIdle();
 
     expect(notices()).toHaveLength(2);

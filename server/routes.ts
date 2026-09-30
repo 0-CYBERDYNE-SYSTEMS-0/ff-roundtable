@@ -459,13 +459,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
               conversationId
             }));
           }
-          // Handle steering acknowledgments: a message arrived during an
-          // active sequence; the current expert finishes, then the round
-          // restarts on the new message.
+          // Steering remains reserved for explicit `/new` restarts.
           else if (data.type === "steering") {
             client.send(JSON.stringify({
               type: "steering",
               conversationId
+            }));
+          }
+          // Busy farmer messages stay in the current flow; these events drive
+          // the subtle queued indicator in the chat composer.
+          else if (data.type === "message_queued" || data.type === "message_picked_up") {
+            client.send(JSON.stringify({
+              type: data.type,
+              conversationId,
+              messageId: data.messageId,
             }));
           }
           // Handle G5 conclusion: the Moderator ended the round; the closing
@@ -1019,11 +1026,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(200).json(lastExistingMessage);
       }
 
-      // Store user message — G4: parse @-mentions once against this
-      // conversation's expert roles and persist them on the message. The
-      // orchestrator reads the stored field (selective wake for the
-      // sequential round); the field rides every broadcast so the client
-      // never re-parses.
+      // Parse @-mentions once against this conversation's expert roles and
+      // persist them on the message. The orchestrator queues recognized roles
+      // as first responders; the field rides broadcasts so the client never
+      // re-parses it.
       const conversationExperts = await storage.getConversationExperts(conversationId);
       const knownRoles = conversationExperts.map(e => e.role);
       const userMessage: InsertMessage = {
@@ -1057,6 +1063,66 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.status(201).json(storedMessage);
     } catch (error: any) {
       console.error("Error in POST /messages:", error);
+      res.status(500).json({ message: error.message || "Internal server error" });
+    }
+  });
+
+  // Explicit topic restart. Ordinary messages join the active council flow;
+  // only this endpoint retains the interrupt-and-restart behavior.
+  app.post("/api/protected/conversations/:id/restart", async (req, res) => {
+    try {
+      const conversationId = parseInt(req.params.id);
+      const conversation = await storage.getConversation(conversationId);
+      if (!conversation || conversation.userId !== req.user!.id) {
+        return res.status(404).json({ message: "Conversation not found" });
+      }
+
+      const requestedTopic = typeof req.body?.topic === "string"
+        ? req.body.topic.trim()
+        : typeof req.body?.content === "string"
+          ? req.body.content.trim()
+          : "";
+      const history = await storage.getConversationMessages(conversationId);
+      const previousUserMessage = [...history].reverse().find(message => message.role === "user") ?? null;
+      if (!requestedTopic && !previousUserMessage) {
+        return res.status(400).json({ message: "A topic is required to start a discussion." });
+      }
+
+      let restartMessage: Message;
+      if (requestedTopic) {
+        const conversationExperts = await storage.getConversationExperts(conversationId);
+        restartMessage = await storage.createMessage({
+          conversationId,
+          userId: req.user!.id,
+          expertId: null,
+          content: requestedTopic,
+          role: "user",
+          mentions: extractMentions(requestedTopic, conversationExperts.map(expert => expert.role)),
+        });
+        broadcastToConversation(conversationId, restartMessage);
+      } else {
+        // Bare `/new` repeats the latest farmer topic as an explicit fresh
+        // run without adding an empty/command-only message to the transcript.
+        restartMessage = previousUserMessage!;
+      }
+
+      processMessageTurnBased(
+        req.user!.id,
+        conversationId,
+        restartMessage,
+        broadcastToConversation,
+        { restart: true },
+      ).catch(error => {
+        console.error("Error during explicit conversation restart:", error);
+        broadcastToConversation(conversationId, {
+          type: "error",
+          message: "Failed to restart expert processing.",
+        });
+      });
+
+      res.status(requestedTopic ? 201 : 200).json(restartMessage);
+    } catch (error: any) {
+      console.error("Error in POST /restart:", error);
       res.status(500).json({ message: error.message || "Internal server error" });
     }
   });

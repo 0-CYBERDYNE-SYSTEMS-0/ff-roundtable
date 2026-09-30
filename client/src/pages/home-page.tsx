@@ -16,6 +16,7 @@ import { useWebSocket, sendWebSocketSubscription, sendWebSocketUnsubscription } 
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ZapIcon, ZapOffIcon, Menu, PauseIcon, PlayIcon, ScrollText, XIcon } from "lucide-react";
+import { parseNewCommand } from "@/lib/new-command";
 
 // G9 quiet console: per-event chatter is gated behind a debug flag so the
 // browser console stays readable in production. Force it per-tab with
@@ -54,10 +55,10 @@ export default function HomePage() {
   // We might also want to store maxAutonomousTurns if we allow setting it from UI
   // const [maxAutonomousTurns, setMaxAutonomousTurns] = useState<number>(0);
 
-  // Steering: a message sent mid-sequence is handled by the server's
-  // interrupt path — the current expert finishes, then the round restarts on
-  // the new message. The banner clears on the next processing state_update.
-  const [isSteering, setIsSteering] = useState<boolean>(false);
+  // A busy discussion may queue farmer input for the next Moderator route.
+  // Keep it visible until pickup; an idle state after exhausted recovery means
+  // the stored message is waiting for the user to retry or explicitly restart.
+  const [hasQueuedMessage, setHasQueuedMessage] = useState<boolean>(false);
 
   // G5: the Moderator decided the discussion is done and is delivering the
   // closing synthesis. Cleared alongside the other transient flags.
@@ -111,6 +112,7 @@ export default function HomePage() {
     },
     onSuccess: (newConversation) => {
       queryClient.invalidateQueries({ queryKey: ["/api/protected/conversations"] });
+      setHasQueuedMessage(false);
       setActiveConversation(newConversation.id);
       toast({
         title: "New conversation created",
@@ -133,6 +135,7 @@ export default function HomePage() {
     },
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ["/api/protected/conversations"] });
+      setHasQueuedMessage(false);
       setActiveConversation(data.conversationId);
       toast({
         title: "Roundtable ready",
@@ -291,11 +294,55 @@ export default function HomePage() {
     },
   });
 
-  // Send immediately — always. A message typed during an active sequence is
-  // accepted by the server as steering (it finishes the current expert and
-  // restarts the round on the newest message). Double-click safety is covered
-  // server-side by the duplicate-submission gate.
+  // `/new [topic]` explicitly restarts the current conversation. It has its
+  // own endpoint so the command itself is never stored as a chat message.
+  const restartConversationMutation = useMutation({
+    mutationFn: async ({ conversationId, topic }: { conversationId: number; topic?: string }) => {
+      const res = await apiRequest(
+        "POST",
+        `/api/protected/conversations/${conversationId}/restart`,
+        topic ? { topic } : {},
+      );
+      if (!res.ok) {
+        let message = "Failed to restart discussion";
+        try {
+          const errorData = await res.json();
+          message = errorData.message || message;
+        } catch {
+          // Keep the fallback message if the API response has no JSON body.
+        }
+        throw new Error(message);
+      }
+      return conversationId;
+    },
+    onSuccess: (conversationId) => {
+      setHasQueuedMessage(false);
+      queryClient.invalidateQueries({ queryKey: [`/api/protected/conversations/${conversationId}/messages`] });
+      queryClient.invalidateQueries({ queryKey: [`/api/protected/conversations/${conversationId}`] });
+      queryClient.invalidateQueries({ queryKey: ["/api/protected/conversations"] });
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Failed to restart discussion",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
+  });
+
+  // Normal messages are sent immediately and the server decides whether busy
+  // input should wait for the next Moderator route. `/new` is the explicit
+  // same-conversation restart command.
   const handleSendMessage = (content: string) => {
+    const topic = parseNewCommand(content);
+    if (topic !== null) {
+      if (!activeConversation) return;
+      restartConversationMutation.mutate({
+        conversationId: activeConversation,
+        ...(topic ? { topic } : {}),
+      });
+      return;
+    }
     sendMessageMutation.mutate(content);
   };
 
@@ -543,7 +590,7 @@ export default function HomePage() {
     setUpNextExpertId(null);
     setInteractionMode("idle");
     setIsProcessing(false);
-    setIsSteering(false);
+    setHasQueuedMessage(false);
     setIsConcluding(false);
     setSidebarOpen(false);
   };
@@ -592,7 +639,7 @@ export default function HomePage() {
     setUpNextExpertId(null);
     setIsProcessing(false);
     setInteractionMode("idle");
-    setIsSteering(false);
+    setHasQueuedMessage(false);
     setIsConcluding(false);
   }, [socketStatus, activeConversation]);
   
@@ -690,12 +737,11 @@ export default function HomePage() {
               setInteractionMode(parsedData.mode as InteractionMode);
               // Set isProcessing to true when entering processing_sequential or autonomous mode
               setIsProcessing(parsedData.mode === "processing_sequential" || parsedData.mode === "autonomous");
-              // A (re)started or finished round resolves any pending steering,
-              // and a finished or restarted round ends the concluding window.
+              // A stopped conversation clears queued feedback; pausing keeps
+              // it visible because queued farmer input remains pending.
               // A pause landing mid-synthesis also ends the concluding window:
               // the council is parked, not concluding.
               if (parsedData.mode === "processing_sequential" || parsedData.mode === "idle" || parsedData.mode === "paused") {
-                setIsSteering(false);
                 setIsConcluding(false);
               }
               // Clear streaming state when returning to idle
@@ -711,11 +757,14 @@ export default function HomePage() {
             }
             break;
 
-          case "steering":
-            // The server accepted a mid-sequence message; it will restart the
-            // round on it once the current expert finishes.
-            debugLog("WebSocket: Steering acknowledged");
-            setIsSteering(true);
+          case "message_queued":
+            debugLog("WebSocket: Farmer message queued for pickup");
+            setHasQueuedMessage(true);
+            break;
+
+          case "message_picked_up":
+            debugLog("WebSocket: Queued farmer message picked up");
+            setHasQueuedMessage(false);
             break;
 
           case "concluding":
@@ -798,7 +847,6 @@ export default function HomePage() {
             setUpNextExpertId(null);
             setIsProcessing(false);
             setInteractionMode("idle");
-            setIsSteering(false);
             setIsConcluding(false);
             break;
 
@@ -928,13 +976,15 @@ export default function HomePage() {
                 {reconnectAttempts > 0 && <span className="text-xs">Attempt {reconnectAttempts}</span>}
               </div>
             )}
-            {isSteering && (
+            {hasQueuedMessage && (
               <div
                 role="status"
                 aria-live="polite"
-                className="flex flex-wrap items-center gap-2 px-4 py-2 text-sm bg-farm-yellow/20 text-yellow-900 border-b border-farm-yellow/40"
+                className="flex items-center px-4 py-1.5 text-xs bg-farm-powder/20 text-farm-blue border-b border-farm-tan/20"
               >
-                <span>Steering — the council takes this after the current expert finishes.</span>
+                <span>{interactionMode === "idle"
+                  ? "The discussion stopped; your message is saved."
+                  : "The council will pick this up next."}</span>
               </div>
             )}
             {isConcluding && (
@@ -1087,7 +1137,7 @@ export default function HomePage() {
                         onSendMessage={handleSendMessage}
                         onUploadFile={handleFileUpload}
                         isUploading={uploadFileMutation.isPending}
-                        isLoading={sendMessageMutation.isPending || isProcessing}
+                        isLoading={sendMessageMutation.isPending || restartConversationMutation.isPending || isProcessing}
                         isLoadingMessages={isLoadingMessages}
                         messagesError={messagesError}
                         user={user}

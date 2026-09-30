@@ -393,6 +393,72 @@ describe("WebSocket scoping (G3)", () => {
     }
   });
 
+  it("delivers queued and picked-up farmer-message events only to subscribed sockets", async () => {
+    const convo = await createConversation(baseUrl, cookieA, "Joined-message event flow");
+    await addExpert(baseUrl, cookieA, convo.id);
+
+    const clientSub = await connect(wsUrl, cookieA);
+    let releaseFirstTurn: () => void = () => {};
+    const firstTurnHeld = new Promise<void>((resolve) => { releaseFirstTurn = resolve; });
+    try {
+      await nextMessage(clientSub, (m) => m.type === "connection");
+      clientSub.ws.send(JSON.stringify({ type: "subscribe", conversationId: convo.id }));
+      await nextMessage(clientSub, (m) => m.type === "subscribed" && m.conversationId === convo.id);
+
+      mockGetExpertResponseStream.mockImplementationOnce(async (expert: any) => {
+        await firstTurnHeld;
+        return {
+          conversationId: expert.conversationId,
+          expertId: expert.id,
+          userId: null,
+          content: "The original response finishes.",
+          role: "assistant",
+          expertName: expert.name,
+          expertRole: expert.role,
+        };
+      });
+
+      const first = await api(baseUrl, "POST", `/api/protected/conversations/${convo.id}/messages`, {
+        cookie: cookieA,
+        body: { content: "Start the discussion" },
+      });
+      expect(first.status).toBe(201);
+      await nextMessage(clientSub, (m) => m.type === "expert_stream_start" && m.conversationId === convo.id);
+
+      const second = await api(baseUrl, "POST", `/api/protected/conversations/${convo.id}/messages`, {
+        cookie: cookieA,
+        body: { content: "Add this detail to the discussion" },
+      });
+      expect(second.status).toBe(201);
+      const secondMessage = await second.json();
+      const queued = await nextMessage(clientSub, (m) => m.type === "message_queued" && m.conversationId === convo.id);
+      expect(queued.messageId).toBe(secondMessage.id);
+
+      const disabled = await api(baseUrl, "POST", `/api/protected/conversations/${convo.id}/autonomous/disable`, {
+        cookie: cookieA,
+      });
+      expect(disabled.status).toBe(200);
+
+      releaseFirstTurn();
+      const pickedUp = await nextMessage(
+        clientSub,
+        (m) => m.type === "message_picked_up" && m.conversationId === convo.id && m.messageId === secondMessage.id,
+      );
+      expect(pickedUp.messageId).toBe(secondMessage.id);
+      await waitForConversationMode(convo.id, "idle");
+
+      // The already subscribed socket for a different conversation must not
+      // see either join-flow event.
+      await waitFor(100);
+      expect(clientA.received.some((m) =>
+        m.conversationId === convo.id && ["message_queued", "message_picked_up"].includes(m.type),
+      )).toBe(false);
+    } finally {
+      releaseFirstTurn();
+      clientSub.ws.close(1000, "test done");
+    }
+  });
+
   // ─────────────────────────────────────────────────────────────────
   // Snapshot-only replay + restart-paused resume (POST /resume)
   // ─────────────────────────────────────────────────────────────────

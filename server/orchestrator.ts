@@ -14,7 +14,7 @@ const debugLog = (...args: unknown[]) => {
 // Define interaction modes more formally
 type InteractionMode = 
     | "idle"          // Not processing anything
-    | "processing_sequential" // Actively processing turns triggered by user
+    | "processing_sequential" // Legacy snapshot mode; new discussions start autonomous
     | "paused"        // User manually paused
     | "autonomous";   // Experts interacting autonomously (Future Step)
 
@@ -30,15 +30,28 @@ interface ConversationState {
     broadcastFn: (convId: number, data: any) => void; // Store broadcast function
     // Autonomous settings
     isAutonomousEnabled: boolean; // Default: true
-    maxAutonomousTurns: number;   // Max turns per autonomous round (e.g., total expert responses)
+    maxAutonomousTurns: number;   // Max expert responses; 100 represents the hard-capped "let it run" option
     totalAutonomousTurnsTaken: number; // Counter for turns within the current autonomous session
     // Add a flag to indicate if the current sequence was interrupted by the user
     wasInterrupted: boolean;
+    // The newest ordinary farmer message waiting to be incorporated by the
+    // next speaker. All messages remain in storage history; this pointer is
+    // only the current prompt/routing handoff.
+    pendingUserMessage: Message | null;
+    // FIFO of all valid @-routed speaker requests since the current routing
+    // point, preserving source text order across farmer and expert messages.
+    pendingMentionRoutes: PendingMentionRoute[];
+    // True until the system Moderator has made its next-speaker decision
+    // after a farmer message arrived.
+    farmerJustSpoke: boolean;
+    // Idle conversations with autonomy disabled still get one routed expert
+    // response, then end naturally.
+    singleTurnOnly: boolean;
     // Preserve the active phase while a sequence is paused.
     pausedFromMode: Exclude<InteractionMode, "idle" | "paused"> | null;
     // Internal (never broadcast): a turn is actively streaming right now.
     // pause() can land mid-turn; this is the only reliable "is a turn
-    // actually streaming" signal for the paused-interrupt path.
+    // actually streaming" signal for in-place resume.
     turnInFlight: boolean;
     // Internal (never broadcast): a processNextTurn chain is scheduled but
     // has not fired yet. Exactly one chain may drive a conversation at a
@@ -46,6 +59,13 @@ interface ConversationState {
     // two setImmediate chains pending (one from the loop's own next-turn
     // scheduling, one from resume), double-driving turns and insights.
     turnChainScheduled: boolean;
+    // Internal (never broadcast): one chain currently owns routing/turn
+    // awaits. A paused join resumes this chain in place instead of scheduling
+    // a competing chain while the Moderator is still deciding.
+    turnChainRunning: boolean;
+    // Consecutive scheduled processing failures for this in-memory session.
+    // Successful expert persistence or explicit /new resets the counter.
+    scheduledFailureAttempts: number;
     // In-memory recovery guard for a loop that died between turns.
     lastProgressAt: number;
     // Expert message contents of the CURRENT sequence (sequential round 1 +
@@ -53,10 +73,8 @@ interface ConversationState {
     // a new sequence starts, carried across the sequential→autonomous
     // transition.
     sequenceExpertContents: string[];
-    // G4: experts speaking in THIS sequential round. Defaults to the full
-    // active roster; a user message carrying valid mentions narrows it to the
-    // addressed experts (roster order). The autonomous extension always runs
-    // over the FULL activeExperts.
+    // Legacy G4 snapshot field. New G11 sequences route mentions through the
+    // pending FIFO and leave this list empty; Moderator is never in it.
     roundExperts: Expert[];
     // G4 ping-pong guard: the unordered role pair ("A<B", sorted) of the last
     // mention-routed turn plus how many consecutive mention-routed turns that
@@ -71,9 +89,18 @@ interface ConversationState {
     // We might add turn limits, autonomous rounds etc. later
 }
 
+interface PendingMentionRoute {
+    role: string;
+    // Null for farmer mentions; expert-origin routes retain the speaker role
+    // for the existing same-pair ping-pong guard.
+    sourceRole: string | null;
+}
+
 // Placeholder - In-memory state management
 const conversationStates: Map<number, ConversationState> = new Map();
 const STALE_PROCESSING_MS = 5 * 60 * 1000;
+const DEFAULT_TURN_BUDGET = 25;
+const MAX_TURN_BUDGET = 100;
 
 // ─── G7: Survivable orchestrator state ───────────────────────────────────────
 // A minimal snapshot is persisted to the conversation row at TURN BOUNDARIES
@@ -144,9 +171,19 @@ export function isUsableConversationState(state: ConversationState | undefined):
         typeof state.moderatorExpert.name === "string" &&
         (state.moderatorExpert.model === null || typeof state.moderatorExpert.model === "string") &&
         typeof state.moderatorExpert.systemPrompt === "string" &&
+        (state.pendingUserMessage === null || (typeof state.pendingUserMessage === "object" && state.pendingUserMessage.role === "user")) &&
+        Array.isArray(state.pendingMentionRoutes) &&
+        state.pendingMentionRoutes.every(route =>
+            route && typeof route.role === "string" &&
+            (route.sourceRole === null || typeof route.sourceRole === "string")
+        ) &&
+        typeof state.farmerJustSpoke === "boolean" &&
+        typeof state.singleTurnOnly === "boolean" &&
         Number.isInteger(state.currentExpertIndex) &&
         ["idle", "processing_sequential", "paused", "autonomous"].includes(state.mode) &&
         typeof state.lastProgressAt === "number" &&
+        typeof state.turnChainRunning === "boolean" &&
+        Number.isInteger(state.scheduledFailureAttempts) && state.scheduledFailureAttempts >= 0 &&
         Array.isArray(state.sequenceExpertContents) &&
         Array.isArray(state.roundExperts) &&
         state.roundExperts.every(e => e.role !== "Moderator") &&
@@ -157,17 +194,44 @@ export function isUsableConversationState(state: ConversationState | undefined):
     );
 }
 
-// G4: the experts that speak in THIS sequential round. Defaults to the full
-// active roster; a user message with valid mentions narrows it to the
-// addressed experts in roster order (selective wake). Stale/unknown mentions
-// that filter to nothing fall back to the full roster.
+// Legacy G4 helper retained for compatibility with older sequential code.
+// G11 routes recognized mentions one at a time through pendingMentionRoutes.
 function selectRoundExperts(activeExperts: Expert[], mentions?: string[] | null): Expert[] {
     // Be defensive at the round boundary too: the Moderator is a chair, not
     // an expert that a user mention can wake into the speaking round.
     const speakableExperts = activeExperts.filter(e => e.role !== "Moderator");
     if (!mentions || mentions.length === 0) return speakableExperts;
-    const narrowed = speakableExperts.filter(e => mentions.includes(e.role));
+    const expertByRole = new Map(speakableExperts.map(expert => [expert.role, expert]));
+    const narrowed: Expert[] = [];
+    const seen = new Set<string>();
+    for (const role of mentions) {
+        const expert = expertByRole.get(role);
+        if (expert && !seen.has(role)) {
+            narrowed.push(expert);
+            seen.add(role);
+        }
+    }
     return narrowed.length > 0 ? narrowed : speakableExperts;
+}
+
+function mentionRoutesForMessage(
+    mentions: string[] | null | undefined,
+    sourceRole: string | null,
+    activeExperts: Expert[]
+): PendingMentionRoute[] {
+    if (!Array.isArray(mentions) || mentions.length === 0) return [];
+    const speakableRoles = new Set(activeExperts.map(expert => expert.role));
+    return Array.from(new Set(mentions))
+        .filter(role => role !== "Moderator" && speakableRoles.has(role))
+        .map(role => ({ role, sourceRole }));
+}
+
+function restoredPausedFromMode(mode: unknown): ConversationState["pausedFromMode"] {
+    // A paused snapshot from the previous process does not preserve the live
+    // sequential chain; resume it through autonomous continuation. A snapshot
+    // already parked in autonomous remains there.
+    if (mode === "processing_sequential" || mode === "autonomous") return "autonomous";
+    return null;
 }
 
 /**
@@ -261,7 +325,6 @@ function updateConversationState(
 
 // Initialize state when orchestrator is first needed for a conversation
 function initializeConversationState(conversationId: number, activeExperts: Expert[], moderatorExpert: ModeratorContext, userMessage: Message, broadcastFn: (convId: number, data: any) => void): ConversationState {
-    const defaultMaxAutonomousTurns = activeExperts.length * 2; // Two turns per speakable expert; the chair is not a turn
     const initialState: ConversationState = {
         conversationId,
         activeExperts,
@@ -272,12 +335,18 @@ function initializeConversationState(conversationId: number, activeExperts: Expe
         broadcastFn: broadcastFn,
         // Initialize autonomous settings
         isAutonomousEnabled: true, // Autonomous is ON by default
-        maxAutonomousTurns: defaultMaxAutonomousTurns, 
+        maxAutonomousTurns: DEFAULT_TURN_BUDGET,
         totalAutonomousTurnsTaken: 0,
         wasInterrupted: false, // Initialize interrupted flag
+        pendingUserMessage: null,
+        pendingMentionRoutes: [],
+        farmerJustSpoke: true,
+        singleTurnOnly: false,
         pausedFromMode: null,
         turnInFlight: false,
         turnChainScheduled: false,
+        turnChainRunning: false,
+        scheduledFailureAttempts: 0,
         lastProgressAt: Date.now(),
         sequenceExpertContents: [],
         roundExperts: selectRoundExperts(activeExperts, userMessage.mentions),
@@ -285,7 +354,7 @@ function initializeConversationState(conversationId: number, activeExperts: Expe
         moderatorNoticeSent: false
     };
     conversationStates.set(conversationId, initialState);
-    debugLog(`Initialized state for ${conversationId}, Auto ON (max ${defaultMaxAutonomousTurns} turns)`);
+    debugLog(`Initialized state for ${conversationId}, Auto ON (max ${DEFAULT_TURN_BUDGET} turns)`);
     // G7: the fresh idle state is this server's recovery truth for the
     // conversation — persist it immediately so a snapshot left by a previous
     // process (paused, or a dead processing loop) is corrected the moment we
@@ -337,12 +406,10 @@ export async function restorePausedFromSnapshot(
     }
 
     // Fresh in-memory state, then restore the pause through the shared update
-    // path so the paused state_update broadcast and the persisted paused
-    // snapshot (carrying the restored index/counters) behave exactly like the
-    // cold-start message path. lastUserMessage stays null: the message that
-    // started the paused sequence belonged to the previous process; a fresh
-    // user message re-steers as usual, and resume() continues the phase the
-    // snapshot was parked in.
+    // path so the paused state_update broadcast and persisted snapshot
+    // (carrying the restored index/counters) behave like the cold-start path.
+    // lastUserMessage stays null until a new farmer message joins the parked
+    // sequence in place.
     const restored: ConversationState = {
         conversationId,
         activeExperts,
@@ -354,14 +421,20 @@ export async function restorePausedFromSnapshot(
         mode: "idle",
         broadcastFn,
         isAutonomousEnabled: true,
-        maxAutonomousTurns: activeExperts.length * 2, // same cap as a fresh sequence; the chair is not a turn
+        maxAutonomousTurns: DEFAULT_TURN_BUDGET,
         totalAutonomousTurnsTaken: Number.isInteger(storedSnapshot.totalAutonomousTurnsTaken)
             ? storedSnapshot.totalAutonomousTurnsTaken
             : 0,
         wasInterrupted: false,
+        pendingUserMessage: null,
+        pendingMentionRoutes: [],
+        farmerJustSpoke: false,
+        singleTurnOnly: false,
         pausedFromMode: null,
         turnInFlight: false,
         turnChainScheduled: false,
+        turnChainRunning: false,
+        scheduledFailureAttempts: 0,
         lastProgressAt: Date.now(),
         sequenceExpertContents: [],
         roundExperts: activeExperts,
@@ -371,20 +444,19 @@ export async function restorePausedFromSnapshot(
     conversationStates.set(conversationId, restored);
     updateConversationState(conversationId, {
         mode: "paused",
-        pausedFromMode: storedSnapshot.pausedFromMode === "processing_sequential" || storedSnapshot.pausedFromMode === "autonomous"
-            ? "autonomous"
-            : null
+        pausedFromMode: restoredPausedFromMode(storedSnapshot.pausedFromMode)
     });
     debugLog(`Orchestrator: restored paused state for ${conversationId} from snapshot (from ${storedSnapshot.pausedFromMode ?? "unknown"}, index ${restored.currentExpertIndex}).`);
     return true;
 }
 
-function scheduleInterruptedMessage(state: ConversationState, pendingMessage: Message): void {
+function scheduleInterruptedMessage(state: ConversationState, pendingMessage: Message, restart = false): void {
     const userId = pendingMessage.userId ?? 0;
     setImmediate(() => {
-        processMessageTurnBased(userId, state.conversationId, pendingMessage, state.broadcastFn)
+        processMessageTurnBased(userId, state.conversationId, pendingMessage, state.broadcastFn, { restart })
             .catch(error => {
                 console.error(`Orchestrator: Failed to resume interrupted message for ${state.conversationId}:`, error);
+                new InteractionOrchestrator(state.conversationId).handleScheduledFailure(error);
                 state.broadcastFn(state.conversationId, {
                     type: "error",
                     message: "Failed to resume the interrupted message."
@@ -412,19 +484,26 @@ export class InteractionOrchestrator {
             return;
         }
         
+        const singleTurnOnly = !state.isAutonomousEnabled;
         updateConversationState(this.conversationId, {
-            mode: "processing_sequential",
+            // A farmer message starts with the same Moderator/mention routing
+            // used by the autonomous loop. With autonomy disabled this is a
+            // single routed response; enabled conversations continue under
+            // the existing autonomous turn budget.
+            mode: "autonomous",
             currentExpertIndex: -1,
-            totalAutonomousTurnsTaken: 0, // Reset counter when new sequence starts
+            totalAutonomousTurnsTaken: 0,
             wasInterrupted: false, // Reset interrupted flag
             pausedFromMode: null,
             sequenceExpertContents: [], // New sequence: redundancy history starts empty
-            // G4: narrow this sequential round to the experts the triggering
-            // user message addressed (lastUserMessage). The interrupted-
-            // restart and paused-restart paths both flow back through
-            // processMessageTurnBased → here, so steering messages re-narrow
-            // the round the same way.
-            roundExperts: selectRoundExperts(state.activeExperts, state.lastUserMessage?.mentions),
+            // New discussions use the pending mention FIFO; roundExperts is
+            // kept empty so routing never turns a mention into a forced roll
+            // call.
+            roundExperts: [],
+            pendingMentionRoutes: mentionRoutesForMessage(state.lastUserMessage?.mentions, null, state.activeExperts),
+            pendingUserMessage: state.lastUserMessage,
+            farmerJustSpoke: true,
+            singleTurnOnly,
             mentionPairStreak: null, // New sequence: mention pair streak starts fresh
             moderatorNoticeSent: false // New sequence: the G8 degradation notice may fire once more
         });
@@ -435,29 +514,121 @@ export class InteractionOrchestrator {
         // Use setImmediate to avoid blocking the initial request and handle potential immediate pause
         setImmediate(() => {
             this.processNextTurn().catch(err => {
-                console.error(`Orchestrator: Unhandled error starting processNextTurn for ${this.conversationId}:`, err);
-                updateConversationState(this.conversationId, { mode: "idle" });
+                this.handleScheduledFailure(err);
             });
+        });
+    }
+
+    /** Recover queued farmer input after a turn chain or scheduled callback fails. */
+    handleScheduledFailure(error: unknown): void {
+        console.error(`Orchestrator: Turn chain failed for ${this.conversationId}:`, error);
+        const existingState = getConversationState(this.conversationId);
+        if (!existingState) return;
+        const state = updateConversationState(this.conversationId, {
+            scheduledFailureAttempts: existingState.scheduledFailureAttempts + 1,
+            turnInFlight: false
+        });
+
+        if (state.scheduledFailureAttempts >= 3) {
+            updateConversationState(this.conversationId, {
+                mode: "idle",
+                wasInterrupted: false,
+                pausedFromMode: null,
+                turnInFlight: false,
+                turnChainScheduled: false
+            });
+            state.broadcastFn(this.conversationId, {
+                type: "notice",
+                conversationId: this.conversationId,
+                message: "The council could not continue after three consecutive errors. Your message is saved; send another message when you’re ready to retry."
+            });
+            return;
+        }
+
+        const explicitRestart = state.wasInterrupted;
+        const pendingMessage = explicitRestart ? state.lastUserMessage : state.pendingUserMessage;
+        const hasPendingMentionRoutes = state.pendingMentionRoutes.length > 0;
+        const canResumePendingInput = explicitRestart
+            ? pendingMessage !== null
+            : Boolean(pendingMessage || hasPendingMentionRoutes) &&
+                state.mode !== "paused" &&
+                state.totalAutonomousTurnsTaken < state.maxAutonomousTurns;
+
+        if (canResumePendingInput) {
+            // A restart is the only path allowed to discard the previous
+            // sequence and reset its counters. Ordinary joins retain their
+            // budget, routing queue, and sequence history through recovery.
+            updateConversationState(this.conversationId, explicitRestart && pendingMessage ? {
+                mode: "autonomous",
+                currentExpertIndex: -1,
+                totalAutonomousTurnsTaken: 0,
+                wasInterrupted: false,
+                pausedFromMode: null,
+                pendingUserMessage: pendingMessage,
+                pendingMentionRoutes: mentionRoutesForMessage(pendingMessage.mentions, null, state.activeExperts),
+                farmerJustSpoke: true,
+                singleTurnOnly: !state.isAutonomousEnabled,
+                sequenceExpertContents: [],
+                roundExperts: [],
+                mentionPairStreak: null,
+                moderatorNoticeSent: false,
+                turnInFlight: false,
+                turnChainScheduled: true
+            } : {
+                mode: "autonomous",
+                wasInterrupted: false,
+                pausedFromMode: null,
+                turnInFlight: false,
+                // A failed one-turn-only attempt did not answer the queued
+                // input; allow the replacement routed response to run once.
+                ...(state.singleTurnOnly ? { currentExpertIndex: -1 } : {}),
+                turnChainScheduled: true
+            });
+
+            // Claim the scheduled slot before yielding. The current chain's
+            // finally releases turnChainRunning before this callback fires.
+            setImmediate(() => {
+                this.processNextTurn().catch(nextError => this.handleScheduledFailure(nextError));
+            });
+            return;
+        }
+
+        // Keep paused joins parked for resume(). At the hard cap the message
+        // remains in history/state, but the conversation stops without
+        // claiming another expert turn.
+        updateConversationState(this.conversationId, {
+            mode: state.mode === "paused" ? "paused" : "idle",
+            turnInFlight: false,
+            turnChainScheduled: false,
+            wasInterrupted: false,
+            ...(!pendingMessage ? {
+                currentExpertIndex: -1,
+                totalAutonomousTurnsTaken: 0,
+                pausedFromMode: null
+            } : {})
         });
     }
 
     // Processes a single turn and triggers the next one if applicable
     private async processNextTurn(): Promise<void> {
+        const scheduledState = getConversationState(this.conversationId);
+        if (scheduledState?.turnChainRunning) {
+            debugLog(`Orchestrator: another turn chain owns ${this.conversationId}; duplicate chain bowing out.`);
+            return;
+        }
         // Single-chain guard: claim the scheduled slot. Any second pending
-        // chain (pause()+resume() racing the loop's own scheduling, a stale
-        // chain from before an interrupted restart, ...) bows out here
-        // instead of double-driving the loop.
-        if (!getConversationState(this.conversationId)?.turnChainScheduled) {
+        // chain (a stale chain from before an interrupted restart, ...) bows
+        // out instead of double-driving the loop.
+        if (!scheduledState?.turnChainScheduled) {
             debugLog(`Orchestrator: duplicate turn chain for ${this.conversationId} bowing out.`);
             return;
         }
-        updateConversationState(this.conversationId, { turnChainScheduled: false });
+        updateConversationState(this.conversationId, { turnChainScheduled: false, turnChainRunning: true });
 
+        try {
         let state = getConversationState(this.conversationId);
-        // A turn is still streaming (resume() landing mid-turn schedules a
-        // chain while the paused turn is in flight). The chain that owns the
-        // in-flight turn continues the round from its own "Decide Next
-        // Action" — starting a turn here would run two experts concurrently.
+        // A turn may still be streaming if a legacy scheduled chain reaches
+        // this point. The owning chain continues from its own next-action step.
         if (state?.turnInFlight) {
             debugLog(`Orchestrator: turn still in flight for ${this.conversationId} — chain bowing out.`);
             return;
@@ -467,7 +638,8 @@ export class InteractionOrchestrator {
             const reason = !state ? "state missing" : state.mode === "paused" ? "paused" : "interrupted";
             debugLog(`Orchestrator stopping for ${this.conversationId}. Reason: ${reason}.`);
              if (state && state.wasInterrupted) {
-                 // If interrupted, reset first, then immediately process the newest queued message.
+                 // Only an explicit restart sets wasInterrupted. Discard any
+                 // joined context and restart from the explicit topic.
                  const pendingMessage = state.lastUserMessage;
                  updateConversationState(this.conversationId, {
                      mode: "idle",
@@ -475,10 +647,14 @@ export class InteractionOrchestrator {
                      currentExpertIndex: -1,
                      totalAutonomousTurnsTaken: 0,
                      pausedFromMode: null,
-                     lastUserMessage: null
+                     pendingMentionRoutes: [],
+                     pendingUserMessage: pendingMessage,
+                     farmerJustSpoke: true,
+                     singleTurnOnly: false,
+                     lastUserMessage: pendingMessage
                  });
                  if (pendingMessage) {
-                     scheduleInterruptedMessage(state, pendingMessage);
+                     scheduleInterruptedMessage(state, pendingMessage, true);
                  }
              }
             return; 
@@ -494,13 +670,25 @@ export class InteractionOrchestrator {
         // sequence ends naturally once the current expert finishes" — with
         // no expert streaming, end immediately instead of billing one more
         // turn the user explicitly turned off.
-        if (state.mode === "autonomous" && !state.isAutonomousEnabled) {
+        if (state.mode === "autonomous" && !state.isAutonomousEnabled && !state.singleTurnOnly && state.pendingUserMessage) {
+            if (state.totalAutonomousTurnsTaken < state.maxAutonomousTurns) {
+                state = updateConversationState(this.conversationId, { singleTurnOnly: true });
+            } else {
+                state = updateConversationState(this.conversationId, { pendingUserMessage: null, pendingMentionRoutes: [] });
+            }
+        }
+        if (state.mode === "autonomous" && !state.isAutonomousEnabled &&
+            (!state.singleTurnOnly || (state.currentExpertIndex >= 0 && !state.pendingUserMessage))) {
             debugLog(`Orchestrator: autonomous disabled before turn start for ${this.conversationId} — ending sequence naturally.`);
             updateConversationState(this.conversationId, {
                 mode: "idle",
                 currentExpertIndex: -1,
                 totalAutonomousTurnsTaken: 0,
-                pausedFromMode: null
+                pausedFromMode: null,
+                singleTurnOnly: false,
+                pendingUserMessage: null,
+                pendingMentionRoutes: [],
+                farmerJustSpoke: false
             });
             generateInsights(this.conversationId, state.broadcastFn).catch(console.error);
             return;
@@ -519,91 +707,122 @@ export class InteractionOrchestrator {
         // guard while it streams (see below) so pause/resume treat it as a
         // real in-flight turn.
         let concludeSynthesisDelivered = false;
+        let selectedMentionRoute: PendingMentionRoute | null = null;
         // These are speakable expert roles only. The system Moderator advises
         // routing but is never a role the chair can select as a speaker.
         const availableRoles = state.activeExperts.map(e => e.role);
 
         if (state.mode === "autonomous") {
-            // G4 mention routing (autonomous only): the just-finished expert's
-            // stored message may tag a colleague — that colleague speaks next,
-            // ahead of the Moderator. Priority within the mentions list is
-            // order of first appearance; self-mentions and roles outside the
-            // active roster are skipped. Legacy rows without a mentions field
-            // simply fall through to the Moderator/round-robin below.
-            let mentionRouted = false;
-            const history = await storage.getConversationMessages(this.conversationId);
-            const lastExpertMessage = history.slice().reverse().find(isRealExpertHistoryMessage);
-            const lastMentions = lastExpertMessage && Array.isArray(lastExpertMessage.mentions)
-                ? lastExpertMessage.mentions
-                : [];
-            if (lastMentions.length > 0 && lastExpertMessage?.expertRole) {
-                const speakerRole = lastExpertMessage.expertRole;
-                for (const mentionedRole of lastMentions) {
-                    if (mentionedRole === speakerRole) continue;
-                    const mentionedIndex = state.activeExperts.findIndex(e => e.role === mentionedRole);
-                    if (mentionedIndex === -1) continue;
-                    // Ping-pong guard: two experts trading mentions back and
-                    // forth would burn the whole autonomous budget on one
-                    // exchange. On the route that would make it 3 consecutive
-                    // mention-routed turns for the same unordered pair, skip
-                    // to the Moderator/round-robin instead.
-                    const pairKey = [speakerRole, mentionedRole].sort().join("<");
-                    const streak = state.mentionPairStreak;
-                    if (streak && streak.key === pairKey && streak.count >= 2) {
-                        debugLog(`Orchestrator: mention ping-pong guard tripped for ${this.conversationId} (pair "${pairKey}" at ${streak.count} consecutive routed turns) — deferring to moderator/round-robin.`);
-                        break;
-                    }
-                    nextExpertIndex = mentionedIndex;
-                    mentionRouted = true;
-                    updateConversationState(this.conversationId, {
-                        mentionPairStreak: streak && streak.key === pairKey
-                            ? { key: pairKey, count: streak.count + 1 }
-                            : { key: pairKey, count: 1 }
-                    });
-                    debugLog(`Orchestrator: mention-routed next speaker for ${this.conversationId}: ${mentionedRole}`);
-                    break;
-                }
-            }
-            if (!mentionRouted && state.mentionPairStreak) {
-                // Any turn not routed by a mention breaks the pair streak.
-                updateConversationState(this.conversationId, { mentionPairStreak: null });
-            }
             const moderator = state.moderatorExpert;
             let suggestedRole: string | null = null;
-            if (!mentionRouted) {
-                 suggestedRole = await getModeratorNextSpeakerSuggestion(moderator, history.slice(-6), availableRoles);
-                // G8 aux hygiene: a null verdict (provider failure, invalid
-                // response, or no resolvable aux model) degrades to
-                // round-robin. Surface that to the farmer instead of
-                // degrading silently — broadcast exactly once per sequence
-                // (moderatorNoticeSent gates it; startProcessingSequence
-                // re-arms it). Round-robin continues unchanged either way.
-                const preNoticeState = getConversationState(this.conversationId);
-                if (suggestedRole === null && preNoticeState && !preNoticeState.moderatorNoticeSent) {
+
+            // A join during the Moderator await invalidates that verdict. Keep
+            // the single chain and ask again with the latest persisted history.
+            while (nextExpertIndex === -1) {
+                state = getConversationState(this.conversationId)!;
+                if (!state || state.wasInterrupted) {
+                    if (state?.wasInterrupted) {
+                        const pendingMessage = state.lastUserMessage;
+                        updateConversationState(this.conversationId, {
+                            mode: "idle", wasInterrupted: false, currentExpertIndex: -1,
+                            totalAutonomousTurnsTaken: 0, pausedFromMode: null,
+                            pendingMentionRoutes: [], pendingUserMessage: pendingMessage,
+                            farmerJustSpoke: true, singleTurnOnly: false, lastUserMessage: pendingMessage
+                        });
+                        if (pendingMessage) scheduleInterruptedMessage(state, pendingMessage, true);
+                    }
+                    return;
+                }
+                if (state.mode === "paused" || state.turnChainScheduled) return;
+                const farmerRoutingPending = Boolean(state.pendingUserMessage || state.farmerJustSpoke);
+                const deferredExpertRoutes = farmerRoutingPending
+                    ? state.pendingMentionRoutes.filter(route => route.sourceRole !== null)
+                    : [];
+                // User mentions outrank the Moderator pick; expert-origin
+                // mentions wait until the Moderator has considered the latest
+                // farmer input.
+                const mentionQueue = farmerRoutingPending
+                    ? state.pendingMentionRoutes.filter(route => route.sourceRole === null)
+                    : state.pendingMentionRoutes.slice();
+                let selectedRoute: PendingMentionRoute | undefined;
+                while (mentionQueue.length && !selectedRoute) {
+                    const candidate = mentionQueue.shift()!;
+                    const candidateIndex = state.activeExperts.findIndex(expert => expert.role === candidate.role);
+                    if (candidateIndex < 0 || candidate.role === candidate.sourceRole) continue;
+                    if (candidate.sourceRole) {
+                        const pairKey = [candidate.sourceRole, candidate.role].sort().join("<");
+                        const streak = state.mentionPairStreak;
+                        if (streak && streak.key === pairKey && streak.count >= 2) {
+                            debugLog(`Orchestrator: mention ping-pong guard tripped for ${this.conversationId} (${pairKey}); deferring to Moderator.`);
+                            continue;
+                        }
+                        updateConversationState(this.conversationId, {
+                            pendingMentionRoutes: [...mentionQueue, ...deferredExpertRoutes],
+                            mentionPairStreak: streak && streak.key === pairKey
+                                ? { key: pairKey, count: streak.count + 1 }
+                                : { key: pairKey, count: 1 }
+                        });
+                    } else {
+                        updateConversationState(this.conversationId, {
+                            pendingMentionRoutes: [...mentionQueue, ...deferredExpertRoutes],
+                            mentionPairStreak: null
+                        });
+                    }
+                    nextExpertIndex = candidateIndex;
+                    selectedRoute = candidate;
+                }
+                // Persist skipped invalid/self/ping-pong entries too. Otherwise
+                // an all-skipped queue would look perpetually fresh and loop.
+                const currentQueue = getConversationState(this.conversationId)?.pendingMentionRoutes ?? [];
+                const remainingRoutes = [...mentionQueue, ...deferredExpertRoutes];
+                if (remainingRoutes.length !== currentQueue.length || remainingRoutes.some((route, index) =>
+                    route.role !== currentQueue[index]?.role || route.sourceRole !== currentQueue[index]?.sourceRole
+                )) {
+                    updateConversationState(this.conversationId, { pendingMentionRoutes: remainingRoutes });
+                }
+                if (selectedRoute) {
+                    selectedMentionRoute = selectedRoute;
+                    break;
+                }
+
+                if (state.mentionPairStreak) updateConversationState(this.conversationId, { mentionPairStreak: null });
+                const routingMessage = state.lastUserMessage;
+                const farmerJustSpoke = state.farmerJustSpoke;
+                let history = await storage.getConversationMessages(this.conversationId);
+                let latestState = getConversationState(this.conversationId)!;
+                if (latestState.wasInterrupted) continue;
+                if (latestState.mode === "paused" || latestState.turnChainScheduled) return;
+                if (latestState.pendingMentionRoutes.some(route => route.sourceRole === null) ||
+                    (latestState.lastUserMessage !== routingMessage && latestState.farmerJustSpoke)) continue;
+
+                suggestedRole = await getModeratorNextSpeakerSuggestion(
+                    moderator, history.slice(-6), latestState.activeExperts.map(expert => expert.role), farmerJustSpoke
+                );
+                latestState = getConversationState(this.conversationId)!;
+                if (latestState.wasInterrupted) continue;
+                if (latestState.mode === "paused" || latestState.turnChainScheduled) return;
+                if (latestState.pendingMentionRoutes.some(route => route.sourceRole === null) ||
+                    (latestState.lastUserMessage !== routingMessage && latestState.farmerJustSpoke)) continue;
+                state = latestState;
+                if (farmerJustSpoke) updateConversationState(this.conversationId, { farmerJustSpoke: false });
+
+                // A farmer input must receive a routed speaker even when the
+                // Moderator would otherwise close the round.
+                if (suggestedRole === "Conclude" && state.pendingUserMessage) {
+                    suggestedRole = "RoundRobin";
+                }
+                break;
+            }
+
+            if (nextExpertIndex === -1) {
+                if (suggestedRole === null && !state.moderatorNoticeSent) {
                     updateConversationState(this.conversationId, { moderatorNoticeSent: true });
-                    preNoticeState.broadcastFn(this.conversationId, {
-                        type: "notice",
-                        conversationId: this.conversationId,
+                    state.broadcastFn(this.conversationId, {
+                        type: "notice", conversationId: this.conversationId,
                         message: "Moderator unavailable — speaking in round-robin."
                     });
                 }
-            }
-            if (!mentionRouted) {
-                if (suggestedRole === 'Conclude') {
-                    // G5 semantic conclusion: the Moderator called the round.
-                    // The closing synthesis runs as one full streamed turn,
-                    // inline in this chain (no new scheduling site — the
-                    // turnChainScheduled flag is untouched). 'Conclude' can
-                    // only reach this point from the autonomous branch:
-                    // suggestedRole is never computed in
-                    // processing_sequential, so the sequential round is never
-                    // cut. The synthesis holds turnInFlight while it streams,
-                    // so a pause landing mid-synthesis is respected by
-                    // resume() (its chain bows out on turnInFlight) and by
-                    // the paused implicit-resume fork; a steering interrupt
-                    // landing mid-synthesis still wins in "Decide Next
-                    // Action" below, exactly like the natural-end branch
-                    // handles it.
+                if (suggestedRole === "Conclude") {
                     debugLog(`Orchestrator: Moderator concluded the discussion for ${this.conversationId} — streaming the closing synthesis.`);
                     state.broadcastFn(this.conversationId, { type: "concluding", conversationId: this.conversationId });
                     updateConversationState(this.conversationId, { turnInFlight: true });
@@ -613,7 +832,7 @@ export class InteractionOrchestrator {
                     } finally {
                         updateConversationState(this.conversationId, { turnInFlight: false });
                     }
-                } else if (suggestedRole && suggestedRole !== 'RoundRobin') {
+                } else if (suggestedRole && suggestedRole !== "RoundRobin") {
                     const startIndex = (state.currentExpertIndex + 1) % state.activeExperts.length;
                     for (let i = 0; i < state.activeExperts.length; i++) {
                         const checkIndex = (startIndex + i) % state.activeExperts.length;
@@ -622,16 +841,43 @@ export class InteractionOrchestrator {
                             break;
                         }
                     }
-                     if (nextExpertIndex === -1) {
-                         console.warn(`Moderator suggested role ${suggestedRole} not found, falling back to round robin.`);
-                         nextExpertIndex = (state.currentExpertIndex + 1) % state.activeExperts.length;
-                     }
+                    if (nextExpertIndex === -1) {
+                        console.warn(`Moderator suggested role ${suggestedRole} not found, falling back to round robin.`);
+                        nextExpertIndex = (state.currentExpertIndex + 1) % state.activeExperts.length;
+                    }
                 } else {
-                     nextExpertIndex = (state.currentExpertIndex + 1) % state.activeExperts.length;
+                    nextExpertIndex = (state.currentExpertIndex + 1) % state.activeExperts.length;
                 }
             }
         } else { // processing_sequential
             nextExpertIndex = state.currentExpertIndex + 1;
+        }
+
+        const beforeTurnState = getConversationState(this.conversationId);
+        if (beforeTurnState?.wasInterrupted) {
+            const pendingMessage = beforeTurnState.lastUserMessage;
+            updateConversationState(this.conversationId, {
+                mode: "idle", wasInterrupted: false, currentExpertIndex: -1,
+                totalAutonomousTurnsTaken: 0, pausedFromMode: null,
+                pendingMentionRoutes: [], pendingUserMessage: pendingMessage,
+                farmerJustSpoke: true, singleTurnOnly: false, lastUserMessage: pendingMessage
+            });
+            if (pendingMessage) scheduleInterruptedMessage(beforeTurnState, pendingMessage, true);
+            return;
+        }
+        if (beforeTurnState?.mode === "paused" || beforeTurnState?.turnChainScheduled) return;
+        if (beforeTurnState?.mode === "autonomous" && !beforeTurnState.isAutonomousEnabled) {
+            if (beforeTurnState.pendingUserMessage && beforeTurnState.totalAutonomousTurnsTaken < beforeTurnState.maxAutonomousTurns) {
+                updateConversationState(this.conversationId, { singleTurnOnly: true });
+            } else if (!beforeTurnState.singleTurnOnly) {
+                updateConversationState(this.conversationId, {
+                    mode: "idle", currentExpertIndex: -1, totalAutonomousTurnsTaken: 0,
+                    singleTurnOnly: false, pendingUserMessage: null,
+                    pendingMentionRoutes: [], farmerJustSpoke: false
+                });
+                generateInsights(this.conversationId, beforeTurnState.broadcastFn).catch(console.error);
+                return;
+            }
         }
 
         // 2. Check if processing should stop based on index or limits
@@ -654,9 +900,13 @@ export class InteractionOrchestrator {
             const currentExpert = state.mode === "processing_sequential"
                 ? state.roundExperts[nextExpertIndex]
                 : state.activeExperts[nextExpertIndex]; // Guaranteed to exist now
-            
+
+            const currentUserContext = state.pendingUserMessage;
+            const priorTurnIndex = state.currentExpertIndex;
+            const priorTurnCount = state.totalAutonomousTurnsTaken;
+
             // --- Update State for the Current Turn --- 
-            const turnsTakenUpdate = state.mode === "autonomous" 
+            const turnsTakenUpdate = state.mode === "autonomous" && state.totalAutonomousTurnsTaken < state.maxAutonomousTurns
                 ? { totalAutonomousTurnsTaken: state.totalAutonomousTurnsTaken + 1 } 
                 : {};
             state = updateConversationState(this.conversationId, { 
@@ -666,19 +916,6 @@ export class InteractionOrchestrator {
             if (!state) return;
             const broadcastFn = state.broadcastFn;
 
-            // G9 legibility: preview who is about to speak, BEFORE their turn
-            // starts (acceptance: next_speaker → expert_stream_start in that
-            // order, matching expertId). Fires for BOTH processing_sequential
-            // and autonomous turns; the G5 closing synthesis turn is not a
-            // step-3 turn and is intentionally not previewed (the concluding
-            // banner covers it). Synchronous broadcast — no scheduling site.
-            state.broadcastFn(this.conversationId, {
-                type: "next_speaker",
-                conversationId: this.conversationId,
-                expertId: currentExpert.id,
-                expertRole: currentExpert.role,
-            });
-            
             // --- Determine Reference Message --- 
             let referenceMessageContent = "";
             // If sequential, use the triggering user message
@@ -689,17 +926,22 @@ export class InteractionOrchestrator {
                  } 
                  referenceMessageContent = state.lastUserMessage.content;
             } 
-            // If autonomous, always use the last expert's message from history
-            else if (state.mode === "autonomous") { 
+            // A queued farmer message is the current prompt context. Otherwise
+            // an autonomous turn follows the latest expert contribution.
+             else if (state.mode === "autonomous") {
                 const history = await storage.getConversationMessages(this.conversationId);
-                // Find the last non-error assistant message
-                const lastExpertMessage = history.slice().reverse().find(isRealExpertHistoryMessage);
-                if (!lastExpertMessage) {
-                     // Should ideally not happen after sequential round, but handle defensively
-                     console.error(`Orchestrator: Could not find previous expert message for autonomous turn ${state.totalAutonomousTurnsTaken}. Falling back to generic prompt.`);
-                     referenceMessageContent = "Please continue the discussion based on the conversation history."; 
+                if (currentUserContext) {
+                    referenceMessageContent = currentUserContext.content;
                 } else {
-                     referenceMessageContent = lastExpertMessage.content;
+                    // Find the last non-error assistant message
+                    const lastExpertMessage = history.slice().reverse().find(isRealExpertHistoryMessage);
+                    if (!lastExpertMessage) {
+                     // Should ideally not happen after sequential round, but handle defensively
+                        console.error(`Orchestrator: Could not find previous expert message for autonomous turn ${state.totalAutonomousTurnsTaken}. Falling back to generic prompt.`);
+                        referenceMessageContent = "Please continue the discussion based on the conversation history.";
+                    } else {
+                        referenceMessageContent = lastExpertMessage.content;
+                    }
                 }
             }
              // Defensive check if reference content is still empty
@@ -714,6 +956,57 @@ export class InteractionOrchestrator {
             try {
                 const history = await storage.getConversationMessages(this.conversationId);
                 const files = await storage.getConversationFiles(this.conversationId);
+
+                const latestState = getConversationState(this.conversationId);
+                if (!latestState) return;
+                if (latestState.wasInterrupted) {
+                    const pendingMessage = latestState.lastUserMessage;
+                    updateConversationState(this.conversationId, {
+                        mode: "idle", wasInterrupted: false, currentExpertIndex: -1,
+                        totalAutonomousTurnsTaken: 0, pausedFromMode: null,
+                        pendingMentionRoutes: [], pendingUserMessage: pendingMessage,
+                        farmerJustSpoke: true, singleTurnOnly: false, lastUserMessage: pendingMessage
+                    });
+                    if (pendingMessage) scheduleInterruptedMessage(latestState, pendingMessage, true);
+                    return;
+                }
+                if (latestState.mode === "paused" || latestState.turnChainScheduled) {
+                    // No expert has started yet, so a pure pause does not bill
+                    // the selected turn or mark its queued input as picked up.
+                    updateConversationState(this.conversationId, {
+                        currentExpertIndex: priorTurnIndex,
+                        totalAutonomousTurnsTaken: priorTurnCount,
+                        pendingUserMessage: latestState.pendingUserMessage ?? currentUserContext
+                    });
+                    return;
+                }
+
+                const promptContext = latestState.pendingUserMessage ?? currentUserContext;
+                if (promptContext) {
+                    referenceMessageContent = promptContext.content;
+                    state.broadcastFn(this.conversationId, {
+                        type: "message_picked_up",
+                        conversationId: this.conversationId,
+                        messageId: promptContext.id
+                    });
+                }
+                const pendingUpdate = latestState.pendingUserMessage === promptContext
+                    ? { pendingUserMessage: null }
+                    : {};
+                state = updateConversationState(this.conversationId, {
+                    ...pendingUpdate,
+                    turnInFlight: true
+                });
+                if (!state) return;
+
+                // G9 legibility: preview immediately before this expert
+                // starts streaming, with the same expert identity.
+                state.broadcastFn(this.conversationId, {
+                    type: "next_speaker",
+                    conversationId: this.conversationId,
+                    expertId: currentExpert.id,
+                    expertRole: currentExpert.role,
+                });
                 
                 // Broadcast "expert started typing"
                 state.broadcastFn(this.conversationId, {
@@ -722,10 +1015,9 @@ export class InteractionOrchestrator {
                     expertName: currentExpert.name,
                     expertRole: currentExpert.role,
                 });
-                
-                // Mark the turn as in-flight: pause()/steering can land while
-                // this await is pending. Cleared in the finally below.
-                updateConversationState(this.conversationId, { turnInFlight: true });
+
+                // Mark the turn in flight before invoking the provider so a
+                // pause or join now lets this selected expert finish.
                 const expertResponse: InsertMessage = await getExpertResponseStream(
                     currentExpert, history, referenceMessageContent, files, availableRoles,
                     (token) => {
@@ -740,6 +1032,16 @@ export class InteractionOrchestrator {
                 
                 // Store and broadcast completed message
                 const storedExpertMessage = await storage.createMessage(expertResponse);
+                const latestAfterStore = getConversationState(this.conversationId);
+                if (latestAfterStore) {
+                    updateConversationState(this.conversationId, storedExpertMessage.role === "assistant" ? {
+                        scheduledFailureAttempts: 0,
+                            pendingMentionRoutes: [
+                                ...latestAfterStore.pendingMentionRoutes,
+                                ...mentionRoutesForMessage(storedExpertMessage.mentions, currentExpert.role, latestAfterStore.activeExperts)
+                            ]
+                    } : {});
+                }
                 state.broadcastFn(this.conversationId, {
                     type: "expert_stream_done",
                     expertId: currentExpert.id,
@@ -788,27 +1090,14 @@ export class InteractionOrchestrator {
                  } catch (storeError) {
                      console.error("Orchestrator: Failed to store error message:", storeError);
                  }
-                 state.broadcastFn(this.conversationId, {
+                state.broadcastFn(this.conversationId, {
                     type: "message_error", expertId: currentExpert.id,
                     expertName: currentExpert.name, message: errorMessage ?? `Error getting response from ${currentExpert.name}.`
                 });
-                // The current index/counter was advanced before the provider call.
-                // Stop this sequence rather than silently continuing an incomplete turn.
-                const failedState = getConversationState(this.conversationId);
-                if (failedState) {
-                    const pendingMessage = failedState.wasInterrupted ? failedState.lastUserMessage : null;
-                    updateConversationState(this.conversationId, {
-                        mode: "idle",
-                        currentExpertIndex: -1,
-                        totalAutonomousTurnsTaken: 0,
-                        wasInterrupted: false,
-                        pausedFromMode: null,
-                        lastUserMessage: pendingMessage ? null : failedState.lastUserMessage
-                    });
-                    if (pendingMessage) {
-                        scheduleInterruptedMessage(failedState, pendingMessage);
-                    }
-                }
+                // A rejected turn ends that attempt, but must not discard an
+                // ordinary farmer message that joined while it was streaming.
+                // Explicit /new remains the only path that resets the session.
+                this.handleScheduledFailure(error);
                 return;
             } finally {
                 // The turn (or its failure) is fully handled — no longer in flight.
@@ -831,7 +1120,13 @@ export class InteractionOrchestrator {
         
         if (wasEndOfSequentialRound) {
             debugLog(`[DEBUG] Checking condition: isAutonomousEnabled=${currentState.isAutonomousEnabled}, maxAutonomousTurns=${currentState.maxAutonomousTurns}`);
-            if (currentState.isAutonomousEnabled && currentState.maxAutonomousTurns > 0) {
+            if (currentState.pendingUserMessage && currentState.totalAutonomousTurnsTaken < currentState.maxAutonomousTurns) {
+                updateConversationState(this.conversationId, {
+                    mode: "autonomous", currentExpertIndex: -1,
+                    singleTurnOnly: !currentState.isAutonomousEnabled
+                });
+                continueProcessing = true;
+            } else if (currentState.isAutonomousEnabled && currentState.maxAutonomousTurns > 0) {
                 debugLog("Orchestrator: Sequential round finished. Switching to Autonomous mode."); // KEEP
                 updateConversationState(this.conversationId, { 
                     mode: "autonomous", currentExpertIndex: -1, 
@@ -846,33 +1141,37 @@ export class InteractionOrchestrator {
             }
         } else if (currentState.mode === "autonomous") {
              debugLog("[DEBUG] Currently in Autonomous mode. Checking limits...");
-             // Check limits *before* deciding to continue
-             // G2: autonomous disabled mid-round ends the sequence with the
-             // same cleanup as a natural end (idle + insights). The current
-             // expert's turn always finishes; disableAutonomous() never pauses.
-             if (!currentState.isAutonomousEnabled) {
+             // The cap is absolute. Below it, pending farmer input takes
+             // precedence over disabled autonomy, redundancy, and Conclude so
+             // its next routed response stays in this same sequence.
+             if (currentState.totalAutonomousTurnsTaken >= currentState.maxAutonomousTurns) {
+                 debugLog("Orchestrator: Reached max autonomous turns. Setting mode to idle.");
+                 processingEndedNaturally = true;
+             } else if (currentState.pendingUserMessage) {
+                 updateConversationState(this.conversationId, {
+                     singleTurnOnly: !currentState.isAutonomousEnabled
+                 });
+                 continueProcessing = true;
+             } else if (currentState.singleTurnOnly) {
+                 processingEndedNaturally = true;
+             } else if (!currentState.isAutonomousEnabled) {
                  debugLog("Autonomous disabled mid-round — ending sequence naturally.");
                  processingEndedNaturally = true;
              }
              // F2: a redundant autonomous answer ends the sequence with the
-             // same cleanup as a natural end (idle + insights). An interrupt
-             // arriving during the turn wins — the queued message restarts.
+             // same cleanup as a natural end (idle + insights). Joined farmer
+             // messages are handled above before redundancy can end the run.
              else if (redundancyStopDetected && !currentState.wasInterrupted) {
                  debugLog("Orchestrator: Autonomous sequence stopped early (redundant answer). Setting mode to idle.");
                  processingEndedNaturally = true;
              }
              // G5: the closing synthesis turn already ran inline; end the
              // sequence with the same cleanup as a natural end (idle +
-             // insights). An interrupt arriving during the synthesis stream
-             // wins — the queued message restarts through the shared
-             // interrupted path below, exactly like the redundancy case.
+             // insights). A joined farmer message takes precedence above and
+             // is routed after synthesis finishes.
              else if (concludeSynthesisDelivered && !currentState.wasInterrupted) {
                  debugLog("Orchestrator: Closing synthesis delivered — ending sequence naturally.");
                  processingEndedNaturally = true;
-             } else if (currentState.totalAutonomousTurnsTaken >= currentState.maxAutonomousTurns) {
-                 debugLog("Orchestrator: Reached max autonomous turns. Setting mode to idle."); // KEEP
-                 processingEndedNaturally = true; 
-                  debugLog("[DEBUG] Set processingEndedNaturally = true (Auto Limit Reached)");
              } else {
                  continueProcessing = true; // Continue autonomous processing
                  debugLog("[DEBUG] Set continueProcessing = true (Continuing Auto)");
@@ -886,7 +1185,11 @@ export class InteractionOrchestrator {
         // Final actions if processing ended naturally
         if (processingEndedNaturally) {
              debugLog("[DEBUG] Processing ended naturally. Updating state to idle and generating insights.");
-             updateConversationState(this.conversationId, { mode: "idle", currentExpertIndex: -1, totalAutonomousTurnsTaken: 0, pausedFromMode: null });
+             updateConversationState(this.conversationId, {
+                 mode: "idle", currentExpertIndex: -1, totalAutonomousTurnsTaken: 0,
+                 pausedFromMode: null, singleTurnOnly: false, pendingUserMessage: null,
+                 pendingMentionRoutes: [], farmerJustSpoke: false
+             });
              generateInsights(this.conversationId, state.broadcastFn).catch(console.error);
              continueProcessing = false; // Ensure we don't schedule next turn
         }
@@ -901,8 +1204,7 @@ export class InteractionOrchestrator {
             updateConversationState(this.conversationId, { turnChainScheduled: true });
             setImmediate(() => {
                  this.processNextTurn().catch(err => {
-                     console.error(`Orchestrator: Unhandled error in processNextTurn recursion for ${this.conversationId}:`, err);
-                     updateConversationState(this.conversationId, { mode: "idle" });
+                     this.handleScheduledFailure(err);
                  });
             });
         } else {
@@ -916,10 +1218,14 @@ export class InteractionOrchestrator {
                       currentExpertIndex: -1,
                       totalAutonomousTurnsTaken: 0,
                       pausedFromMode: null,
-                      lastUserMessage: null
+                      pendingMentionRoutes: [],
+                      pendingUserMessage: pendingMessage,
+                      farmerJustSpoke: true,
+                      singleTurnOnly: false,
+                      lastUserMessage: pendingMessage
                   });
                   if (pendingMessage) {
-                      scheduleInterruptedMessage(finalStateCheck, pendingMessage);
+                      scheduleInterruptedMessage(finalStateCheck, pendingMessage, true);
                   }
                   return;
              }
@@ -928,6 +1234,12 @@ export class InteractionOrchestrator {
                   debugLog("[DEBUG] Setting state to idle because not continuing and not paused/interrupted.");
                   updateConversationState(this.conversationId, { mode: "idle" });
              }
+        }
+        } finally {
+            const finishedState = getConversationState(this.conversationId);
+            if (finishedState?.turnChainRunning) {
+                updateConversationState(this.conversationId, { turnChainRunning: false });
+            }
         }
     }
 
@@ -948,16 +1260,25 @@ export class InteractionOrchestrator {
             debugLog(`Orchestrator resuming conversation ${this.conversationId}`);
             // Resume the phase that was paused. The autonomous setting controls
             // the sequential-to-autonomous transition, not an already-running phase.
-            const resumeToMode = state.pausedFromMode ||
-                (state.totalAutonomousTurnsTaken > 0 ? "autonomous" : "processing_sequential");
-                                
-            updateConversationState(this.conversationId, { mode: resumeToMode, pausedFromMode: null, turnChainScheduled: true });
+            const resumeToMode = state.pausedFromMode === "processing_sequential" || state.pausedFromMode === null
+                ? "autonomous"
+                : state.pausedFromMode;
+            const chainAlreadyOwnsFlow = state.turnChainRunning || state.turnChainScheduled;
+            updateConversationState(this.conversationId, {
+                mode: resumeToMode,
+                pausedFromMode: null,
+                ...(!chainAlreadyOwnsFlow ? { turnChainScheduled: true } : {})
+            });
+
+            // The suspended chain will observe the resumed mode after its
+            // current await. Reuse a pending callback too, instead of racing
+            // it with another processNextTurn invocation.
+            if (chainAlreadyOwnsFlow) return;
 
             // Trigger the next turn processing immediately
             setImmediate(() => {
                 this.processNextTurn().catch(err => {
-                    console.error(`Orchestrator: Unhandled error resuming processNextTurn for ${this.conversationId}:`, err);
-                    updateConversationState(this.conversationId, { mode: "idle" });
+                    this.handleScheduledFailure(err);
                 });
            });
         } else {
@@ -970,9 +1291,9 @@ export class InteractionOrchestrator {
         const state = getConversationState(this.conversationId);
         if (!state) return;
 
-        const newMaxTurns = (typeof maxTurns === 'number' && maxTurns >= 0) 
-            ? maxTurns 
-            : state.activeExperts.length * 2; // Default if not provided or invalid
+        const newMaxTurns = typeof maxTurns === "number" && Number.isFinite(maxTurns) && maxTurns >= 0
+            ? (maxTurns === 0 ? MAX_TURN_BUDGET : Math.max(1, Math.min(MAX_TURN_BUDGET, Math.floor(maxTurns))))
+            : DEFAULT_TURN_BUDGET;
 
         debugLog(`Orchestrator enabling autonomous mode for ${this.conversationId} (max ${newMaxTurns} turns)`);
         updateConversationState(this.conversationId, { 
@@ -1007,9 +1328,11 @@ export async function processMessageTurnBased(
     userId: number, 
     conversationId: number, 
     userMessage: Message, 
-    broadcastFn: (convId: number, data: any) => void
+    broadcastFn: (convId: number, data: any) => void,
+    options: { restart?: boolean } = {}
 ): Promise<void> {
     try {
+        const explicitRestart = options.restart === true;
         // Get current state and experts
         let state = getConversationState(conversationId);
         const roster = await storage.getConversationExperts(conversationId);
@@ -1059,69 +1382,97 @@ export async function processMessageTurnBased(
             if (storedSnapshot?.mode === "paused") {
                 updateConversationState(conversationId, {
                     mode: "paused",
-                    pausedFromMode: storedSnapshot.pausedFromMode === "processing_sequential" || storedSnapshot.pausedFromMode === "autonomous"
-                        ? "autonomous"
-                        : null
+                    pausedFromMode: restoredPausedFromMode(storedSnapshot.pausedFromMode),
+                    currentExpertIndex: Number.isInteger(storedSnapshot.currentExpertIndex)
+                        ? storedSnapshot.currentExpertIndex
+                        : -1,
+                    totalAutonomousTurnsTaken: Number.isInteger(storedSnapshot.totalAutonomousTurnsTaken)
+                        ? storedSnapshot.totalAutonomousTurnsTaken
+                        : 0
                 });
                 state = getConversationState(conversationId)!;
             }
-        } else {
-            // State exists, check for interruption
-            const isBusy = state.mode === "processing_sequential" || state.mode === "autonomous";
-            if (isBusy) {
-                 debugLog(`User message arrived during active sequence (mode: ${state.mode}). Interrupting.`);
-                  // Set interrupted flag and update context. The running loop will
-                  // finish its current expert and immediately restart this message.
-                 updateConversationState(conversationId, {
-                     wasInterrupted: true,
-                     activeExperts, // Refresh only the speakable expert roster.
-                     moderatorExpert,
-                     lastUserMessage: userMessage // Store newest user message
-                 });
-                 // Tell the client its message was accepted as steering: the
-                 // current expert finishes, then the round restarts on it.
-                 broadcastFn(conversationId, { type: "steering" });
-                 return;
-            } else {
-                // If not busy (idle or paused), just update state normally
-                 updateConversationState(conversationId, {
-                    activeExperts,
-                    moderatorExpert,
-                    lastUserMessage: userMessage,
-                    wasInterrupted: false // Ensure flag is clear if we were idle/paused
-                });
-                state = getConversationState(conversationId)!; // Re-fetch state
-            }
         }
 
-        // A message while paused is an implicit resume-and-restart: a parked
-        // conversation comes back to life the moment the farmer speaks. The
-        // user message itself was already persisted by routes.ts before this
-        // call. Shared by live paused states and paused states restored from
-        // the G7 snapshot after a restart (a fresh state has turnInFlight
-        // false, so a restored pause always takes the restart path below).
-        if (state.mode === "paused") {
-            if (state.turnInFlight) {
-                // A turn is still streaming. Flag the interrupt; the
-                // running loop's final check resets to idle and
-                // re-processes this message once the turn finishes.
-                updateConversationState(conversationId, { wasInterrupted: true });
-                debugLog(`Message arrived while paused mid-turn for ${conversationId}. Interrupting after the current expert.`);
-            } else {
-                // Parked between turns: reset and restart immediately
-                // on the new message.
+        state = getConversationState(conversationId)!;
+        const isActive = state.mode === "processing_sequential" || state.mode === "autonomous";
+
+        // An explicit restart discards earlier joined context and counters.
+        // Ordinary messages below join the active sequence in place.
+        if (explicitRestart && (isActive || state.mode === "paused")) {
+            updateConversationState(conversationId, {
+                activeExperts,
+                moderatorExpert,
+                lastUserMessage: userMessage,
+                pendingUserMessage: userMessage,
+                pendingMentionRoutes: [],
+                farmerJustSpoke: true,
+                singleTurnOnly: false,
+                wasInterrupted: true,
+                scheduledFailureAttempts: 0
+            });
+            broadcastFn(conversationId, { type: "steering" });
+            state = getConversationState(conversationId)!;
+            if (state.mode === "paused" && !state.turnInFlight) {
                 updateConversationState(conversationId, {
                     mode: "idle",
                     wasInterrupted: false,
                     currentExpertIndex: -1,
                     totalAutonomousTurnsTaken: 0,
                     pausedFromMode: null,
-                    lastUserMessage: null
+                    lastUserMessage: userMessage,
+                    scheduledFailureAttempts: 0
                 });
-                debugLog(`Message arrived while paused for ${conversationId}. Restarting sequence on the new message.`);
-                scheduleInterruptedMessage(state, userMessage);
+                await new InteractionOrchestrator(conversationId).startProcessingSequence();
             }
-            return; // Never fall through to the idle start below.
+            return;
+        }
+
+        if (isActive || state.mode === "paused") {
+            const newFarmerRoutes = mentionRoutesForMessage(userMessage.mentions, null, activeExperts);
+            const existingFarmerRoutes = state.pendingMentionRoutes.filter(route => route.sourceRole === null);
+            const existingExpertRoutes = state.pendingMentionRoutes.filter(route => route.sourceRole !== null);
+            const joined = updateConversationState(conversationId, {
+                activeExperts,
+                moderatorExpert,
+                lastUserMessage: userMessage,
+                pendingUserMessage: userMessage,
+                pendingMentionRoutes: [...existingFarmerRoutes, ...newFarmerRoutes, ...existingExpertRoutes],
+                farmerJustSpoke: true
+            });
+            broadcastFn(conversationId, {
+                type: "message_queued",
+                conversationId,
+                messageId: userMessage.id
+            });
+            if (state.mode === "paused") {
+                // Resume the exact parked phase/index/counters. If its turn is
+                // still streaming, the scheduled chain yields to that owner.
+                new InteractionOrchestrator(conversationId).resume();
+            }
+            debugLog(`User message joined active sequence for ${conversationId} (mode: ${joined.mode}).`);
+            return;
+        }
+
+        // Idle input starts a fresh sequence with the new topic and roster.
+        updateConversationState(conversationId, {
+            activeExperts,
+            moderatorExpert,
+            lastUserMessage: userMessage,
+            pendingUserMessage: userMessage,
+            pendingMentionRoutes: [],
+            farmerJustSpoke: true,
+            singleTurnOnly: false,
+            wasInterrupted: false,
+            ...(explicitRestart ? { scheduledFailureAttempts: 0 } : {})
+        });
+        state = getConversationState(conversationId)!;
+
+        // A message while paused is now handled by the in-place join above.
+        // This branch is retained only as a defensive invariant check.
+        if (state.mode === "paused") {
+            new InteractionOrchestrator(conversationId).resume();
+            return;
         }
 
         // Only start processing if the orchestrator is currently idle.

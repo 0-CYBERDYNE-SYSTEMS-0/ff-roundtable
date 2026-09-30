@@ -2,13 +2,13 @@
  * Orchestrator Unit Tests
  *
  * Covers:
- *  - State machine: idle → processing_sequential transitions
- *  - Orchestrator processes experts in sequence (mock getExpertResponseStream)
- *  - Orchestrator stops at end of round
- *  - Interruption flag is set on new user message during processing
+ *  - State machine: new farmer messages enter direct autonomous routing
+ *  - Orchestrator routes experts by Moderator pick and round-robin fallback
+ *  - Orchestrator returns to idle when its autonomous budget is exhausted
+ *  - Farmer messages join the current flow without steering interrupts
  *  - Pause/resume
  *  - G5: semantic conclusion (Moderator 'Conclude' → closing synthesis,
- *    budget untouched, inert in sequential mode, interrupts still win)
+ *    budget untouched, joined messages routed after the close)
  *  - G10: configured/synthetic Moderator is routing-only; synthetic synthesis
  *    persistence keeps its nullable expert identity
  *
@@ -155,11 +155,10 @@ describe("Orchestrator", () => {
     throw new Error(`Timed out waiting for mode "${mode}" on conversation ${conversationId}`);
   }
 
-  // Deterministic turn gating for the G1/G2 regression tests: every expert
-  // turn of `conversationId` parks until the test releases it, so pause and
-  // steering can be exercised at exact points in the loop. Turns for other
-  // conversations (leftover chains from earlier tests) park forever and can
-  // never interfere.
+  // Deterministic turn gating for the G11 message-join and pause regressions:
+  // every expert turn of `conversationId` parks until the test releases it.
+  // Turns for other conversations (leftover chains from earlier tests) park
+  // forever and can never interfere.
   function setupGatedConversation(conversationId: number) {
     const myExperts = experts.map((e) => ({ ...e, conversationId }));
     mockGetConversationExperts.mockResolvedValue(myExperts);
@@ -176,7 +175,8 @@ describe("Orchestrator", () => {
       return Promise.resolve(stored);
     });
 
-    const gates: Array<() => void> = [];
+    const gates: Array<(error?: Error) => void> = [];
+    const startedNames: string[] = [];
     let turnsStarted = 0;
     let contentCounter = 0;
     mockGetExpertResponseStream.mockImplementation((expert: Expert) => {
@@ -184,10 +184,15 @@ describe("Orchestrator", () => {
         return new Promise(() => {}); // park foreign chains forever
       }
       turnsStarted++;
-      return new Promise((resolve) => {
+      startedNames.push(expert.name);
+      return new Promise((resolve, reject) => {
         // Unique content per turn keeps the redundancy early-stop out of play.
         const content = `Distinct answer ${++contentCounter} from ${expert.name}`;
-        gates.push(() =>
+        gates.push((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
           resolve({
             conversationId: expert.conversationId,
             expertId: expert.id,
@@ -197,8 +202,8 @@ describe("Orchestrator", () => {
             expertName: expert.name,
             expertRole: expert.role,
             artifacts: [],
-          }),
-        );
+          });
+        });
       });
     });
 
@@ -221,6 +226,15 @@ describe("Orchestrator", () => {
       gates.shift()!();
     };
 
+    const rejectNextTurn = async (error = new Error("planned provider failure")) => {
+      const deadline = Date.now() + 5000;
+      while (gates.length === 0) {
+        if (Date.now() > deadline) throw new Error("Timed out waiting for a turn to reject");
+        await waitFor(5);
+      }
+      gates.shift()!(error);
+    };
+
     // Release turns until the sequence returns to idle.
     const drainToIdle = async () => {
       for (let i = 0; i < 25; i++) {
@@ -233,28 +247,38 @@ describe("Orchestrator", () => {
 
     const assistantCount = () =>
       messages.filter((m) => m.conversationId === conversationId && m.role === "assistant").length;
+    const addUserMessageToHistory = (message: Message) => { messages.push({ ...message, conversationId }); };
 
-    return { waitForTurns, releaseNextTurn, drainToIdle, assistantCount, turnsStarted: () => turnsStarted };
+    return {
+      waitForTurns,
+      releaseNextTurn,
+      rejectNextTurn,
+      drainToIdle,
+      assistantCount,
+      addUserMessageToHistory,
+      turnNames: () => [...startedNames],
+      turnsStarted: () => turnsStarted,
+    };
   }
 
   // ─────────────────────────────────────────────────────────────────
-  // State Machine: idle → processing_sequential
+  // State Machine: idle → autonomous
   // ─────────────────────────────────────────────────────────────────
 
   describe("State machine transitions", () => {
-    it("starts in idle mode after initialization", async () => {
+    it("starts in autonomous mode after a new farmer message", async () => {
       const conversationId = nextConvId();
-      mockGetConversationExperts.mockResolvedValue(experts);
+      mockGetConversationExperts.mockResolvedValue(experts.map((expert) => ({ ...expert, conversationId })));
       const userMessage = createMockMessage(1, "Hello experts");
 
       await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn);
 
       const state = getConversationState(conversationId);
       expect(state).toBeDefined();
-      expect(state!.mode).toBe("processing_sequential");
+      expect(state!.mode).toBe("autonomous");
     });
 
-    it("transitions idle → processing_sequential on startProcessingSequence", async () => {
+    it("enters autonomous directly instead of starting a sequential roll-call", async () => {
       const conversationId = nextConvId();
       mockGetConversationExperts.mockResolvedValue(experts);
       const userMessage = createMockMessage(1, "Hello experts");
@@ -262,10 +286,10 @@ describe("Orchestrator", () => {
       await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn);
 
       const state = getConversationState(conversationId);
-      expect(state!.mode).toBe("processing_sequential");
+      expect(state!.mode).toBe("autonomous");
     });
 
-    it("does not start if already processing", async () => {
+    it("does not start a second chain when already autonomous", async () => {
       const conversationId = nextConvId();
       mockGetConversationExperts.mockResolvedValue(experts);
       const userMessage = createMockMessage(1, "Hello experts");
@@ -276,20 +300,21 @@ describe("Orchestrator", () => {
       const orchestrator = new InteractionOrchestrator(conversationId);
       await orchestrator.startProcessingSequence();
 
-      // Should still be processing, not crash
+      // Should remain on the existing autonomous chain, not crash.
       const state = getConversationState(conversationId);
-      expect(state!.mode).toBe("processing_sequential");
+      expect(state!.mode).toBe("autonomous");
     });
   });
 
   // ─────────────────────────────────────────────────────────────────
-  // Sequential expert processing
+  // Direct autonomous expert processing
   // ─────────────────────────────────────────────────────────────────
 
-  describe("Sequential processing", () => {
-    it("processes experts in sequence", async () => {
+  describe("Direct autonomous processing", () => {
+    it("uses round-robin routing when the Moderator requests it", async () => {
       const conversationId = nextConvId();
-      mockGetConversationExperts.mockResolvedValue(experts);
+      mockGetConversationExperts.mockResolvedValue(experts.map((expert) => ({ ...expert, conversationId })));
+      mockGetModeratorNextSpeakerSuggestion.mockResolvedValue("RoundRobin");
       mockGetConversationMessages.mockResolvedValue([]);
       mockGetConversationFiles.mockResolvedValue([]);
       mockCreateMessage.mockImplementation((msg) =>
@@ -299,12 +324,13 @@ describe("Orchestrator", () => {
       // Each expert responds with their name
       let callCount = 0;
       mockGetExpertResponseStream.mockImplementation(async (expert: Expert) => {
+        if (expert.conversationId !== conversationId) return new Promise<never>(() => {});
         callCount++;
         return {
           conversationId,
           expertId: expert.id,
           userId: null,
-          content: `Response from ${expert.name}`,
+          content: `Distinct response ${callCount} from ${expert.name}`,
           role: "assistant",
           expertName: expert.name,
           expertRole: expert.role,
@@ -314,63 +340,71 @@ describe("Orchestrator", () => {
 
       const userMessage = createMockMessage(1, "Hello experts");
       await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn);
+      new InteractionOrchestrator(conversationId).enableAutonomous(6);
 
-      // Wait for async processing — sequential + autonomous takes time
+      // Bound this routing-order check to six autonomous turns.
       await waitFor(800);
 
-      // Should have been called at least 3 times (once per expert in sequential round)
+      // The first three direct autonomous routes follow round-robin order.
       expect(mockGetExpertResponseStream).toHaveBeenCalled();
       expect(callCount).toBeGreaterThanOrEqual(3);
 
-      // Verify that Alice, Bob, and Carol were all called (order may vary due to async scheduling across conv IDs)
-      const calledNames = mockGetExpertResponseStream.mock.calls.map((c) => c[0].name);
-      expect(calledNames).toContain("Alice");
-      expect(calledNames).toContain("Bob");
-      expect(calledNames).toContain("Carol");
+      const calledNames = mockGetExpertResponseStream.mock.calls
+        .filter((c) => c[0].conversationId === conversationId)
+        .map((c) => c[0].name);
+      expect(calledNames.slice(0, 3)).toEqual(["Alice", "Bob", "Carol"]);
     });
 
-    it("broadcasts expert_stream_start for each expert", async () => {
+    it("broadcasts each selected expert in round-robin order", async () => {
       const conversationId = nextConvId();
-      mockGetConversationExperts.mockResolvedValue(experts);
+      mockGetConversationExperts.mockResolvedValue(experts.map((expert) => ({ ...expert, conversationId })));
+      mockGetModeratorNextSpeakerSuggestion.mockResolvedValue("RoundRobin");
       mockGetConversationMessages.mockResolvedValue([]);
       mockGetConversationFiles.mockResolvedValue([]);
       mockCreateMessage.mockImplementation((msg) =>
         Promise.resolve({ ...msg, id: Math.floor(Math.random() * 1000), timestamp: new Date() }),
       );
 
-      mockGetExpertResponseStream.mockImplementation(async (expert: Expert) => ({
-        conversationId,
-        expertId: expert.id,
-        userId: null,
-        content: "Test response",
-        role: "assistant",
-        expertName: expert.name,
-        expertRole: expert.role,
-        artifacts: [],
-      }));
+      let responseNo = 0;
+      mockGetExpertResponseStream.mockImplementation(async (expert: Expert) => {
+        if (expert.conversationId !== conversationId) return new Promise<never>(() => {});
+        return {
+          conversationId,
+          expertId: expert.id,
+          userId: null,
+          content: `Distinct test response ${++responseNo} from ${expert.name}`,
+          role: "assistant",
+          expertName: expert.name,
+          expertRole: expert.role,
+          artifacts: [],
+        };
+      });
 
       const userMessage = createMockMessage(1, "Hello experts");
       await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn);
+      new InteractionOrchestrator(conversationId).enableAutonomous(6);
 
       await waitFor(800);
 
       const streamStartCalls = broadcastFn.mock.calls.filter(
-        (call) => call[1].type === "expert_stream_start",
+        (call) => call[0] === conversationId && call[1].type === "expert_stream_start",
       );
-      // At least 3 stream_start events (one per expert in sequential round)
+      // The first three stream starts reflect direct round-robin selections.
       expect(streamStartCalls.length).toBeGreaterThanOrEqual(3);
-      expect(streamStartCalls[0][1].expertName).toBe("Alice");
-      expect(streamStartCalls[1][1].expertName).toBe("Bob");
-      expect(streamStartCalls[2][1].expertName).toBe("Carol");
+      expect(streamStartCalls.slice(0, 3).map((call) => call[1].expertName)).toEqual([
+        "Alice",
+        "Bob",
+        "Carol",
+      ]);
     });
   });
 
   // ─────────────────────────────────────────────────────────────────
-  // Stop at end of round
+  // Stop at the end of autonomous processing
   // ─────────────────────────────────────────────────────────────────
 
-  describe("Stop at end of round", () => {
-    it("stops and returns to idle after all experts have spoken", async () => {
+  describe("Stop at end of autonomous processing", () => {
+    it("returns to idle after the autonomous chain finishes", async () => {
       const conversationId = nextConvId();
       mockGetConversationExperts.mockResolvedValue(experts);
       mockGetConversationMessages.mockResolvedValue([]);
@@ -393,7 +427,8 @@ describe("Orchestrator", () => {
       const userMessage = createMockMessage(1, "Hello experts");
       await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn);
 
-      // Wait for processing to complete (sequential + autonomous)
+      // The first response can naturally end the chain when contributions
+      // are identical; this test checks natural cleanup, not a roll-call.
       await waitFor(800);
 
       const state = getConversationState(conversationId);
@@ -401,7 +436,7 @@ describe("Orchestrator", () => {
       expect(state!.currentExpertIndex).toBe(-1);
     });
 
-    it("calls generateInsights when round completes", async () => {
+    it("calls generateInsights when autonomous processing completes", async () => {
       const conversationId = nextConvId();
       mockGetConversationExperts.mockResolvedValue(experts);
       mockGetConversationMessages.mockResolvedValue([]);
@@ -431,52 +466,129 @@ describe("Orchestrator", () => {
   });
 
   // ─────────────────────────────────────────────────────────────────
-  // Interruption
+  // G11 message joins
   // ─────────────────────────────────────────────────────────────────
 
-  describe("Interruption", () => {
-    it("sets wasInterrupted flag when new user message arrives during processing", async () => {
+  describe("G11 message joins", () => {
+    it("queues a new farmer message while the current expert remains in flight", async () => {
       const conversationId = nextConvId();
-      mockGetConversationExperts.mockResolvedValue(experts);
-      mockGetConversationMessages.mockResolvedValue([]);
-      mockGetConversationFiles.mockResolvedValue([]);
-      mockCreateMessage.mockImplementation((msg) =>
-        Promise.resolve({ ...msg, id: Math.floor(Math.random() * 1000), timestamp: new Date() }),
-      );
-
-      // Slow expert response to simulate processing time
-      mockGetExpertResponseStream.mockImplementation(async () => {
-        await waitFor(50);
-        return {
-          conversationId,
-          expertId: 1,
-          userId: null,
-          content: "Slow response",
-          role: "assistant",
-          expertName: "Alice",
-          expertRole: "Agronomist",
-          artifacts: [],
-        };
-      });
+      const { waitForTurns, releaseNextTurn, addUserMessageToHistory } = setupGatedConversation(conversationId);
 
       const userMessage1 = createMockMessage(1, "First message");
+      addUserMessageToHistory(userMessage1);
       await processMessageTurnBased(userId, conversationId, userMessage1, broadcastFn);
-
-      // Wait a bit for processing to start
-      await waitFor(10);
-
-      // State should be processing
-      let state = getConversationState(conversationId);
-      expect(state!.mode).toBe("processing_sequential");
+      await waitForTurns(1);
+      expect(getConversationState(conversationId)!.turnInFlight).toBe(true);
 
       // Send second message while processing
       const userMessage2 = createMockMessage(2, "Second message");
+      addUserMessageToHistory(userMessage2);
       await processMessageTurnBased(userId, conversationId, userMessage2, broadcastFn);
 
-      // Check interruption flag was set
-      state = getConversationState(conversationId);
-      expect(state!.wasInterrupted).toBe(true);
-      expect(state!.lastUserMessage!.content).toBe("Second message");
+      const state = getConversationState(conversationId)!;
+      expect(state.wasInterrupted).toBe(false);
+      expect(state.pendingUserMessage?.content).toBe("Second message");
+      expect(broadcastFn).not.toHaveBeenCalledWith(conversationId, { type: "steering" });
+      expect(state.turnInFlight).toBe(true);
+
+      // The user message joins the chain; it does not release or replace the
+      // current expert's gated turn.
+      expect(mockCreateMessage).not.toHaveBeenCalledWith(expect.objectContaining({ content: "Distinct answer 1 from Alice" }));
+      await releaseNextTurn();
+    });
+
+    it("recovers a queued farmer message when the active expert rejects", async () => {
+      const conversationId = nextConvId();
+      const { waitForTurns, releaseNextTurn, rejectNextTurn, assistantCount, turnNames, addUserMessageToHistory } =
+        setupGatedConversation(conversationId);
+      mockGetModeratorNextSpeakerSuggestion.mockResolvedValue("RoundRobin");
+
+      const firstMessage = createMockMessage(1, "First question");
+      addUserMessageToHistory(firstMessage);
+      await processMessageTurnBased(userId, conversationId, firstMessage, broadcastFn);
+      await waitForTurns(1);
+      expect(getConversationState(conversationId)!.turnInFlight).toBe(true);
+
+      const turnsBeforeJoin = getConversationState(conversationId)!.totalAutonomousTurnsTaken;
+      const joinedMessage = createMockMessage(2, "Please account for the wet corner");
+      addUserMessageToHistory(joinedMessage);
+      await processMessageTurnBased(userId, conversationId, joinedMessage, broadcastFn);
+      expect(getConversationState(conversationId)!.pendingUserMessage?.content).toBe(joinedMessage.content);
+      expect(getConversationState(conversationId)!.wasInterrupted).toBe(false);
+      expect(getConversationState(conversationId)!.totalAutonomousTurnsTaken).toBe(turnsBeforeJoin);
+
+      const callsAfterJoin = broadcastFn.mock.calls.length;
+      await rejectNextTurn();
+
+      // The replacement chain picks up the still-pending farmer message and
+      // starts its routed response without an idle state update in between.
+      await waitForTurns(2);
+      const stateDuringReplacement = getConversationState(conversationId)!;
+      expect(turnNames()).toEqual(["Alice", "Bob"]);
+      expect(stateDuringReplacement.mode).toBe("autonomous");
+      expect(stateDuringReplacement.pendingUserMessage).toBeNull();
+      expect(stateDuringReplacement.turnInFlight).toBe(true);
+      expect(stateDuringReplacement.totalAutonomousTurnsTaken).toBe(turnsBeforeJoin + 1);
+      expect(stateDuringReplacement.scheduledFailureAttempts).toBe(1);
+      const recoveryCalls = broadcastFn.mock.calls.slice(callsAfterJoin);
+      expect(recoveryCalls.some(([cid, event]) =>
+        cid === conversationId && event?.type === "message_picked_up" && event.messageId === joinedMessage.id,
+      )).toBe(true);
+      expect(recoveryCalls.some(([cid, event]) =>
+        cid === conversationId && event?.type === "state_update" && event.mode === "idle",
+      )).toBe(false);
+
+      new InteractionOrchestrator(conversationId).disableAutonomous();
+      await releaseNextTurn();
+      await waitForMode(conversationId, "idle");
+      expect(getConversationState(conversationId)!.turnInFlight).toBe(false);
+      expect(getConversationState(conversationId)!.scheduledFailureAttempts).toBe(0);
+      expect(assistantCount()).toBe(2); // persisted error row plus Bob's answer
+    });
+
+    it("bounds persistent pre-turn storage failures and retains the queued farmer message", async () => {
+      const conversationId = nextConvId();
+      const { addUserMessageToHistory, waitForTurns, releaseNextTurn } = setupGatedConversation(conversationId);
+      const userMessage = createMockMessage(1, "Remember the wet corner before advising");
+      addUserMessageToHistory(userMessage);
+      mockGetConversationMessages.mockImplementation((cid: number) =>
+        cid === conversationId
+          ? Promise.reject(new Error("planned persistent storage failure"))
+          : Promise.resolve([]),
+      );
+
+      await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn);
+      await waitForMode(conversationId, "idle");
+      await waitFor(30);
+
+      const state = getConversationState(conversationId)!;
+      expect(mockGetConversationMessages.mock.calls.filter(([cid]) => cid === conversationId)).toHaveLength(3);
+      expect(mockGetExpertResponseStream.mock.calls.filter(([expert]) => expert.conversationId === conversationId)).toHaveLength(0);
+      expect(state.scheduledFailureAttempts).toBe(3);
+      expect(state.pendingUserMessage?.content).toBe(userMessage.content);
+      expect(state.pendingMentionRoutes).toEqual([]);
+      expect(state.mode).toBe("idle");
+      expect(state.turnChainScheduled).toBe(false);
+      expect(state.turnChainRunning).toBe(false);
+      expect(broadcastFn.mock.calls.some(([cid, event]) =>
+        cid === conversationId && event?.type === "notice" && event.message?.includes("three consecutive errors"),
+      )).toBe(true);
+      expect(broadcastFn.mock.calls.some(([cid, event]) =>
+        cid === conversationId && event?.type === "message_picked_up" && event.messageId === userMessage.id,
+      )).toBe(false);
+
+      // An explicit /new is the deliberate reset path after the recoverable
+      // stop. The first successful routed turn then leaves the counter clear.
+      mockGetConversationMessages.mockResolvedValue([]);
+      mockGetModeratorNextSpeakerSuggestion.mockResolvedValue("RoundRobin");
+      const restartedMessage = createMockMessage(2, "Start over with the saved context");
+      await processMessageTurnBased(userId, conversationId, restartedMessage, broadcastFn, { restart: true });
+      await waitForTurns(1);
+      expect(getConversationState(conversationId)!.scheduledFailureAttempts).toBe(0);
+      new InteractionOrchestrator(conversationId).disableAutonomous();
+      await releaseNextTurn();
+      await waitForMode(conversationId, "idle");
+      expect(getConversationState(conversationId)!.scheduledFailureAttempts).toBe(0);
     });
   });
 
@@ -731,15 +843,21 @@ describe("Orchestrator", () => {
         },
         currentExpertIndex: 0,
         lastUserMessage: null,
-        mode: "processing_sequential",
+        mode: "autonomous",
         broadcastFn,
         isAutonomousEnabled: true,
         maxAutonomousTurns: 6,
         totalAutonomousTurnsTaken: 0,
         wasInterrupted: false,
+        pendingUserMessage: null,
+        pendingMentionRoutes: [],
+        farmerJustSpoke: false,
+        singleTurnOnly: false,
         pausedFromMode: null,
         turnInFlight: false,
         turnChainScheduled: false,
+        turnChainRunning: false,
+        scheduledFailureAttempts: 0,
         lastProgressAt: Date.now(),
         sequenceExpertContents: [],
         roundExperts: experts,
@@ -755,6 +873,18 @@ describe("Orchestrator", () => {
     it("rejects a state missing moderatorNoticeSent even when every other check passes", () => {
       const partial = usableState();
       delete partial.moderatorNoticeSent;
+      expect(isUsableConversationState(partial as any)).toBe(false);
+    });
+
+    it("rejects a state missing the G11 pending mention route queue", () => {
+      const partial = usableState();
+      delete partial.pendingMentionRoutes;
+      expect(isUsableConversationState(partial as any)).toBe(false);
+    });
+
+    it("rejects a state missing the scheduled failure counter", () => {
+      const partial = usableState();
+      delete partial.scheduledFailureAttempts;
       expect(isUsableConversationState(partial as any)).toBe(false);
     });
   });
@@ -782,7 +912,7 @@ describe("Orchestrator", () => {
         messages.filter((m) => m.conversationId === conversationId && m.role === "assistant").length;
     }
 
-    it("stops the autonomous sequence early on a near-identical repeat of a prior expert message", async () => {
+    it("stops direct autonomous routing early on a near-identical repeat", async () => {
       const conversationId = nextConvId();
       // Experts bound to THIS conversation: the mock returns
       // expert.conversationId, so leftover chains from earlier tests (whose
@@ -791,21 +921,22 @@ describe("Orchestrator", () => {
       const myExperts = experts.map((e) => ({ ...e, conversationId }));
       mockGetConversationExperts.mockResolvedValue(myExperts);
       mockGetConversationFiles.mockResolvedValue([]);
+      mockGetModeratorNextSpeakerSuggestion.mockResolvedValue("RoundRobin");
       const assistantTurns = mockHistoryBackedStorage();
 
-      const sequentialContents: Record<string, string> = {
+      const firstRoundContents: Record<string, string> = {
         Alice: "Lime this field at two tons per acre and retest the soil in spring",
         Bob: "Tile drainage would fix the wet spot in the north corner",
         Carol: "Frost risk stays low for the next ten days in your county",
       };
 
       mockGetExpertResponseStream.mockImplementation(async (expert: Expert) => {
-        // Autonomous turn (after the 3 sequential turns): near-identical to
-        // Alice's sequential message — only the final word differs (0.875 sim).
+        // Turn four repeats Alice's first reply with only its final word
+        // changed (0.875 similarity), exercising the existing early stop.
         const content =
           assistantTurns(conversationId) >= 3
             ? "Lime this field at two tons per acre and retest the soil in autumn"
-            : sequentialContents[expert.name];
+            : firstRoundContents[expert.name];
         return {
           conversationId: expert.conversationId,
           expertId: expert.id,
@@ -820,11 +951,12 @@ describe("Orchestrator", () => {
 
       const userMessage = createMockMessage(1, "What should I do about the field?");
       await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn);
+      new InteractionOrchestrator(conversationId).enableAutonomous(6);
 
       await waitFor(800);
 
-      // Exactly the sequential round (3) + ONE autonomous turn (the redundant
-      // one) — the sequence stopped before the maxAutonomousTurns cap of 6.
+      // Three round-robin responses plus one redundant response; routing
+      // stops before the six-turn autonomous budget.
       expect(assistantTurns(conversationId)).toBe(4);
 
       const state = getConversationState(conversationId);
@@ -834,11 +966,12 @@ describe("Orchestrator", () => {
       expect(mockGenerateInsights).toHaveBeenCalledWith(conversationId, expect.any(Function));
     });
 
-    it("lets the autonomous sequence run to the cap when contributions stay distinct", async () => {
+    it("lets direct autonomous routing run to its cap when contributions stay distinct", async () => {
       const conversationId = nextConvId();
       const myExperts = experts.map((e) => ({ ...e, conversationId }));
       mockGetConversationExperts.mockResolvedValue(myExperts);
       mockGetConversationFiles.mockResolvedValue([]);
+      mockGetModeratorNextSpeakerSuggestion.mockResolvedValue("RoundRobin");
       const assistantTurns = mockHistoryBackedStorage();
 
       mockGetExpertResponseStream.mockImplementation(async (expert: Expert) => ({
@@ -854,87 +987,159 @@ describe("Orchestrator", () => {
 
       const userMessage = createMockMessage(1, "Let's discuss rotation planning");
       await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn);
+      new InteractionOrchestrator(conversationId).enableAutonomous(6);
 
       await waitFor(1000);
 
-      // 3 sequential + maxAutonomousTurns (3 experts * 2 = 6) — never cut early.
-      expect(assistantTurns(conversationId)).toBe(9);
+      // The six-turn autonomous budget is fully used without an initial
+      // forced roster round.
+      expect(assistantTurns(conversationId)).toBe(6);
       expect(getConversationState(conversationId)!.mode).toBe("idle");
     });
   });
 
   // ─────────────────────────────────────────────────────────────────
-  // G1 — Steering: send immediately, server-side interrupt
+  // G11 — Messages join the current discussion
   // ─────────────────────────────────────────────────────────────────
 
-  describe("G1 steering", () => {
-    it("broadcasts {type:'steering'} when a message arrives mid-autonomous, finishes the current expert, and restarts the round on the new message", async () => {
+  describe("G11 message joins", () => {
+    it("uses the 25-turn default and caps the let-it-run option at 100", async () => {
       const conversationId = nextConvId();
-      const { waitForTurns, releaseNextTurn, drainToIdle, assistantCount } =
-        setupGatedConversation(conversationId);
+      const { waitForTurns, releaseNextTurn } = setupGatedConversation(conversationId);
+      const userMessage = createMockMessage(1, "First question");
+      await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn);
 
-      const userMessage1 = createMockMessage(1, "First question");
-      await processMessageTurnBased(userId, conversationId, userMessage1, broadcastFn);
-
-      // Run the sequential round (Alice, Bob, Carol) to completion.
+      expect(getConversationState(conversationId)!.maxAutonomousTurns).toBe(25);
+      const orchestrator = new InteractionOrchestrator(conversationId);
+      orchestrator.enableAutonomous(0);
+      expect(getConversationState(conversationId)!.maxAutonomousTurns).toBe(100);
+      orchestrator.enableAutonomous(101);
+      expect(getConversationState(conversationId)!.maxAutonomousTurns).toBe(100);
+      orchestrator.enableAutonomous(1);
       await waitForTurns(1);
       await releaseNextTurn();
+      await waitForMode(conversationId, "idle");
+    });
+
+    it("finishes the current expert, routes the pending farmer message, and preserves autonomous counters", async () => {
+      const conversationId = nextConvId();
+      const { waitForTurns, releaseNextTurn, assistantCount, turnNames, addUserMessageToHistory } =
+        setupGatedConversation(conversationId);
+      mockGetModeratorNextSpeakerSuggestion
+        .mockResolvedValueOnce("Agronomist")
+        .mockResolvedValueOnce("Soil Scientist")
+        .mockResolvedValueOnce("Weather Expert");
+      new InteractionOrchestrator(conversationId).enableAutonomous(10);
+
+      const userMessage1 = createMockMessage(1, "First question");
+      addUserMessageToHistory(userMessage1);
+      await processMessageTurnBased(userId, conversationId, userMessage1, broadcastFn);
+
+      // The first route selects Alice. After she completes, Bob is in flight.
+      await waitForTurns(1);
+      expect(turnNames()).toEqual(["Alice"]);
+      await releaseNextTurn();
       await waitForTurns(2);
-      await releaseNextTurn();
-      await waitForTurns(3);
-      await releaseNextTurn();
+      expect(turnNames()).toEqual(["Alice", "Bob"]);
+      const stateBeforeJoin = getConversationState(conversationId)!;
+      const turnsBeforeJoin = stateBeforeJoin.totalAutonomousTurnsTaken;
+      expect(turnsBeforeJoin).toBeGreaterThan(0);
 
-      // Autonomous phase: wait for its first turn to be in flight.
-      await waitForMode(conversationId, "autonomous");
-      await waitForTurns(4);
-
-      // Steering: a new message arrives mid-autonomous-turn.
-      const userMessage2 = createMockMessage(2, "Steering question");
+      // A new message arrives while Bob's expert turn is still gated.
+      const userMessage2 = createMockMessage(2, "Clarify the watering plan");
+      addUserMessageToHistory(userMessage2);
       await processMessageTurnBased(userId, conversationId, userMessage2, broadcastFn);
 
-      // Interrupt flagged, newest message stored, steering broadcast sent.
-      let state = getConversationState(conversationId);
-      expect(state!.wasInterrupted).toBe(true);
-      expect(state!.lastUserMessage!.content).toBe("Steering question");
-      expect(broadcastFn).toHaveBeenCalledWith(conversationId, { type: "steering" });
+      let state = getConversationState(conversationId)!;
+      expect(state.pendingUserMessage?.content).toBe("Clarify the watering plan");
+      expect(state.wasInterrupted).toBe(false);
+      expect(state.totalAutonomousTurnsTaken).toBe(turnsBeforeJoin);
+      expect(state.turnInFlight).toBe(true);
+      expect(broadcastFn).not.toHaveBeenCalledWith(conversationId, { type: "steering" });
+      const assistantsBeforeBobFinishes = assistantCount();
 
-      const assistantAtInterrupt = assistantCount();
-
-      // The in-flight expert finishes, then a fresh sequential round starts.
+      // Bob completes his existing turn. The Moderator then sees the farmer's
+      // message and selects Carol without a new sequential roll-call.
       await releaseNextTurn();
-      await waitForMode(conversationId, "processing_sequential");
+      await waitForTurns(3);
+      expect(turnNames()).toEqual(["Alice", "Bob", "Carol"]);
+      expect(assistantCount()).toBe(assistantsBeforeBobFinishes + 1);
+      state = getConversationState(conversationId)!;
+      expect(state.totalAutonomousTurnsTaken).toBe(turnsBeforeJoin + 1);
 
-      const eventsAfterSteering = (type: string) => {
-        const all = broadcastFn.mock.calls.filter((c) => c[0] === conversationId);
-        const idx = all.findIndex((c) => c[1]?.type === "steering");
-        expect(idx).toBeGreaterThanOrEqual(0);
-        return all.slice(idx + 1).filter((c) => c[1]?.type === type).map((c) => c[1]);
-      };
+      const messageAwareRoute = mockGetModeratorNextSpeakerSuggestion.mock.calls.find(
+        ([moderator, history]) =>
+          moderator?.conversationId === conversationId &&
+          history?.some((message: Message) => message.content === "Clarify the watering plan"),
+      );
+      expect(messageAwareRoute).toBeDefined();
+      expect(mockGetModeratorNextSpeakerSuggestion.mock.calls.some(
+        ([moderator, _history, _roles, farmerJustSpoke]) =>
+          moderator?.conversationId === conversationId && farmerJustSpoke === true,
+      )).toBe(true);
 
-      // The streaming expert completed after the steering signal...
-      expect(eventsAfterSteering("expert_stream_done").length).toBeGreaterThanOrEqual(1);
-
-      // ...and the restarted round runs the full sequential roster on the new message.
-      await waitForTurns(5); // Alice (restart)
+      // Stop the chain after Carol finishes; no fresh roster round is run.
+      new InteractionOrchestrator(conversationId).disableAutonomous();
       await releaseNextTurn();
-      await waitForTurns(6); // Bob
-      await releaseNextTurn();
-      await waitForTurns(7); // Carol
-      await releaseNextTurn();
-
-      expect(eventsAfterSteering("expert_stream_start").map((e) => e.expertName)).toEqual([
-        "Alice",
-        "Bob",
-        "Carol",
-      ]);
-
-      // A full fresh sequential round ran on the steering message, plus the
-      // autonomous turn that was allowed to finish first.
-      expect(assistantCount()).toBe(assistantAtInterrupt + 4);
-
-      // Drain the autonomous extension; the sequence ends idle.
-      await drainToIdle();
+      await waitForMode(conversationId, "idle");
+      expect(turnNames()).toEqual(["Alice", "Bob", "Carol"]);
+      expect(assistantCount()).toBe(3);
       expect(getConversationState(conversationId)!.mode).toBe("idle");
+    });
+
+    it("keeps explicit /new as a full restart with a fresh turn budget", async () => {
+      const conversationId = nextConvId();
+      const { waitForTurns, releaseNextTurn, assistantCount, turnNames, addUserMessageToHistory } =
+        setupGatedConversation(conversationId);
+      mockGetModeratorNextSpeakerSuggestion
+        .mockResolvedValueOnce("Soil Scientist")
+        .mockResolvedValueOnce("Weather Expert");
+      new InteractionOrchestrator(conversationId).enableAutonomous(10);
+
+      const firstTopic = createMockMessage(1, "@[Agronomist] First topic", "user", undefined, ["Agronomist"]);
+      addUserMessageToHistory(firstTopic);
+      await processMessageTurnBased(
+        userId,
+        conversationId,
+        firstTopic,
+        broadcastFn,
+      );
+      await waitForTurns(1);
+      expect(turnNames()).toEqual(["Alice"]);
+      await releaseNextTurn();
+      await waitForTurns(2);
+      expect(turnNames()).toEqual(["Alice", "Bob"]);
+
+      const oldBudgetCount = getConversationState(conversationId)!.totalAutonomousTurnsTaken;
+      expect(oldBudgetCount).toBeGreaterThan(0);
+
+      // The composer strips `/new`; its explicit restart intent is passed to
+      // the orchestrator while the old expert remains in flight.
+      const newTopic = createMockMessage(2, "Switch to irrigation planning");
+      addUserMessageToHistory(newTopic);
+      await processMessageTurnBased(
+        userId,
+        conversationId,
+        newTopic,
+        broadcastFn,
+        { restart: true },
+      );
+      expect(getConversationState(conversationId)!.wasInterrupted).toBe(true);
+
+      // Bob's in-flight answer is allowed to finish; the new topic then routes
+      // to the Moderator-selected expert with a fresh counter.
+      await releaseNextTurn();
+      await waitForTurns(3);
+      expect(turnNames()).toEqual(["Alice", "Bob", "Carol"]);
+      const restartedState = getConversationState(conversationId)!;
+      expect(restartedState.lastUserMessage?.content).toBe("Switch to irrigation planning");
+      expect(restartedState.wasInterrupted).toBe(false);
+      expect(restartedState.totalAutonomousTurnsTaken).toBe(1);
+
+      new InteractionOrchestrator(conversationId).disableAutonomous();
+      await releaseNextTurn();
+      await waitForMode(conversationId, "idle");
+      expect(assistantCount()).toBe(3); // two old turns + one new-topic response
     });
   });
 
@@ -943,127 +1148,173 @@ describe("Orchestrator", () => {
   // ─────────────────────────────────────────────────────────────────
 
   describe("G2 disableAutonomous", () => {
-    it("ends the sequence naturally at idle with insights (no paused state) when autonomous is disabled mid-round", async () => {
+    it("routes one responder then ends at idle when autonomy is disabled", async () => {
       const conversationId = nextConvId();
-      const { waitForTurns, releaseNextTurn, assistantCount } =
+      const { waitForTurns, releaseNextTurn, assistantCount, turnNames, addUserMessageToHistory } =
         setupGatedConversation(conversationId);
 
-      const userMessage = createMockMessage(1, "First question");
+      const userMessage = createMockMessage(
+        1,
+        "@[Soil Scientist] Please check the drainage plan",
+        "user",
+        undefined,
+        ["Soil Scientist"],
+      );
+      addUserMessageToHistory(userMessage);
       await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn);
-
-      await waitForTurns(1);
-      await releaseNextTurn();
-      await waitForTurns(2);
-      await releaseNextTurn();
-      await waitForTurns(3);
-      await releaseNextTurn();
-      await waitForMode(conversationId, "autonomous");
-      await waitForTurns(4);
-
+      // Disable before the scheduled first route so this message receives one
+      // selected responder and then the flow returns to idle.
       new InteractionOrchestrator(conversationId).disableAutonomous();
+      await waitForTurns(1);
+      expect(turnNames()).toEqual(["Bob"]);
+      expect(getConversationState(conversationId)!.singleTurnOnly).toBe(true);
 
-      // No pause: the round keeps running so the current expert can finish.
-      let state = getConversationState(conversationId);
-      expect(state!.mode).toBe("autonomous");
-      expect(state!.isAutonomousEnabled).toBe(false);
-
-      await releaseNextTurn(); // the in-flight turn completes
+      // Disabling autonomy never pauses or cancels the selected responder.
+      const stateWhileFinishing = getConversationState(conversationId)!;
+      expect(stateWhileFinishing.isAutonomousEnabled).toBe(false);
+      expect(stateWhileFinishing.mode).not.toBe("paused");
+      await releaseNextTurn();
 
       await waitForMode(conversationId, "idle");
-      state = getConversationState(conversationId);
-      expect(state!.mode).toBe("idle");
-      expect(state!.pausedFromMode).toBeNull();
-      // The current expert finished; no further autonomous turns ran.
-      expect(assistantCount()).toBe(4);
+      expect(getConversationState(conversationId)!.pausedFromMode).toBeNull();
+      expect(turnNames()).toEqual(["Bob"]);
+      expect(assistantCount()).toBe(1);
       expect(mockGenerateInsights).toHaveBeenCalledWith(conversationId, expect.any(Function));
     });
   });
 
   // ─────────────────────────────────────────────────────────────────
-  // G2 — Message while paused = implicit resume-and-restart
+  // G11 — A farmer message resumes a paused council in place
   // ─────────────────────────────────────────────────────────────────
 
-  describe("G2 paused deadlock", () => {
-    it("restarts the sequence on a new message while paused with no turn in flight", async () => {
+  describe("G11 paused message joins", () => {
+    it("keeps one routing chain when a paused message resumes during the Moderator decision", async () => {
       const conversationId = nextConvId();
-      const { waitForTurns, releaseNextTurn, drainToIdle, assistantCount } =
+      const { waitForTurns, releaseNextTurn, addUserMessageToHistory, turnNames } =
         setupGatedConversation(conversationId);
 
-      const userMessage1 = createMockMessage(1, "First question");
+      let releaseModerator: (role: string) => void = () => {};
+      let markModeratorStarted: () => void = () => {};
+      const moderatorStarted = new Promise<void>((resolve) => { markModeratorStarted = resolve; });
+      const firstModeratorDecision = new Promise<string>((resolve) => { releaseModerator = resolve; });
+      mockGetModeratorNextSpeakerSuggestion
+        .mockImplementationOnce(async () => {
+          markModeratorStarted();
+          return firstModeratorDecision;
+        });
+
+      const firstMessage = createMockMessage(1, "Check the field plan");
+      addUserMessageToHistory(firstMessage);
+      await processMessageTurnBased(userId, conversationId, firstMessage, broadcastFn);
+      await moderatorStarted;
+
+      new InteractionOrchestrator(conversationId).pause();
+      expect(getConversationState(conversationId)!.mode).toBe("paused");
+      const joinedMessage = createMockMessage(
+        2,
+        "@[Weather Expert] Please check rain timing",
+        "user",
+        undefined,
+        ["Weather Expert"],
+      );
+      addUserMessageToHistory(joinedMessage);
+      await processMessageTurnBased(userId, conversationId, joinedMessage, broadcastFn);
+
+      expect(getConversationState(conversationId)!.mode).toBe("autonomous");
+      expect(mockGetModeratorNextSpeakerSuggestion).toHaveBeenCalledTimes(1);
+      releaseModerator("Agronomist");
+
+      await waitForTurns(1);
+      expect(turnNames()).toEqual(["Carol"]);
+      expect(mockGetModeratorNextSpeakerSuggestion).toHaveBeenCalledTimes(1);
+      new InteractionOrchestrator(conversationId).disableAutonomous();
+      await releaseNextTurn();
+      await waitForMode(conversationId, "idle");
+      expect(turnNames()).toEqual(["Carol"]);
+    });
+
+    it("resumes a parked council in place and routes the mentioned expert next", async () => {
+      const conversationId = nextConvId();
+      const { waitForTurns, releaseNextTurn, assistantCount, turnNames, addUserMessageToHistory } =
+        setupGatedConversation(conversationId);
+      new InteractionOrchestrator(conversationId).enableAutonomous(8);
+
+      const userMessage1 = createMockMessage(1, "@[Agronomist] First question", "user", undefined, ["Agronomist"]);
+      addUserMessageToHistory(userMessage1);
       await processMessageTurnBased(userId, conversationId, userMessage1, broadcastFn);
-      await waitForTurns(1); // first sequential turn is streaming
+      await waitForTurns(1);
+      expect(turnNames()).toEqual(["Alice"]);
 
       const orchestrator = new InteractionOrchestrator(conversationId);
       orchestrator.pause();
       expect(getConversationState(conversationId)!.mode).toBe("paused");
 
-      // The in-flight turn completes and the loop parks — no next turn.
+      // The current expert completes and the existing flow parks.
       await releaseNextTurn();
       await waitFor(30);
-      let state = getConversationState(conversationId);
-      expect(state!.mode).toBe("paused");
-      expect(state!.turnInFlight).toBe(false);
+      const parkedState = getConversationState(conversationId)!;
+      expect(parkedState.mode).toBe("paused");
+      expect(parkedState.turnInFlight).toBe(false);
+      const turnsBeforeResume = parkedState.totalAutonomousTurnsTaken;
 
-      // A message while parked brings the council back to life immediately.
-      const userMessage2 = createMockMessage(2, "Wake back up");
+      // The message resumes the same flow and its mention selects Carol.
+      const userMessage2 = createMockMessage(2, "@[Weather Expert] Please weigh in", "user", undefined, ["Weather Expert"]);
+      addUserMessageToHistory(userMessage2);
       await processMessageTurnBased(userId, conversationId, userMessage2, broadcastFn);
+      expect(getConversationState(conversationId)!.mode).not.toBe("idle");
+      expect(broadcastFn).not.toHaveBeenCalledWith(conversationId, { type: "steering" });
+      await waitForTurns(2);
+      expect(turnNames()).toEqual(["Alice", "Carol"]);
+      expect(getConversationState(conversationId)!.totalAutonomousTurnsTaken).toBeGreaterThanOrEqual(turnsBeforeResume);
 
-      state = getConversationState(conversationId);
-      expect(state!.mode).toBe("idle"); // reset synchronously before the restart is scheduled
-
-      // The restart re-processes the new message: a fresh sequential round runs.
-      await waitForMode(conversationId, "processing_sequential");
-      await waitForTurns(2); // Alice
+      new InteractionOrchestrator(conversationId).disableAutonomous();
       await releaseNextTurn();
-      await waitForTurns(3); // Bob
-      await releaseNextTurn();
-      await waitForTurns(4); // Carol
-      await releaseNextTurn();
-      expect(assistantCount()).toBe(4); // parked-round turn + full restarted round
-
-      await drainToIdle();
-      expect(getConversationState(conversationId)!.mode).toBe("idle");
+      await waitForMode(conversationId, "idle");
+      expect(turnNames()).toEqual(["Alice", "Carol"]);
+      expect(assistantCount()).toBe(2);
     });
 
-    it("interrupts after the in-flight turn and restarts on the new message when a message arrives while paused mid-turn", async () => {
+    it("queues a message while paused mid-turn, then routes it after the active expert finishes", async () => {
       const conversationId = nextConvId();
-      const { waitForTurns, releaseNextTurn, drainToIdle, assistantCount } =
+      const { waitForTurns, releaseNextTurn, assistantCount, turnNames, addUserMessageToHistory } =
         setupGatedConversation(conversationId);
+      new InteractionOrchestrator(conversationId).enableAutonomous(8);
 
-      const userMessage1 = createMockMessage(1, "First question");
+      const userMessage1 = createMockMessage(1, "@[Agronomist] First question", "user", undefined, ["Agronomist"]);
+      addUserMessageToHistory(userMessage1);
       await processMessageTurnBased(userId, conversationId, userMessage1, broadcastFn);
-      await waitForTurns(1); // first sequential turn is streaming
+      await waitForTurns(1);
+      expect(turnNames()).toEqual(["Alice"]);
 
       const orchestrator = new InteractionOrchestrator(conversationId);
       orchestrator.pause();
 
-      // Message arrives while the turn is STILL streaming.
-      const userMessage2 = createMockMessage(2, "Change of plans");
+      // Message arrives while Alice is still streaming.
+      const userMessage2 = createMockMessage(2, "@[Soil Scientist] Check the drainage", "user", undefined, ["Soil Scientist"]);
+      addUserMessageToHistory(userMessage2);
       await processMessageTurnBased(userId, conversationId, userMessage2, broadcastFn);
 
-      let state = getConversationState(conversationId);
-      expect(state!.mode).toBe("paused"); // the running loop owns the transition
-      expect(state!.turnInFlight).toBe(true);
-      expect(state!.wasInterrupted).toBe(true);
-      expect(state!.lastUserMessage!.content).toBe("Change of plans");
+      let state = getConversationState(conversationId)!;
+      expect(state.turnInFlight).toBe(true);
+      expect(state.pendingUserMessage?.content).toBe("@[Soil Scientist] Check the drainage");
+      expect(state.wasInterrupted).toBe(false);
+      expect(broadcastFn).not.toHaveBeenCalledWith(conversationId, { type: "steering" });
 
-      // The in-flight turn finishes; the loop resets to idle and restarts on
-      // the new message.
+      const turnsBeforeJoin = state.totalAutonomousTurnsTaken;
+      // The current expert completes, then the user-mentioned expert speaks
+      // next in the same chain (no replay of Alice).
       await releaseNextTurn();
-      await waitForMode(conversationId, "processing_sequential");
-      state = getConversationState(conversationId);
-      expect(state!.wasInterrupted).toBe(false);
-      expect(state!.lastUserMessage!.content).toBe("Change of plans");
+      await waitForTurns(2);
+      expect(turnNames()).toEqual(["Alice", "Bob"]);
+      state = getConversationState(conversationId)!;
+      expect(state.totalAutonomousTurnsTaken).toBeGreaterThanOrEqual(turnsBeforeJoin);
+      expect(assistantCount()).toBe(1);
 
-      await waitForTurns(2); // Alice
+      new InteractionOrchestrator(conversationId).disableAutonomous();
       await releaseNextTurn();
-      await waitForTurns(3); // Bob
-      await releaseNextTurn();
-      await waitForTurns(4); // Carol
-      await releaseNextTurn();
-      expect(assistantCount()).toBe(4);
-
-      await drainToIdle();
+      await waitForMode(conversationId, "idle");
+      expect(turnNames()).toEqual(["Alice", "Bob"]);
+      expect(assistantCount()).toBe(2);
       expect(getConversationState(conversationId)!.mode).toBe("idle");
     });
   });
@@ -1073,7 +1324,7 @@ describe("Orchestrator", () => {
   // ─────────────────────────────────────────────────────────────────
 
   describe("B-review race conditions", () => {
-    it("does not double-drive the loop when pause()+resume() land mid-turn (single turn chain)", async () => {
+    it("does not double-drive direct autonomous routing when pause()+resume() land mid-turn", async () => {
       const conversationId = nextConvId();
       // Broadcast hook: on the first expert_stream_done (fired synchronously
       // inside the loop, before its next-turn scheduling), call pause() then
@@ -1090,23 +1341,29 @@ describe("Orchestrator", () => {
           orchestrator.resume();
         }
       });
-      const { waitForTurns, releaseNextTurn, drainToIdle, assistantCount, turnsStarted } =
+      const { waitForTurns, releaseNextTurn, drainToIdle, assistantCount, turnsStarted, addUserMessageToHistory } =
         setupGatedConversation(conversationId);
+      mockGetModeratorNextSpeakerSuggestion.mockResolvedValue("RoundRobin");
 
-      const userMessage = createMockMessage(1, "First question");
+      const userMessage = createMockMessage(
+        1,
+        "@[Agronomist] First question",
+        "user",
+        undefined,
+        ["Agronomist"],
+      );
+      addUserMessageToHistory(userMessage);
       await processMessageTurnBased(userId, conversationId, userMessage, hookedBroadcast);
-      await waitForTurns(1); // first sequential turn is streaming
-
-      // Keep the sequence bounded at the sequential round.
-      new InteractionOrchestrator(conversationId).disableAutonomous();
+      new InteractionOrchestrator(conversationId).enableAutonomous(3);
+      await waitForTurns(1); // the mentioned responder is streaming
 
       // Alice's turn completes; the hook fires pause+resume inside the
-      // loop's own continuation.
+      // direct autonomous loop's own continuation.
       await releaseNextTurn();
       await waitForTurns(2); // exactly one follow-up turn (Bob) may start
 
-      // The duplicate chain (if any) would start Carol's turn while Bob is
-      // still gated — no third turn may begin before Bob is released.
+      // A duplicate chain would start Carol while Bob is still gated — no
+      // third turn may begin before Bob is released.
       await waitFor(60);
       expect(turnsStarted()).toBe(2);
 
@@ -1116,74 +1373,75 @@ describe("Orchestrator", () => {
 
       await drainToIdle();
       expect(getConversationState(conversationId)!.mode).toBe("idle");
-      // Exactly one turn per expert: the pause/resume race must not
-      // double-drive the loop into concurrent chains.
+      // Each selected expert ran once: the pause/resume race must not
+      // double-drive concurrent autonomous chains.
       expect(assistantCount()).toBe(3);
       await waitFor(80); // a stray duplicate chain would surface as extra turns
       expect(assistantCount()).toBe(3);
       expect(turnsStarted()).toBe(3);
     });
 
-    it("resume after autonomous was disabled while paused ends the sequence without running another expert turn", async () => {
+    it("does not add a turn when a paused direct autonomous flow resumes after autonomy is disabled", async () => {
       const conversationId = nextConvId();
-      const { waitForTurns, releaseNextTurn, assistantCount } =
+      const { waitForTurns, releaseNextTurn, assistantCount, turnNames, addUserMessageToHistory } =
         setupGatedConversation(conversationId);
+      mockGetModeratorNextSpeakerSuggestion.mockResolvedValue("RoundRobin");
 
-      const userMessage = createMockMessage(1, "First question");
+      const userMessage = createMockMessage(
+        1,
+        "@[Agronomist] First question",
+        "user",
+        undefined,
+        ["Agronomist"],
+      );
+      addUserMessageToHistory(userMessage);
       await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn);
+      new InteractionOrchestrator(conversationId).enableAutonomous(3);
 
-      // Complete the sequential round; park on the first autonomous turn.
       await waitForTurns(1);
-      await releaseNextTurn();
-      await waitForTurns(2);
-      await releaseNextTurn();
-      await waitForTurns(3);
-      await releaseNextTurn();
-      await waitForMode(conversationId, "autonomous");
-      await waitForTurns(4);
-
       const orchestrator = new InteractionOrchestrator(conversationId);
       orchestrator.pause();
-      await releaseNextTurn(); // the in-flight autonomous turn completes
+      await releaseNextTurn(); // Alice completes while the flow is paused
       await waitFor(30);
       expect(getConversationState(conversationId)!.mode).toBe("paused"); // parked
 
-      // Auto off while parked, then resume: the documented G2 contract is
-      // "the sequence ends naturally once the current expert finishes" —
-      // with no expert streaming, resume must not bill one more turn.
+      // Auto off while parked, then resume: no additional responder may be
+      // selected after the current in-flight expert has completed.
       orchestrator.disableAutonomous();
       orchestrator.resume();
 
       await waitForMode(conversationId, "idle");
-      expect(assistantCount()).toBe(4); // 3 sequential + 1 autonomous, nothing more
+      expect(turnNames()).toEqual(["Alice"]);
+      expect(assistantCount()).toBe(1);
       expect(mockGenerateInsights).toHaveBeenCalledWith(conversationId, expect.any(Function));
     });
 
-    it("finishes the sequential round and ends at idle (never autonomous) when autonomous is disabled mid-sequential-round", async () => {
+    it("finishes the active expert and ends idle when autonomy is disabled mid-turn", async () => {
       const conversationId = nextConvId();
-      const { waitForTurns, releaseNextTurn, drainToIdle, assistantCount } =
+      const { waitForTurns, releaseNextTurn, drainToIdle, assistantCount, turnNames, addUserMessageToHistory } =
         setupGatedConversation(conversationId);
 
-      const userMessage = createMockMessage(1, "First question");
+      const userMessage = createMockMessage(
+        1,
+        "@[Agronomist] First question",
+        "user",
+        undefined,
+        ["Agronomist"],
+      );
+      addUserMessageToHistory(userMessage);
       await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn);
       await waitForTurns(1); // Alice is streaming
 
       new InteractionOrchestrator(conversationId).disableAutonomous();
       expect(getConversationState(conversationId)!.isAutonomousEnabled).toBe(false);
+      expect(getConversationState(conversationId)!.mode).not.toBe("paused");
 
       await releaseNextTurn(); // Alice finishes
-      await waitForTurns(2); // Bob
-      await releaseNextTurn();
-      // Mid-round check: still sequential — the disable must not wedge or
-      // transition the phase.
-      expect(getConversationState(conversationId)!.mode).toBe("processing_sequential");
-      await waitForTurns(3); // Carol
-      await releaseNextTurn();
-
       await drainToIdle();
       const state = getConversationState(conversationId)!;
       expect(state.mode).toBe("idle");
-      expect(assistantCount()).toBe(3); // sequential round is never cut
+      expect(turnNames()).toEqual(["Alice"]);
+      expect(assistantCount()).toBe(1);
       expect(mockGenerateInsights).toHaveBeenCalledWith(conversationId, expect.any(Function));
     });
   });
@@ -1272,10 +1530,11 @@ describe("Orchestrator", () => {
         }
       };
 
-      return { waitForTurns, releaseNextTurn, drainToIdle, turnNames: () => [...startedNames] };
+      const addUserMessageToHistory = (message: Message) => { messages.push({ ...message, conversationId }); };
+      return { waitForTurns, releaseNextTurn, drainToIdle, turnNames: () => [...startedNames], addUserMessageToHistory };
     }
 
-    it("mention-routes the next autonomous speaker without asking the Moderator", async () => {
+    it("routes an initial farmer mention directly and then follows an expert mention", async () => {
       const conversationId = nextConvId();
       const roster = [
         createMockExpert(1, "Alice", "Agronomist"),
@@ -1283,46 +1542,55 @@ describe("Orchestrator", () => {
         createMockExpert(3, "Carol", "Weather Expert"),
         createMockExpert(4, "Matt", "Moderator"),
       ];
+      mockGetModeratorNextSpeakerSuggestion.mockResolvedValue("Agronomist");
       // The Moderator stays out of ordinary turns. Carol tags the Soil
-      // Scientist so this still exercises mention routing without depending
-      // on a Moderator turn.
-      const { waitForTurns, releaseNextTurn, drainToIdle, turnNames } =
+      // Scientist. The farmer's tag routes Carol first; the Moderator gets
+      // the next pick before Carol's expert-origin tag can route Bob.
+      const { waitForTurns, releaseNextTurn, drainToIdle, turnNames, addUserMessageToHistory } =
         setupGatedMentionConversation(conversationId, roster, (e) =>
           e.name === "Carol" ? ["Soil Scientist"] : [],
         );
 
-      const userMessage = createMockMessage(1, "Plan my week");
+      const userMessage = createMockMessage(
+        1,
+        "@[Weather Expert] Plan my week",
+        "user",
+        undefined,
+        ["Weather Expert"],
+      );
+      addUserMessageToHistory(userMessage);
       await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn);
 
-      // Full sequential round: only active experts speak.
-      for (let i = 1; i <= 3; i++) {
-        await waitForTurns(i);
-        await releaseNextTurn();
-      }
+      // No forced roll-call: the farmer's mention selects Carol first.
+      await waitForTurns(1);
+      expect(turnNames()).toEqual(["Carol"]);
+      await releaseNextTurn();
+      await waitForTurns(2);
+      expect(turnNames()).toEqual(["Carol", "Alice"]);
+      expect(mockGetModeratorNextSpeakerSuggestion.mock.calls.some(
+        ([, , , farmerJustSpoke]) => farmerJustSpoke === true,
+      )).toBe(true);
+      await releaseNextTurn();
+      await waitForTurns(3);
+      expect(turnNames()).toEqual(["Carol", "Alice", "Bob"]);
 
-      await waitForMode(conversationId, "autonomous");
-      await waitForTurns(4);
-
-      // Mention-routed: Carol tagged the Soil Scientist, so Bob speaks next —
-      // round-robin would have picked Alice (index 0) — and the Moderator
-      // suggestion mock is not consulted for mention routing.
-      expect(turnNames()).toEqual(["Alice", "Bob", "Carol", "Bob"]);
-      expect(mockGetModeratorNextSpeakerSuggestion).not.toHaveBeenCalled();
-
+      new InteractionOrchestrator(conversationId).disableAutonomous();
       await releaseNextTurn();
       await drainToIdle();
+      expect(turnNames()).toEqual(["Carol", "Alice", "Bob"]);
       expect(getConversationState(conversationId)!.mode).toBe("idle");
     });
 
-    it("falls back to round-robin when the same pair trades mentions a third consecutive time", async () => {
+    it("keeps the ping-pong guard when experts repeatedly tag each other", async () => {
       const conversationId = nextConvId();
       const roster = [
         createMockExpert(1, "Alice", "Agronomist"),
         createMockExpert(2, "Bob", "Soil Scientist"),
         createMockExpert(3, "Carol", "Weather Expert"),
       ];
+      mockGetModeratorNextSpeakerSuggestion.mockResolvedValue("RoundRobin");
       // Carol always tags Bob and Bob always tags Carol — a pure ping-pong.
-      const { waitForTurns, releaseNextTurn, drainToIdle, turnNames } =
+      const { waitForTurns, releaseNextTurn, drainToIdle, turnNames, addUserMessageToHistory } =
         setupGatedMentionConversation(conversationId, roster, (e) =>
           e.role === "Weather Expert"
             ? ["Soil Scientist"]
@@ -1331,39 +1599,49 @@ describe("Orchestrator", () => {
               : [],
         );
 
-      const userMessage = createMockMessage(1, "Discuss drainage");
+      const userMessage = createMockMessage(
+        1,
+        "@[Weather Expert] Discuss drainage",
+        "user",
+        undefined,
+        ["Weather Expert"],
+      );
+      addUserMessageToHistory(userMessage);
       await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn);
 
-      // Sequential round is mention-blind: Alice, Bob, Carol in roster order.
-      for (let i = 1; i <= 3; i++) {
-        await waitForTurns(i);
-        expect(turnNames()[i - 1]).toBe(["Alice", "Bob", "Carol"][i - 1]);
-        await releaseNextTurn();
-      }
-
-      await waitForMode(conversationId, "autonomous");
-      await waitForTurns(4); // auto #1: Carol's message tags Soil Scientist → Bob (route 1)
-      expect(turnNames()[3]).toBe("Bob");
+      // The farmer starts with Carol. Her expert tag waits until after the
+      // Moderator pick (round-robin selects Alice), then Bob and Carol trade
+      // tags until the third attempted pair hop falls back to Alice.
+      await waitForTurns(1);
+      expect(turnNames()[0]).toBe("Carol");
       await releaseNextTurn();
-      await waitForTurns(5); // auto #2: Bob tags Weather Expert → Carol (route 2, same pair)
-      expect(turnNames()[4]).toBe("Carol");
+      await waitForTurns(2);
+      expect(turnNames()[1]).toBe("Alice");
       await releaseNextTurn();
-      await waitForTurns(6); // auto #3: guard trips → round-robin → Alice, NOT Bob again
-      expect(turnNames()[5]).toBe("Alice");
+      await waitForTurns(3);
+      expect(turnNames()[2]).toBe("Bob");
+      await releaseNextTurn();
+      await waitForTurns(4);
+      expect(turnNames()[3]).toBe("Carol");
+      await releaseNextTurn();
+      await waitForTurns(5);
+      expect(turnNames()[4]).toBe("Alice");
 
+      new InteractionOrchestrator(conversationId).disableAutonomous();
       await releaseNextTurn();
       await drainToIdle();
+      expect(turnNames()).toEqual(["Carol", "Alice", "Bob", "Carol", "Alice"]);
       expect(getConversationState(conversationId)!.mode).toBe("idle");
     });
 
-    it("narrows the sequential round to the addressed experts and keeps the autonomous extension council-wide", async () => {
+    it("routes multiple farmer mentions in message text order without a forced roll-call", async () => {
       const conversationId = nextConvId();
       const roster = [
         createMockExpert(1, "Alice", "Agronomist"),
         createMockExpert(2, "Bob", "Soil Scientist"),
         createMockExpert(3, "Carol", "Weather Expert"),
       ];
-      const { waitForTurns, releaseNextTurn, drainToIdle, turnNames } =
+      const { waitForTurns, releaseNextTurn, drainToIdle, turnNames, addUserMessageToHistory } =
         setupGatedMentionConversation(conversationId, roster, () => []);
 
       const userMessage = createMockMessage(
@@ -1371,39 +1649,36 @@ describe("Orchestrator", () => {
         "@[Weather Expert] and @[Soil Scientist] please weigh in",
         "user",
         undefined,
-        // NOT roster order on purpose — the round must run in roster order.
+        // NOT roster order on purpose; G11 preserves text order.
         ["Weather Expert", "Soil Scientist"],
       );
+      addUserMessageToHistory(userMessage);
       await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn);
 
-      // Only the addressed experts speak, in roster order (Bob before Carol).
+      // Mention order differs from roster order. No unrelated expert is
+      // forced into a sequential roll-call.
       await waitForTurns(1);
-      expect(turnNames()[0]).toBe("Bob");
+      expect(turnNames()[0]).toBe("Carol");
       await releaseNextTurn();
       await waitForTurns(2);
-      expect(turnNames()[1]).toBe("Carol");
-      await releaseNextTurn();
-
-      // Autonomous extension runs over the FULL council: Alice — not
-      // addressed by the user — takes the first autonomous turn.
-      await waitForMode(conversationId, "autonomous");
-      await waitForTurns(3);
-      expect(turnNames()[2]).toBe("Alice");
-
+      expect(turnNames()[1]).toBe("Bob");
+      new InteractionOrchestrator(conversationId).disableAutonomous();
       await releaseNextTurn();
       await drainToIdle();
+      expect(turnNames()).toEqual(["Carol", "Bob"]);
       expect(getConversationState(conversationId)!.mode).toBe("idle");
     });
 
-    it("runs the full round when the user mentions only stale/unknown roles", async () => {
+    it("uses the Moderator pick when farmer mentions contain only stale or unknown roles", async () => {
       const conversationId = nextConvId();
       const roster = [
         createMockExpert(1, "Alice", "Agronomist"),
         createMockExpert(2, "Bob", "Soil Scientist"),
         createMockExpert(3, "Carol", "Weather Expert"),
       ];
-      const { waitForTurns, releaseNextTurn, drainToIdle, turnNames } =
+      const { waitForTurns, releaseNextTurn, drainToIdle, turnNames, addUserMessageToHistory } =
         setupGatedMentionConversation(conversationId, roster, () => []);
+      mockGetModeratorNextSpeakerSuggestion.mockResolvedValue("Soil Scientist");
 
       const userMessage = createMockMessage(
         1,
@@ -1412,39 +1687,41 @@ describe("Orchestrator", () => {
         undefined,
         ["Rocket Scientist"], // not in the roster — must fall back to all
       );
+      addUserMessageToHistory(userMessage);
       await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn);
 
       await waitForTurns(1);
-      expect(turnNames()[0]).toBe("Alice");
-      await releaseNextTurn();
-      await waitForTurns(2);
-      expect(turnNames()[1]).toBe("Bob");
-      await releaseNextTurn();
-      await waitForTurns(3);
-      expect(turnNames()[2]).toBe("Carol");
-      await releaseNextTurn();
+      expect(turnNames()).toEqual(["Bob"]);
+      const messageAwareRoute = mockGetModeratorNextSpeakerSuggestion.mock.calls.find(
+        ([moderator, history]) =>
+          moderator?.conversationId === conversationId &&
+          history?.some((message: Message) => message.content === "@[Rocket Scientist] thoughts?"),
+      );
+      expect(messageAwareRoute).toBeDefined();
 
+      new InteractionOrchestrator(conversationId).disableAutonomous();
+      await releaseNextTurn();
       await drainToIdle();
+      expect(turnNames()).toEqual(["Bob"]);
       expect(getConversationState(conversationId)!.mode).toBe("idle");
     });
 
-    it("re-narrows the round when a steering message carries new mentions (interrupted restart inherits them)", async () => {
+    it("routes a mid-turn farmer mention next without restarting a narrowed round", async () => {
       const conversationId = nextConvId();
       const roster = [
         createMockExpert(1, "Alice", "Agronomist"),
         createMockExpert(2, "Bob", "Soil Scientist"),
         createMockExpert(3, "Carol", "Weather Expert"),
       ];
-      const { waitForTurns, releaseNextTurn, drainToIdle, turnNames } =
+      const { waitForTurns, releaseNextTurn, drainToIdle, turnNames, addUserMessageToHistory } =
         setupGatedMentionConversation(conversationId, roster, () => []);
 
-      const userMessage1 = createMockMessage(1, "First question"); // no mentions → full round
+      const userMessage1 = createMockMessage(1, "@[Agronomist] First question", "user", undefined, ["Agronomist"]);
+      addUserMessageToHistory(userMessage1);
       await processMessageTurnBased(userId, conversationId, userMessage1, broadcastFn);
       await waitForTurns(1); // Alice streaming
-      await releaseNextTurn();
-      await waitForTurns(2); // Bob streaming
 
-      // Steer mid-round with a message that addresses one expert only.
+      // The farmer mentions Carol while Alice is still in flight.
       const userMessage2 = createMockMessage(
         2,
         "@[Weather Expert] actually just you",
@@ -1452,24 +1729,69 @@ describe("Orchestrator", () => {
         undefined,
         ["Weather Expert"],
       );
+      addUserMessageToHistory(userMessage2);
       await processMessageTurnBased(userId, conversationId, userMessage2, broadcastFn);
-      expect(broadcastFn).toHaveBeenCalledWith(conversationId, { type: "steering" });
+      const queued = getConversationState(conversationId)!;
+      expect(queued.pendingUserMessage?.content).toBe("@[Weather Expert] actually just you");
+      expect(queued.wasInterrupted).toBe(false);
+      expect(broadcastFn).not.toHaveBeenCalledWith(conversationId, { type: "steering" });
 
-      await releaseNextTurn(); // Bob (in-flight) finishes
-      await waitForMode(conversationId, "processing_sequential");
-
-      // The restarted round contains ONLY the addressed expert.
-      await waitForTurns(3);
-      expect(turnNames()[2]).toBe("Carol");
+      // Alice completes, then the one mentioned expert speaks next.
+      await releaseNextTurn();
+      await waitForTurns(2);
+      expect(turnNames()).toEqual(["Alice", "Carol"]);
+      new InteractionOrchestrator(conversationId).disableAutonomous();
       await releaseNextTurn();
 
-      // Round of one ends; the autonomous extension is council-wide again.
-      await waitForMode(conversationId, "autonomous");
-      await waitForTurns(4);
-      expect(turnNames()[3]).toBe("Alice");
+      await drainToIdle();
+      expect(turnNames()).toEqual(["Alice", "Carol"]);
+      expect(getConversationState(conversationId)!.mode).toBe("idle");
+    });
 
+    it("asks the Moderator before an expert-origin mention when the farmer joins without a mention", async () => {
+      const conversationId = nextConvId();
+      const roster = [
+        createMockExpert(1, "Alice", "Agronomist"),
+        createMockExpert(2, "Bob", "Soil Scientist"),
+        createMockExpert(3, "Carol", "Weather Expert"),
+      ];
+      const joinedText = "One more detail about the wet corner";
+      const { waitForTurns, releaseNextTurn, drainToIdle, turnNames, addUserMessageToHistory } =
+        setupGatedMentionConversation(conversationId, roster, (expert) =>
+          expert.role === "Agronomist" ? ["Soil Scientist"] : [],
+        );
+      mockGetModeratorNextSpeakerSuggestion.mockImplementation(async (_moderator, history) =>
+        history.some((message: Message) => message.content === joinedText)
+          ? "Weather Expert"
+          : "Agronomist",
+      );
+
+      const firstMessage = createMockMessage(1, "Initial drainage question");
+      addUserMessageToHistory(firstMessage);
+      await processMessageTurnBased(userId, conversationId, firstMessage, broadcastFn);
+      await waitForTurns(1);
+      expect(turnNames()).toEqual(["Alice"]);
+
+      const joinedMessage = createMockMessage(2, joinedText);
+      addUserMessageToHistory(joinedMessage);
+      await processMessageTurnBased(userId, conversationId, joinedMessage, broadcastFn);
+
+      // Alice finishes with an expert-origin mention for Bob. The queued
+      // farmer message has no mention, so the Moderator must pick Carol next.
+      await releaseNextTurn();
+      await waitForTurns(2);
+      expect(turnNames()).toEqual(["Alice", "Carol"]);
+      expect(mockGetModeratorNextSpeakerSuggestion.mock.calls.some(
+        ([, history, , farmerJustSpoke]) =>
+          history.some((message: Message) => message.content === joinedText) && farmerJustSpoke === true,
+      )).toBe(true);
+
+      // End after Carol; Bob's deferred expert mention must not have pre-empted
+      // the Moderator's farmer-aware pick.
+      new InteractionOrchestrator(conversationId).disableAutonomous();
       await releaseNextTurn();
       await drainToIdle();
+      expect(turnNames()).toEqual(["Alice", "Carol"]);
       expect(getConversationState(conversationId)!.mode).toBe("idle");
     });
   });
@@ -1479,9 +1801,9 @@ describe("Orchestrator", () => {
   // ─────────────────────────────────────────────────────────────────
 
   describe("G5 semantic conclusion", () => {
-    // Gated conversation whose roster includes a Moderator: the autonomous
-    // extension consults the (mocked) Moderator for the next speaker, so a
-    // 'Conclude' verdict can be exercised at an exact point in the loop.
+    // Gated conversation whose roster includes a Moderator: direct autonomous
+    // routing consults the (mocked) Moderator, so a 'Conclude' verdict can be
+    // exercised at an exact point in the loop.
     // Everything else mirrors setupGatedConversation above (unique content
     // per turn keeps the redundancy early-stop out of play).
     function setupGatedModeratorConversation(
@@ -1567,6 +1889,7 @@ describe("Orchestrator", () => {
 
       const assistantCount = () =>
         messages.filter((m) => m.conversationId === conversationId && m.role === "assistant").length;
+      const addUserMessageToHistory = (message: Message) => { messages.push({ ...message, conversationId }); };
       const synthesisMessages = () =>
         messages.filter((m) => m.conversationId === conversationId && m.isSynthesis === true);
       const events = () =>
@@ -1591,6 +1914,7 @@ describe("Orchestrator", () => {
         drainToIdle,
         turnNames: () => [...startedNames],
         assistantCount,
+        addUserMessageToHistory,
         synthesisMessages,
         events,
         waitForEvent,
@@ -1633,20 +1957,20 @@ describe("Orchestrator", () => {
 
     it("uses the configured roster Moderator for conclusion without an ordinary turn", async () => {
       const conversationId = nextConvId();
-      const { waitForTurns, releaseNextTurn, drainToIdle, turnNames, assistantCount, synthesisMessages, events, waitForEvent } =
+      const { waitForTurns, releaseNextTurn, drainToIdle, turnNames, assistantCount, addUserMessageToHistory, synthesisMessages, events, waitForEvent } =
         setupGatedModeratorConversation(conversationId);
       mockGetModeratorNextSpeakerSuggestion.mockResolvedValue("Conclude");
       mockSynthesisTurn(conversationId);
 
-      const userMessage = createMockMessage(1, "Plan my week");
+      const userMessage = createMockMessage(1, "@[Agronomist] Plan my week", "user", undefined, ["Agronomist"]);
+      addUserMessageToHistory(userMessage);
       await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn);
 
-      // Only active experts take ordinary turns; Matt is reserved for
-      // Moderator routing and conclusion.
-      for (let i = 1; i <= 3; i++) {
-        await waitForTurns(i);
-        await releaseNextTurn();
-      }
+      // Alice is selected by the farmer; Matt is reserved for Moderator
+      // routing and conclusion, never an ordinary expert turn.
+      await waitForTurns(1);
+      expect(turnNames()).toEqual(["Alice"]);
+      await releaseNextTurn();
 
       // The Moderator concludes after the active experts finish; only the
       // synthesis streams under the Moderator identity.
@@ -1664,7 +1988,7 @@ describe("Orchestrator", () => {
       const startsBeforeConcluding = allEvents
         .slice(0, concludingIdx)
         .filter((e) => e.type === "expert_stream_start");
-      expect(startsBeforeConcluding).toHaveLength(3); // active experts only
+      expect(startsBeforeConcluding).toHaveLength(1); // active expert only
       const synthesisStart = allEvents
         .slice(concludingIdx + 1)
         .find((e) => e.type === "expert_stream_start");
@@ -1701,9 +2025,9 @@ describe("Orchestrator", () => {
         model: "test/configured-moderator-model",
       });
 
-      // ...exactly the sequential round ran (no extra expert turn)...
-      expect(turnNames()).toEqual(["Alice", "Bob", "Carol"]);
-      expect(assistantCount()).toBe(4); // 3 expert turns + 1 synthesis
+      // ...the selected active expert ran (no forced roll-call)...
+      expect(turnNames()).toEqual(["Alice"]);
+      expect(assistantCount()).toBe(2); // 1 expert turn + 1 synthesis
 
       // ...and the sequence ended through the natural-end cleanup.
       const state = getConversationState(conversationId)!;
@@ -1727,36 +2051,34 @@ describe("Orchestrator", () => {
         assistantCount,
         synthesisMessages,
         events,
+        addUserMessageToHistory,
       } = setupGatedModeratorConversation(conversationId, false);
       vi.stubEnv("DEFAULT_AUX_MODEL", "test/default-moderator-model");
       mockGetModeratorNextSpeakerSuggestion
         .mockResolvedValueOnce("Agronomist")
         .mockResolvedValue("Conclude");
       mockSynthesisTurn(conversationId);
+      new InteractionOrchestrator(conversationId).enableAutonomous(2);
 
       expect(roster.some((expert) => expert.role === "Moderator")).toBe(false);
 
+      const userMessage = createMockMessage(1, "Plan my week");
+      addUserMessageToHistory(userMessage);
       await processMessageTurnBased(
         userId,
         conversationId,
-        createMockMessage(1, "Plan my week"),
+        userMessage,
         broadcastFn,
       );
-      new InteractionOrchestrator(conversationId).enableAutonomous(2);
 
-      // Three active experts take ordinary turns. The synthetic Moderator
-      // routes one autonomous expert turn, then concludes without speaking
-      // through the ordinary expert stream.
-      for (let i = 1; i <= 3; i++) {
-        await waitForTurns(i);
-        await releaseNextTurn();
-      }
-      await waitForMode(conversationId, "autonomous");
-      await waitForTurns(4);
+      // The synthetic Moderator selects one active expert, then concludes
+      // without appearing as an ordinary expert turn.
+      await waitForTurns(1);
+      expect(turnNames()).toEqual(["Alice"]);
       await releaseNextTurn();
       await waitForMode(conversationId, "idle");
 
-      expect(turnNames()).toEqual(["Alice", "Bob", "Carol", "Alice"]);
+      expect(turnNames()).toEqual(["Alice"]);
       expect(turnNames()).not.toContain("Moderator");
       expect(mockGetModeratorNextSpeakerSuggestion).toHaveBeenCalledTimes(2);
       expect(mockGetModeratorNextSpeakerSuggestion.mock.calls.flat()).toContainEqual(
@@ -1790,7 +2112,7 @@ describe("Orchestrator", () => {
       });
       expect(events().find((event) => event.type === "expert_stream_start" && event.expertRole === "Moderator"))
         .toMatchObject({ expertId: null, expertRole: "Moderator" });
-      expect(assistantCount()).toBe(5); // 4 active turns + 1 synthesis
+      expect(assistantCount()).toBe(2); // 1 active turn + 1 synthesis
 
       await drainToIdle();
       expect(getConversationState(conversationId)!.mode).toBe("idle");
@@ -1798,13 +2120,14 @@ describe("Orchestrator", () => {
 
     it("does not let the closing synthesis consume the autonomous turn budget", async () => {
       const conversationId = nextConvId();
-      const { waitForTurns, releaseNextTurn, drainToIdle, turnNames, assistantCount, synthesisMessages } =
+      const { waitForTurns, releaseNextTurn, drainToIdle, turnNames, assistantCount, addUserMessageToHistory, synthesisMessages } =
         setupGatedModeratorConversation(conversationId);
       // The Moderator routes the first autonomous turn to Alice, then calls
       // the round on the next decision.
       mockGetModeratorNextSpeakerSuggestion
         .mockResolvedValueOnce("Agronomist")
         .mockResolvedValue("Conclude");
+      new InteractionOrchestrator(conversationId).enableAutonomous(2);
 
       // Snapshot the budget at the moment the synthesis streams: one real
       // autonomous turn (Alice) must have been billed, the synthesis none.
@@ -1814,17 +2137,12 @@ describe("Orchestrator", () => {
       });
 
       const userMessage = createMockMessage(1, "Plan my week");
+      addUserMessageToHistory(userMessage);
       await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn);
-      // Tight cap: one autonomous turn fits before the Moderator concludes.
-      new InteractionOrchestrator(conversationId).enableAutonomous(2);
 
-      // Sequential active experts (3 turns), then autonomous turn #1 (Alice).
-      for (let i = 1; i <= 3; i++) {
-        await waitForTurns(i);
-        await releaseNextTurn();
-      }
-      await waitForMode(conversationId, "autonomous");
-      await waitForTurns(4);
+      // The Moderator selects Alice for the first autonomous turn.
+      await waitForTurns(1);
+      expect(turnNames()).toEqual(["Alice"]);
       await releaseNextTurn();
 
       // Next decision: the Moderator concludes while the budget shows one
@@ -1833,10 +2151,10 @@ describe("Orchestrator", () => {
 
       expect(counterAtSynthesis).toBe(1);
       expect(synthesisMessages()).toHaveLength(1);
-      // 3 sequential + 1 autonomous expert turn + 1 synthesis. A synthesis
-      // billed against the cap would have pushed the loop to the cap first.
-      expect(turnNames()).toEqual(["Alice", "Bob", "Carol", "Alice"]);
-      expect(assistantCount()).toBe(5);
+      // One autonomous expert turn + one synthesis. A synthesis billed
+      // against the cap would have pushed the loop to the cap first.
+      expect(turnNames()).toEqual(["Alice"]);
+      expect(assistantCount()).toBe(2);
       const state = getConversationState(conversationId)!;
       expect(state.mode).toBe("idle");
       expect(state.totalAutonomousTurnsTaken).toBe(0);
@@ -1845,93 +2163,108 @@ describe("Orchestrator", () => {
       expect(getConversationState(conversationId)!.mode).toBe("idle");
     });
 
-    it("ignores 'Conclude' in sequential mode — the round completes fully", async () => {
+    it("honors Moderator Conclude after the selected responder without a forced roll-call", async () => {
       const conversationId = nextConvId();
-      const { waitForTurns, releaseNextTurn, drainToIdle, turnNames, assistantCount, synthesisMessages, events } =
+      const { waitForTurns, releaseNextTurn, drainToIdle, turnNames, assistantCount, addUserMessageToHistory, synthesisMessages, events } =
         setupGatedModeratorConversation(conversationId);
-      // Would conclude if the Moderator were ever consulted — he must not be.
+      // The farmer's mention selects Alice; the Moderator may conclude after
+      // that current expert finishes instead of waiting for a roster roll-call.
       mockGetModeratorNextSpeakerSuggestion.mockResolvedValue("Conclude");
       mockSynthesisTurn(conversationId);
 
-      const userMessage = createMockMessage(1, "Plan my week");
+      const userMessage = createMockMessage(1, "@[Agronomist] Plan my week", "user", undefined, ["Agronomist"]);
+      addUserMessageToHistory(userMessage);
       await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn);
-      // Autonomous off: the sequence ends after the sequential round.
-      new InteractionOrchestrator(conversationId).disableAutonomous();
-
-      for (let i = 1; i <= 3; i++) {
-        await waitForTurns(i);
-        await releaseNextTurn();
-      }
+      await waitForTurns(1);
+      expect(turnNames()).toEqual(["Alice"]);
+      await releaseNextTurn();
       await waitForMode(conversationId, "idle");
 
-      // The Moderator was never asked, no conclusion was signalled, and no
-      // synthesis was streamed or stored.
-      expect(mockGetModeratorNextSpeakerSuggestion).not.toHaveBeenCalled();
-      expect(mockGenerateClosingSynthesis).not.toHaveBeenCalled();
-      expect(events().some((e) => e.type === "concluding")).toBe(false);
-      expect(synthesisMessages()).toHaveLength(0);
-      expect(turnNames()).toEqual(["Alice", "Bob", "Carol"]);
-      expect(assistantCount()).toBe(3);
+      // The Moderator's judgment is active in autonomous flow and no extra
+      // experts are forced to speak before synthesis.
+      expect(mockGetModeratorNextSpeakerSuggestion).toHaveBeenCalledTimes(1);
+      expect(mockGenerateClosingSynthesis).toHaveBeenCalledTimes(1);
+      expect(events().some((e) => e.type === "concluding")).toBe(true);
+      expect(synthesisMessages()).toHaveLength(1);
+      expect(turnNames()).toEqual(["Alice"]);
+      expect(assistantCount()).toBe(2);
       expect(getConversationState(conversationId)!.mode).toBe("idle");
 
       await drainToIdle();
       expect(getConversationState(conversationId)!.mode).toBe("idle");
     });
 
-    it("lets an interrupt landing during the closing synthesis win — the queued message restarts a fresh round", async () => {
+    it("routes a message that arrives during closing synthesis after the synthesis turn finishes", async () => {
       const conversationId = nextConvId();
-      const { waitForTurns, releaseNextTurn, drainToIdle, turnNames, assistantCount, synthesisMessages, waitForEvent } =
+      const { waitForTurns, releaseNextTurn, drainToIdle, turnNames, assistantCount, addUserMessageToHistory, synthesisMessages, waitForEvent } =
         setupGatedModeratorConversation(conversationId);
-      mockGetModeratorNextSpeakerSuggestion.mockResolvedValue("Conclude");
+      mockGetModeratorNextSpeakerSuggestion
+        .mockResolvedValueOnce("Soil Scientist")
+        .mockResolvedValueOnce("Weather Expert")
+        .mockResolvedValue("Conclude");
 
-      // A user message arrives while the synthesis is streaming: the
-      // interrupt must win over the conclude — the synthesis message stays,
-      // and the queued message restarts a full sequential round.
-      let interruptFired = false;
+      let releaseSynthesis: () => void = () => {};
+      const synthesisHeld = new Promise<void>((resolve) => { releaseSynthesis = resolve; });
+      let joinedState: ReturnType<typeof getConversationState> = undefined;
+      let markJoined: () => void = () => {};
+      const messageJoined = new Promise<void>((resolve) => { markJoined = resolve; });
       mockSynthesisTurn(conversationId, async () => {
-        if (interruptFired) return;
-        interruptFired = true;
+        const joinedMessage = createMockMessage(
+          2,
+          "@[Soil Scientist] Wait — one more thing",
+          "user",
+          undefined,
+          ["Soil Scientist"],
+        );
+        addUserMessageToHistory(joinedMessage);
         await processMessageTurnBased(
           userId,
           conversationId,
-          createMockMessage(2, "Wait — one more thing"),
+          joinedMessage,
           broadcastFn,
         );
+        joinedState = getConversationState(conversationId);
+        markJoined();
+        await synthesisHeld;
       });
 
-      const userMessage = createMockMessage(1, "Plan my week");
-      await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn);
+      const initialMessage = createMockMessage(
+        1,
+        "@[Agronomist] Plan my week",
+        "user",
+        undefined,
+        ["Agronomist"],
+      );
+      addUserMessageToHistory(initialMessage);
+      await processMessageTurnBased(userId, conversationId, initialMessage, broadcastFn);
 
+      // Route the original question through three distinct experts, then hold
+      // the Moderator's closing turn while the farmer adds another fact.
       for (let i = 1; i <= 3; i++) {
         await waitForTurns(i);
         await releaseNextTurn();
       }
+      await waitForEvent("concluding");
+      await messageJoined;
 
-      // Synthesis streams, the interrupt lands mid-stream (its steering
-      // broadcast is the synchronization point), the sequence ends and
-      // restarts on the queued message.
-      await waitForEvent("steering");
-      await waitForMode(conversationId, "processing_sequential");
-      let state = getConversationState(conversationId)!;
-      expect(state.wasInterrupted).toBe(false); // consumed by the restart
-      expect(state.lastUserMessage!.content).toBe("Wait — one more thing");
-      expect(synthesisMessages()).toHaveLength(1); // the interrupted synthesis is kept
+      expect(joinedState?.pendingUserMessage?.content).toBe("@[Soil Scientist] Wait — one more thing");
+      expect(joinedState?.wasInterrupted).toBe(false);
+      expect(broadcastFn).not.toHaveBeenCalledWith(conversationId, { type: "steering" });
+      expect(synthesisMessages()).toHaveLength(0); // still held mid-stream
 
-      // The restarted round runs every active expert on the new message.
-      for (let i = 4; i <= 6; i++) {
-        await waitForTurns(i);
-        await releaseNextTurn();
-      }
+      releaseSynthesis();
+      await waitForTurns(4);
+      expect(turnNames()).toEqual(["Alice", "Bob", "Carol", "Bob"]);
+      expect(synthesisMessages()).toHaveLength(1); // the existing close completes once
+      expect(mockGenerateClosingSynthesis.mock.calls.filter((call) => call[0] === conversationId)).toHaveLength(1);
 
-      // Round 2 ends into its autonomous extension, where the Moderator
-      // concludes again (no interrupt this time) — the sequence ends idle.
+      // The mentioned responder completes, then no fresh roll-call starts.
+      new InteractionOrchestrator(conversationId).disableAutonomous();
+      await releaseNextTurn();
       await waitForMode(conversationId, "idle");
-      state = getConversationState(conversationId)!;
-      expect(state.mode).toBe("idle");
-      expect(state.wasInterrupted).toBe(false);
-      expect(synthesisMessages()).toHaveLength(2); // one per concluded round
-      expect(turnNames()).toEqual(["Alice", "Bob", "Carol", "Alice", "Bob", "Carol"]);
-      expect(assistantCount()).toBe(8); // 6 expert turns + 2 syntheses
+      expect(turnNames()).toEqual(["Alice", "Bob", "Carol", "Bob"]);
+      expect(assistantCount()).toBe(5); // 3 original turns + synthesis + 1 response
+      expect(synthesisMessages()).toHaveLength(1);
 
       await drainToIdle();
       expect(getConversationState(conversationId)!.mode).toBe("idle");
@@ -1939,7 +2272,7 @@ describe("Orchestrator", () => {
 
     it("does not double-conclude when pause+resume land mid-synthesis (single synthesis stream)", async () => {
       const conversationId = nextConvId();
-      const { waitForTurns, releaseNextTurn, drainToIdle, turnNames, assistantCount, synthesisMessages, events, waitForEvent } =
+      const { waitForTurns, releaseNextTurn, drainToIdle, turnNames, assistantCount, addUserMessageToHistory, synthesisMessages, events, waitForEvent } =
         setupGatedModeratorConversation(conversationId);
       mockGetModeratorNextSpeakerSuggestion.mockResolvedValue("Conclude");
 
@@ -1952,13 +2285,19 @@ describe("Orchestrator", () => {
         await synthesisHeld;
       });
 
-      const userMessage = createMockMessage(1, "Plan my week");
+      const userMessage = createMockMessage(
+        1,
+        "@[Agronomist] Plan my week",
+        "user",
+        undefined,
+        ["Agronomist"],
+      );
+      addUserMessageToHistory(userMessage);
       await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn);
 
-      for (let i = 1; i <= 3; i++) {
-        await waitForTurns(i);
-        await releaseNextTurn();
-      }
+      await waitForTurns(1);
+      expect(turnNames()).toEqual(["Alice"]);
+      await releaseNextTurn();
 
       // The pause landed mid-synthesis...
       await waitForEvent("concluding");
@@ -1984,10 +2323,10 @@ describe("Orchestrator", () => {
         mockGenerateInsights.mock.calls.filter((c) => c[0] === conversationId),
       ).toHaveLength(1);
 
-      // The sequential round ran normally; no extra expert turn was billed
-      // by the resumed chain.
-      expect(turnNames()).toEqual(["Alice", "Bob", "Carol"]);
-      expect(assistantCount()).toBe(4); // 3 expert turns + 1 synthesis
+      // The selected expert ran once; no extra expert turn was billed by the
+      // resumed chain.
+      expect(turnNames()).toEqual(["Alice"]);
+      expect(assistantCount()).toBe(2); // 1 expert turn + 1 synthesis
 
       const state = getConversationState(conversationId)!;
       expect(state.mode).toBe("idle");
@@ -1998,89 +2337,77 @@ describe("Orchestrator", () => {
       expect(getConversationState(conversationId)!.mode).toBe("idle");
     });
 
-    it("restarts a full unclobbered round when a message arrives during a pause landed mid-synthesis", async () => {
+    it("resumes in place and routes a queued mention after a message arrives during paused synthesis", async () => {
       const conversationId = nextConvId();
-      const { waitForTurns, releaseNextTurn, drainToIdle, turnNames, assistantCount, synthesisMessages, events, waitForEvent } =
+      const { waitForTurns, releaseNextTurn, drainToIdle, turnNames, assistantCount, addUserMessageToHistory, synthesisMessages, events, waitForEvent } =
         setupGatedModeratorConversation(conversationId);
       mockGetModeratorNextSpeakerSuggestion.mockResolvedValue("Conclude");
 
-      // Hold the synthesis mid-stream with the pause landed, then deliver the
-      // user's steering message while the parked state still has the closing
-      // turn in flight.
+      // Hold the synthesis mid-stream with the pause landed, then deliver a
+      // mention while the closing turn remains in flight.
       let releaseSynthesis: () => void = () => {};
       const synthesisHeld = new Promise<void>((resolve) => { releaseSynthesis = resolve; });
-      let restartFired = false;
       mockSynthesisTurn(conversationId, async () => {
         new InteractionOrchestrator(conversationId).pause();
-        if (restartFired) return;
-        restartFired = true;
         await synthesisHeld;
       });
 
-      const userMessage = createMockMessage(1, "Plan my week");
+      const userMessage = createMockMessage(
+        1,
+        "@[Agronomist] Plan my week",
+        "user",
+        undefined,
+        ["Agronomist"],
+      );
+      addUserMessageToHistory(userMessage);
       await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn);
 
-      for (let i = 1; i <= 3; i++) {
-        await waitForTurns(i);
-        await releaseNextTurn();
-      }
+      await waitForTurns(1);
+      expect(turnNames()).toEqual(["Alice"]);
+      await releaseNextTurn();
 
       await waitForEvent("concluding");
       await waitForMode(conversationId, "paused");
+      const joinedMessage = createMockMessage(
+        2,
+        "@[Soil Scientist] Wait — one more thing",
+        "user",
+        undefined,
+        ["Soil Scientist"],
+      );
+      addUserMessageToHistory(joinedMessage);
       await processMessageTurnBased(
         userId,
         conversationId,
-        createMockMessage(2, "Wait — one more thing"),
+        joinedMessage,
         broadcastFn,
       );
 
-      // The in-flight synthesis blocks the immediate restart: the message is
-      // queued as an interrupt instead of racing the zombie conclude chain,
-      // and its context is preserved for the restart.
+      // The paused flow retains the new context without setting the legacy
+      // steering interrupt or starting a second chain over the synthesis.
       let state = getConversationState(conversationId)!;
-      expect(state.mode).toBe("paused");
-      expect(state.wasInterrupted).toBe(true);
-      expect(state.lastUserMessage!.content).toBe("Wait — one more thing");
+      expect(state.pendingUserMessage?.content).toBe("@[Soil Scientist] Wait — one more thing");
+      expect(state.wasInterrupted).toBe(false);
+      expect(broadcastFn).not.toHaveBeenCalledWith(conversationId, { type: "steering" });
 
-      // Autonomous off keeps the endpoint deterministic: the restarted round
-      // ends naturally at idle instead of extending into a second conclusion.
+      // With autonomy disabled, exactly one pending responder is allowed
+      // after the existing close; it must not replay Alice or conclude again.
       new InteractionOrchestrator(conversationId).disableAutonomous();
-
-      // The synthesis finishes; the zombie conclude chain must hand off to
-      // the queued message instead of clobbering it.
       releaseSynthesis();
-
-      // The restarted sequential round runs every active expert on the
-      // steering message — the "sequential round is NEVER cut" invariant.
-      for (let i = 4; i <= 6; i++) {
-        await waitForTurns(i);
-        await releaseNextTurn();
-      }
+      await waitForTurns(2);
+      expect(turnNames()).toEqual(["Alice", "Bob"]);
+      await releaseNextTurn();
       await waitForMode(conversationId, "idle");
 
       state = getConversationState(conversationId)!;
       expect(state.mode).toBe("idle");
       expect(state.wasInterrupted).toBe(false);
-      expect(state.lastUserMessage!.content).toBe("Wait — one more thing");
+      expect(state.lastUserMessage!.content).toBe("@[Soil Scientist] Wait — one more thing");
 
-      // Round 1 (concluded mid-synthesis) + the full restarted round.
-      expect(turnNames()).toEqual([
-        "Alice", "Bob", "Carol",
-        "Alice", "Bob", "Carol",
-      ]);
-      expect(assistantCount()).toBe(7); // 6 expert turns + 1 synthesis
+      expect(turnNames()).toEqual(["Alice", "Bob"]);
+      expect(assistantCount()).toBe(3); // Alice + synthesis + one pending response
       expect(synthesisMessages()).toHaveLength(1); // no second conclusion
-
-      // No autonomous takeover after the restart: past the last paused
-      // badge (disableAutonomous() re-broadcasts with the flag change), the
-      // state machine goes idle → processing_sequential → idle only.
-      const updates = events().filter((e) => e.type === "state_update");
-      const lastPausedIdx = updates.map((u) => u.mode).lastIndexOf("paused");
-      expect(updates.slice(lastPausedIdx + 1).map((u) => u.mode)).toEqual([
-        "idle", // zombie chain's interrupted handoff reset
-        "processing_sequential", // restarted round
-        "idle", // natural end
-      ]);
+      expect(events().filter((e) => e.type === "concluding")).toHaveLength(1);
 
       await drainToIdle();
       expect(getConversationState(conversationId)!.mode).toBe("idle");

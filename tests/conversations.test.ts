@@ -31,8 +31,18 @@ process.env.NODE_ENV = "test";
 process.env.LOGIN_RATELIMIT_MAX = "1000";
 
 // ── Mock orchestrator (to avoid AI API calls when sending messages) ──
-const { mockProcessMessageTurnBased } = vi.hoisted(() => ({
+const {
+  mockProcessMessageTurnBased,
+  mockGetExpertResponseStream,
+  mockGetModeratorNextSpeakerSuggestion,
+  mockGenerateInsights,
+  mockGenerateClosingSynthesis,
+} = vi.hoisted(() => ({
   mockProcessMessageTurnBased: vi.fn(),
+  mockGetExpertResponseStream: vi.fn(),
+  mockGetModeratorNextSpeakerSuggestion: vi.fn(),
+  mockGenerateInsights: vi.fn(),
+  mockGenerateClosingSynthesis: vi.fn(),
 }));
 
 vi.mock("../server/orchestrator", () => ({
@@ -52,7 +62,10 @@ vi.mock("../server/ai", () => ({
   callOpenRouterAPI: vi.fn(),
   callPerplexityAPI: vi.fn(),
   getExpertResponse: vi.fn(),
-  generateInsights: vi.fn(),
+  getExpertResponseStream: mockGetExpertResponseStream,
+  getModeratorNextSpeakerSuggestion: mockGetModeratorNextSpeakerSuggestion,
+  generateClosingSynthesis: mockGenerateClosingSynthesis,
+  generateInsights: mockGenerateInsights,
   resolveAuxModel: (moderatorModel: string | null | undefined, firstExpertModel: string | null | undefined) =>
     moderatorModel?.trim() || process.env.DEFAULT_AUX_MODEL?.trim() || firstExpertModel?.trim() || null,
 }));
@@ -133,6 +146,14 @@ async function addExpert(
   return res.body;
 }
 
+async function waitForCondition(predicate: () => boolean, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate() && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  expect(predicate()).toBe(true);
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // TEST SUITE
 // ═══════════════════════════════════════════════════════════════════
@@ -148,6 +169,10 @@ describe("Conversations & Expert Flows", () => {
     mockProcessMessageTurnBased.mockReset();
     // Default: resolve silently
     mockProcessMessageTurnBased.mockResolvedValue(undefined);
+    mockGetExpertResponseStream.mockReset();
+    mockGetModeratorNextSpeakerSuggestion.mockReset();
+    mockGenerateInsights.mockReset().mockResolvedValue(undefined);
+    mockGenerateClosingSynthesis.mockReset().mockResolvedValue(undefined);
   });
 
   // ─────────────────────────────────────────────────────────────────
@@ -675,6 +700,135 @@ describe("Conversations & Expert Flows", () => {
       // The user message should still be created and returned
       expect(res.status).toBe(201);
       expect(res.body.content).toBe("This will trigger an error");
+    });
+  });
+
+  describe("POST /api/protected/conversations/:id/restart", () => {
+    it("restarts the current conversation on a supplied topic", async () => {
+      const agent = request.agent(app);
+      await login(agent);
+      const convo = await createConversation(agent, "Restartable council");
+
+      const res = await agent
+        .post(`/api/protected/conversations/${convo.id}/restart`)
+        .send({ topic: "A genuinely new topic" });
+
+      expect(res.status).toBe(201);
+      expect(res.body).toMatchObject({
+        conversationId: convo.id,
+        content: "A genuinely new topic",
+        role: "user",
+      });
+      expect(mockProcessMessageTurnBased).toHaveBeenCalledWith(
+        1,
+        convo.id,
+        expect.objectContaining({ content: "A genuinely new topic" }),
+        expect.any(Function),
+        { restart: true },
+      );
+    });
+
+    it("interrupts an active turn and starts over on the supplied topic with a fresh counter", async () => {
+      const actualOrchestrator = await vi.importActual<typeof import("../server/orchestrator")>("../server/orchestrator");
+      const agent = request.agent(app);
+      await login(agent);
+      const convo = await createConversation(agent, "Active restart council");
+      const expert = await addExpert(agent, convo.id, {
+        name: "Dr. Agronomy",
+        role: "Agronomist",
+        model: "test/model",
+      });
+
+      let releaseFirstTurn: ((message: any) => void) | undefined;
+      const turnStarts: Array<{ reference: string; counter: number }> = [];
+      const moderatorDecisions = ["Agronomist", "Agronomist", "Conclude"];
+      mockGetModeratorNextSpeakerSuggestion.mockImplementation(async () => moderatorDecisions.shift() ?? "Conclude");
+      mockGetExpertResponseStream.mockImplementation(async (speaker: any, _history: any, reference: string) => {
+        const state = actualOrchestrator.getConversationState(convo.id);
+        turnStarts.push({ reference, counter: state?.totalAutonomousTurnsTaken ?? -1 });
+        return {
+          conversationId: convo.id,
+          expertId: speaker.id,
+          userId: null,
+          content: `Response to: ${reference}`,
+          role: "assistant",
+          expertName: speaker.name,
+          expertRole: speaker.role,
+        };
+      });
+      mockGetExpertResponseStream.mockImplementationOnce((speaker: any, _history: any, reference: string) => {
+        const state = actualOrchestrator.getConversationState(convo.id);
+        turnStarts.push({ reference, counter: state?.totalAutonomousTurnsTaken ?? -1 });
+        return new Promise((resolve) => {
+          releaseFirstTurn = resolve;
+          // Keep the current expert streaming until the HTTP restart has
+          // marked the active sequence for an explicit restart.
+          void speaker;
+        });
+      });
+      mockProcessMessageTurnBased.mockImplementation((...args: any[]) =>
+        actualOrchestrator.processMessageTurnBased(...args),
+      );
+
+      const firstMessage = await agent
+        .post(`/api/protected/conversations/${convo.id}/messages`)
+        .send({ content: "Original topic" });
+      expect(firstMessage.status).toBe(201);
+      await waitForCondition(() => typeof releaseFirstTurn === "function");
+
+      const activeState = actualOrchestrator.getConversationState(convo.id);
+      expect(activeState).toMatchObject({ mode: "autonomous", totalAutonomousTurnsTaken: 1, turnInFlight: true });
+
+      const restart = await agent
+        .post(`/api/protected/conversations/${convo.id}/restart`)
+        .send({ topic: "A genuinely new topic" });
+      expect(restart.status).toBe(201);
+      expect(actualOrchestrator.getConversationState(convo.id)?.wasInterrupted).toBe(true);
+
+      releaseFirstTurn?.({
+        conversationId: convo.id,
+        expertId: expert.id,
+        userId: null,
+        content: "The old topic's in-flight answer finished.",
+        role: "assistant",
+        expertName: expert.name,
+        expertRole: expert.role,
+      });
+
+      await waitForCondition(() => turnStarts.length >= 2);
+      expect(turnStarts).toEqual([
+        { reference: "Original topic", counter: 1 },
+        { reference: "A genuinely new topic", counter: 1 },
+      ]);
+      expect(mockProcessMessageTurnBased).toHaveBeenCalledWith(
+        1,
+        convo.id,
+        expect.objectContaining({ content: "A genuinely new topic" }),
+        expect.any(Function),
+        { restart: true },
+      );
+
+      // Finish the restarted sequence cleanly instead of leaving an async
+      // chain behind for the following HTTP tests.
+      await waitForCondition(() => {
+        const state = actualOrchestrator.getConversationState(convo.id);
+        return state?.mode === "idle" && !state.turnInFlight && !state.turnChainScheduled;
+      });
+    });
+
+    it("returns 404 when the conversation belongs to another user", async () => {
+      const owner = request.agent(app);
+      await registerAndLogin(owner, "restartOwner", "pass123");
+      const convo = await createConversation(owner, "Private council");
+
+      const otherUser = request.agent(app);
+      await registerAndLogin(otherUser, "restartOther", "pass456");
+      const res = await otherUser
+        .post(`/api/protected/conversations/${convo.id}/restart`)
+        .send({ topic: "Not allowed" });
+
+      expect(res.status).toBe(404);
+      expect(mockProcessMessageTurnBased).not.toHaveBeenCalled();
     });
   });
 

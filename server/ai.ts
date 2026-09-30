@@ -931,57 +931,60 @@ export async function generateInsights(conversationId: number, broadcastFn?: (co
 
 // New function to ask the Moderator who should speak next
 export async function getModeratorNextSpeakerSuggestion(
-  moderatorExpert: ModeratorContext,
-  history: Message[],
-  availableRoles: string[]
+    moderatorExpert: ModeratorContext,
+    history: Message[],
+    availableRoles: string[],
+    farmerJustSpoke = false
 ): Promise<string | null> {
     console.log("Asking Moderator for next speaker suggestion...");
-    // G6: the speak-next / conclude judgment is charter-aware — the Moderator
-    // weighs the charter's goal and stop criteria.
-    const conversation = await storage.getConversation(moderatorExpert.conversationId);
-    const charter = conversation?.charter ?? null;
-    const expertRoles = availableRoles.filter(role => role !== "Moderator");
-    const moderatorSystemPrompt = generateSystemPrompt(moderatorExpert, expertRoles, undefined, undefined, charter);
-    let queryPrompt = `Based on the recent conversation history, which expert should speak next to best advance the discussion towards resolution or new insights? The available expert roles are: [${expertRoles.join(', ')}]. If the discussion has already run its course — the question is resolved and another turn would only repeat the table — answer 'Conclude' instead. Respond only with the role name, 'Conclude', or 'RoundRobin'.`;
-    if (charter?.trim()) {
-      queryPrompt += ` The council charter in your instructions states this roundtable's goal and stop criteria — factor them into the decision.`;
-    }
-
-    const messages: AIMessage[] = [
-        { role: "system", content: moderatorSystemPrompt },
-        ...history.slice(-6).map(msg => ({
-             role: mapDbRoleToApiRole(msg.role),
-             content: truncateForModel(msg.content)
-        })),
-        { role: "user", content: queryPrompt }
-    ];
-
-    // G8: resolve this aux call's model dynamically (Moderator's model →
-    // DEFAULT_AUX_MODEL → first expert's model, via the conversation's
-    // expert roster in order — experts[0] is the first active expert).
-    // Nothing resolvable behaves exactly like a failed call: return null so
-    // the orchestrator falls back to round-robin.
-    const experts = await storage.getConversationExperts(moderatorExpert.conversationId);
-    const firstExpertModel = experts.find(expert => expert.role !== "Moderator")?.model ?? null;
-    const auxModel = resolveAuxModel(moderatorExpert.model, firstExpertModel);
-    if (!auxModel) {
-        console.error("getModeratorNextSpeakerSuggestion: no aux model could be resolved (Moderator has no model, DEFAULT_AUX_MODEL unset, roster empty) — falling back to round-robin.");
-        return null;
-    }
-
     try {
-        const response = await callOpenRouterAPI(messages, auxModel);
-        const suggestedRole = response.message.content.trim().replace(/\.$/, '');
-        
-        if (expertRoles.includes(suggestedRole) || suggestedRole === 'RoundRobin' || suggestedRole === 'Conclude') {
-             console.log(`Moderator suggested next speaker: ${suggestedRole}`);
-            return suggestedRole;
-        } else {
-            console.warn(`Moderator suggested an invalid role: '${suggestedRole}'. Falling back.`);
+        // G6: the speak-next / conclude judgment is charter-aware — the Moderator
+        // weighs the charter's goal and stop criteria.
+        const conversation = await storage.getConversation(moderatorExpert.conversationId);
+        const charter = conversation?.charter ?? null;
+        const expertRoles = availableRoles.filter(role => role !== "Moderator");
+        const moderatorSystemPrompt = generateSystemPrompt(moderatorExpert, expertRoles, undefined, undefined, charter);
+        let queryPrompt = `Based on the recent conversation history, which expert should speak next to best advance the discussion towards resolution or new insights? The available expert roles are: [${expertRoles.join(', ')}]. If the discussion has already run its course — the question is resolved and another turn would only repeat the table — answer 'Conclude' instead. Respond only with the role name, 'Conclude', or 'RoundRobin'.`;
+        if (charter?.trim()) {
+            queryPrompt += ` The council charter in your instructions states this roundtable's goal and stop criteria — factor them into the decision.`;
+        }
+        if (farmerJustSpoke) {
+            queryPrompt += ` The farmer just spoke. Treat the farmer's latest message as new input to the discussion and choose the expert best positioned to respond to it or advance the room.`;
+        }
+
+        const messages: AIMessage[] = [
+            { role: "system", content: moderatorSystemPrompt },
+            ...history.slice(-6).map(msg => ({
+                role: mapDbRoleToApiRole(msg.role),
+                content: truncateForModel(msg.content)
+            })),
+            { role: "user", content: queryPrompt }
+        ];
+
+        // G8: resolve this aux call's model dynamically (Moderator's model →
+        // DEFAULT_AUX_MODEL → first expert's model, via the conversation's
+        // expert roster in order — experts[0] is the first active expert).
+        // Nothing resolvable behaves exactly like a failed call: return null so
+        // the orchestrator falls back to round-robin.
+        const experts = await storage.getConversationExperts(moderatorExpert.conversationId);
+        const firstExpertModel = experts.find(expert => expert.role !== "Moderator")?.model ?? null;
+        const auxModel = resolveAuxModel(moderatorExpert.model, firstExpertModel);
+        if (!auxModel) {
+            console.error("getModeratorNextSpeakerSuggestion: no aux model could be resolved (Moderator has no model, DEFAULT_AUX_MODEL unset, roster empty) — falling back to round-robin.");
             return null;
         }
+
+        const response = await callOpenRouterAPI(messages, auxModel);
+        const suggestedRole = response.message.content.trim().replace(/\.$/, '');
+
+        if (expertRoles.includes(suggestedRole) || suggestedRole === 'RoundRobin' || suggestedRole === 'Conclude') {
+            console.log(`Moderator suggested next speaker: ${suggestedRole}`);
+            return suggestedRole;
+        }
+        console.warn(`Moderator suggested an invalid role: '${suggestedRole}'. Falling back.`);
+        return null;
     } catch (error) {
-        console.error("Error querying Moderator for next speaker:", error);
+        console.error("Error preparing or querying Moderator for next speaker:", error);
         return null;
     }
 }

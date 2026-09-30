@@ -2,9 +2,9 @@
  * G9 — Legibility tests (next-speaker preview + carried-forward context)
  *
  * Covers:
- *  - Event ordering: every expert turn broadcasts {type:"next_speaker"} with
- *    the upcoming expert's identity IMMEDIATELY BEFORE its
- *    expert_stream_start (both sequential and autonomous turns).
+ *  - Event ordering: each direct-autonomous turn broadcasts
+ *    {type:"next_speaker"} with the upcoming expert's identity IMMEDIATELY
+ *    BEFORE its expert_stream_start.
  *  - buildPriorDecisionsBlock (pure): null when nothing usable, latest
  *    insight wins (id, then createdAt), points joined as bullets under the
  *    PRIOR DECISIONS header, oversized blocks truncated.
@@ -144,7 +144,7 @@ describe("G9 next_speaker preview", () => {
     await waitFor(500);
   });
 
-  it("previews each turn's speaker immediately before its expert_stream_start, in both sequential and autonomous modes", async () => {
+  it("previews the routed first responder immediately before streaming when autonomy is disabled", async () => {
     const conversationId = nextConvId();
     const roster = [
       createMockExpert(1, "Alice", "Agronomist", conversationId),
@@ -180,8 +180,9 @@ describe("G9 next_speaker preview", () => {
 
     const userMessage = createMockMessage(1, "Plan my week");
     await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn);
-    // One autonomous turn after the sequential round → 4 previewed turns.
-    new InteractionOrchestrator(conversationId).enableAutonomous(1);
+    // A fresh idle message starts directly in autonomous mode. Disabling
+    // autonomy still permits its first routed responder, then returns idle.
+    new InteractionOrchestrator(conversationId).disableAutonomous();
 
     const deadline = Date.now() + 8000;
     while (Date.now() < deadline) {
@@ -197,9 +198,10 @@ describe("G9 next_speaker preview", () => {
     const previews = events.filter((e) => e.type === "next_speaker");
     const starts = events.filter((e) => e.type === "expert_stream_start");
 
-    // Every turn was previewed: 3 sequential + 1 autonomous.
-    expect(previews).toHaveLength(4);
-    expect(starts).toHaveLength(4);
+    // The first routed responder is previewed once; there is no sequential
+    // roll-call and disabled autonomy stops after that response.
+    expect(previews).toHaveLength(1);
+    expect(starts).toHaveLength(1);
 
     // Acceptance: each next_speaker is IMMEDIATELY followed by the matching
     // expert_stream_start (same expertId).
@@ -211,14 +213,85 @@ describe("G9 next_speaker preview", () => {
       }
     });
 
-    // Roster order: Alice, Bob, Carol (sequential round), then Alice (the
-    // single autonomous round-robin turn).
-    expect(previews.map((e) => e.expertRole)).toEqual([
-      "Agronomist",
-      "Soil Scientist",
-      "Weather Expert",
-      "Agronomist",
-    ]);
+    expect(previews.map((e) => e.expertRole)).toEqual(["Agronomist"]);
+    const modes = events.filter((event) => event.type === "state_update").map((event) => event.mode);
+    expect(modes).not.toContain("processing_sequential");
+    expect(modes).toContain("autonomous");
+    expect(modes[modes.length - 1]).toBe("idle");
+    expect(getConversationState(conversationId)!.mode).toBe("idle");
+  });
+
+  it("previews every direct autonomous speaker immediately before streaming for four turns", async () => {
+    const conversationId = nextConvId();
+    const roster = [
+      createMockExpert(1, "Alice", "Agronomist", conversationId),
+      createMockExpert(2, "Bob", "Soil Scientist", conversationId),
+      createMockExpert(3, "Carol", "Weather Expert", conversationId),
+    ];
+    mockGetConversationExperts.mockResolvedValue(roster);
+    mockGetConversationFiles.mockResolvedValue([]);
+    mockGetConversationInsights.mockResolvedValue([]);
+    mockGetModeratorNextSpeakerSuggestion.mockResolvedValue("RoundRobin");
+
+    const messages: Message[] = [];
+    let messageId = 160_000 + conversationId * 100;
+    mockGetConversationMessages.mockImplementation((cid: number) =>
+      Promise.resolve(messages.filter((message) => message.conversationId === cid)),
+    );
+    mockCreateMessage.mockImplementation((msg: Partial<Message>) => {
+      const stored = { ...msg, id: messageId++, timestamp: new Date() } as Message;
+      messages.push(stored);
+      return Promise.resolve(stored);
+    });
+
+    let contentCounter = 0;
+    mockGetExpertResponseStream.mockImplementation(async (expert: Expert) => ({
+      conversationId: expert.conversationId,
+      expertId: expert.id,
+      userId: null,
+      content: `Distinct answer ${++contentCounter} from ${expert.name}`,
+      role: "assistant",
+      expertName: expert.name,
+      expertRole: expert.role,
+      artifacts: [],
+    }));
+
+    const userMessage = createMockMessage(1, "Plan my week");
+    messages.push({ ...userMessage, conversationId });
+    await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn);
+    new InteractionOrchestrator(conversationId).enableAutonomous(4);
+
+    const deadline = Date.now() + 8000;
+    while (Date.now() < deadline) {
+      const state = getConversationState(conversationId);
+      if (state && state.mode === "idle") break;
+      await waitFor(10);
+    }
+    await waitFor(150);
+
+    const events = broadcastFn.mock.calls
+      .filter((call) => call[0] === conversationId)
+      .map((call) => call[1]);
+    const previews = events.filter((event) => event.type === "next_speaker");
+    const starts = events.filter((event) => event.type === "expert_stream_start");
+    const expectedRoles = ["Agronomist", "Soil Scientist", "Weather Expert", "Agronomist"];
+
+    expect(previews).toHaveLength(4);
+    expect(starts).toHaveLength(4);
+    expect(previews.map((event) => event.expertRole)).toEqual(expectedRoles);
+    expect(starts.map((event) => event.expertRole)).toEqual(expectedRoles);
+
+    // Each preview is the immediately preceding event for its matching start.
+    const previewEvents = events
+      .map((event, index) => ({ event, index }))
+      .filter(({ event }) => event.type === "next_speaker");
+    expect(previewEvents).toHaveLength(starts.length);
+    for (const { event, index } of previewEvents) {
+      expect(event.conversationId).toBe(conversationId);
+      expect(events[index + 1]?.type).toBe("expert_stream_start");
+      expect(events[index + 1]?.expertId).toBe(event.expertId);
+      expect(events[index + 1]?.expertRole).toBe(event.expertRole);
+    }
     expect(getConversationState(conversationId)!.mode).toBe("idle");
   });
 });
