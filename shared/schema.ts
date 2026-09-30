@@ -24,6 +24,8 @@ export interface OrchestratorSnapshot {
   totalAutonomousTurnsTaken: number;
   wasInterrupted: boolean;
   pausedFromMode: string | null;
+  isAutonomousEnabled?: boolean;
+  maxAutonomousTurns?: number;
 }
 
 export const openQuestionStatus = pgEnum("open_question_status", ["open", "answered"]);
@@ -39,6 +41,9 @@ export const conversations = pgTable("conversations", {
   charter: text("charter"),
   // G7: last known orchestrator state, written at turn boundaries only.
   orchestratorState: jsonb("orchestrator_state").$type<OrchestratorSnapshot>(),
+  // G13: optional maximum number of turns for the next autonomous run.
+  // Nullable disables the cap; new conversations default to 25 turns.
+  turnBudget: integer("turn_budget").default(25),
   createdAt: timestamp("created_at").defaultNow(),
 });
 

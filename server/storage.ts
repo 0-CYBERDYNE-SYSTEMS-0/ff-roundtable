@@ -9,6 +9,10 @@ import ConnectPgSimple from "connect-pg-simple";
 
 const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || "";
 
+function normalizeTurnBudget(turnBudget: number | null | undefined): number | null | undefined {
+  return turnBudget === 0 ? null : turnBudget;
+}
+
 const MemoryStore = createMemoryStore(session);
 const PgSessionStore = ConnectPgSimple(session);
 
@@ -32,11 +36,11 @@ export interface IStorage {
   createConversation(conversation: InsertConversation): Promise<Conversation>;
   getConversation(id: number): Promise<Conversation | undefined>;
   getUserConversations(userId: number): Promise<Conversation[]>;
-  // Partial update (G6): only provided keys change. `charter: null` clears
-  // the charter; an omitted charter key leaves it untouched.
+  // Partial update (G6/G13): only provided keys change. Null clears the
+  // charter or turn budget; omitted keys stay untouched.
   // G7: `orchestratorState` joins the allowlist so the orchestrator can
   // persist its survivable snapshot at turn boundaries.
-  updateConversation(id: number, updates: Partial<Pick<Conversation, "title" | "charter" | "orchestratorState">>): Promise<Conversation | undefined>;
+  updateConversation(id: number, updates: Partial<Pick<Conversation, "title" | "charter" | "orchestratorState" | "turnBudget">>): Promise<Conversation | undefined>;
   
   // Expert operations
   createExpert(expert: InsertExpert): Promise<Expert>;
@@ -251,6 +255,9 @@ export class MemStorage implements IStorage {
       title: insertConversation.title ?? "New Conversation",
       charter: insertConversation.charter ?? null,
       orchestratorState: null,
+      turnBudget: insertConversation.turnBudget === undefined
+        ? 25
+        : normalizeTurnBudget(insertConversation.turnBudget) ?? null,
       createdAt: now,
     };
     this.conversations.set(id, conversation);
@@ -267,17 +274,18 @@ export class MemStorage implements IStorage {
       .sort((a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0));
   }
 
-  async updateConversation(id: number, updates: Partial<Pick<Conversation, "title" | "charter" | "orchestratorState">>): Promise<Conversation | undefined> {
+  async updateConversation(id: number, updates: Partial<Pick<Conversation, "title" | "charter" | "orchestratorState" | "turnBudget">>): Promise<Conversation | undefined> {
     const conversation = this.conversations.get(id);
     if (!conversation) return undefined;
 
-    // Explicit undefined-checks (not a plain spread) so an omitted key keeps
-    // its current value while `charter: null` clears it.
+    // Explicit undefined-checks (not a plain spread) so omitted keys keep
+    // their current values while explicit null clears a nullable value.
     const updated: Conversation = {
       ...conversation,
       ...(updates.title !== undefined && { title: updates.title }),
       ...(updates.charter !== undefined && { charter: updates.charter }),
       ...(updates.orchestratorState !== undefined && { orchestratorState: updates.orchestratorState }),
+      ...(updates.turnBudget !== undefined && { turnBudget: normalizeTurnBudget(updates.turnBudget) }),
     };
 
     this.conversations.set(id, updated);
@@ -647,7 +655,13 @@ export class PostgresStorage implements IStorage {
     // always starts stateless, whatever the (loosely jsonb-typed) insert
     // payload carries.
     const { orchestratorState: _ignoredSnapshot, ...values } = insertConversation;
-    const result = await this.db.insert(conversations).values(values).returning();
+    const normalizedValues = {
+      ...values,
+      turnBudget: values.turnBudget === undefined
+        ? 25
+        : normalizeTurnBudget(values.turnBudget) ?? null,
+    };
+    const result = await this.db.insert(conversations).values(normalizedValues).returning();
     return result[0];
   }
 
@@ -664,14 +678,14 @@ export class PostgresStorage implements IStorage {
       .orderBy(desc(conversations.createdAt));
   }
 
-  async updateConversation(id: number, updates: Partial<Pick<Conversation, "title" | "charter" | "orchestratorState">>): Promise<Conversation | undefined> {
-    // Only allow updating title, charter and the G7 orchestrator snapshot.
-    // Explicit undefined-checks (not a plain spread) so an omitted key stays
-    // untouched while `charter: null` clears the column.
-    const allowed: Partial<Pick<Conversation, "title" | "charter" | "orchestratorState">> = {
+  async updateConversation(id: number, updates: Partial<Pick<Conversation, "title" | "charter" | "orchestratorState" | "turnBudget">>): Promise<Conversation | undefined> {
+    // Only allow updating title, charter, the G7 orchestrator snapshot, and
+    // the G13 turn budget. Omitted keys stay untouched; explicit null clears.
+    const allowed: Partial<Pick<Conversation, "title" | "charter" | "orchestratorState" | "turnBudget">> = {
       ...(updates.title !== undefined && { title: updates.title }),
       ...(updates.charter !== undefined && { charter: updates.charter }),
       ...(updates.orchestratorState !== undefined && { orchestratorState: updates.orchestratorState }),
+      ...(updates.turnBudget !== undefined && { turnBudget: normalizeTurnBudget(updates.turnBudget) }),
     };
 
     const result = await this.db

@@ -116,6 +116,10 @@ function buildSnapshot(state: ConversationState): OrchestratorSnapshot {
         totalAutonomousTurnsTaken: state.totalAutonomousTurnsTaken,
         wasInterrupted: state.wasInterrupted,
         pausedFromMode: state.pausedFromMode,
+        // Optional in the JSONB type for backwards compatibility with G7/G11
+        // rows written before G13.
+        isAutonomousEnabled: state.isAutonomousEnabled,
+        maxAutonomousTurns: state.maxAutonomousTurns,
     };
 }
 
@@ -124,7 +128,29 @@ function snapshotsDiffer(a: OrchestratorSnapshot, b: OrchestratorSnapshot): bool
         a.currentExpertIndex !== b.currentExpertIndex ||
         a.totalAutonomousTurnsTaken !== b.totalAutonomousTurnsTaken ||
         a.wasInterrupted !== b.wasInterrupted ||
-        a.pausedFromMode !== b.pausedFromMode;
+        a.pausedFromMode !== b.pausedFromMode ||
+        a.isAutonomousEnabled !== b.isAutonomousEnabled ||
+        a.maxAutonomousTurns !== b.maxAutonomousTurns;
+}
+
+/** Convert the persisted user choice into a runtime limit with a hard ceiling. */
+function effectiveTurnBudget(configuredBudget: number | null | undefined): number {
+    // Undefined is a legacy/missing field and gets the established default.
+    if (configuredBudget === undefined) return DEFAULT_TURN_BUDGET;
+    // Null and 0 both mean “let it run”; the safety ceiling still applies.
+    if (configuredBudget === null || configuredBudget === 0) return MAX_TURN_BUDGET;
+    if (!Number.isInteger(configuredBudget) || configuredBudget < 1) return DEFAULT_TURN_BUDGET;
+    return Math.min(configuredBudget, MAX_TURN_BUDGET);
+}
+
+function snapshotBooleanOrDefault(value: unknown, fallback: boolean): boolean {
+    return typeof value === "boolean" ? value : fallback;
+}
+
+function snapshotBudgetOrFallback(snapshotValue: unknown, configuredBudget: number | null | undefined): number {
+    return typeof snapshotValue === "number" && Number.isInteger(snapshotValue) && snapshotValue >= 1
+        ? Math.min(snapshotValue, MAX_TURN_BUDGET)
+        : effectiveTurnBudget(configuredBudget);
 }
 
 // One serialized write chain per conversation: updateConversationState must
@@ -172,6 +198,9 @@ export function isUsableConversationState(state: ConversationState | undefined):
         typeof state.moderatorExpert.name === "string" &&
         (state.moderatorExpert.model === null || typeof state.moderatorExpert.model === "string") &&
         typeof state.moderatorExpert.systemPrompt === "string" &&
+        typeof state.isAutonomousEnabled === "boolean" &&
+        Number.isInteger(state.maxAutonomousTurns) &&
+        state.maxAutonomousTurns >= 1 && state.maxAutonomousTurns <= MAX_TURN_BUDGET &&
         (state.pendingUserMessage === null || (typeof state.pendingUserMessage === "object" && state.pendingUserMessage.role === "user")) &&
         Array.isArray(state.pendingMentionRoutes) &&
         state.pendingMentionRoutes.every(route =>
@@ -316,7 +345,9 @@ function updateConversationState(
     debugLog(`State updated for ${conversationId}: mode=${newState.mode}, expertIndex=${newState.currentExpertIndex}, autoTurns=${newState.totalAutonomousTurnsTaken}/${newState.maxAutonomousTurns}, interrupted=${newState.wasInterrupted}`);
 
     // Broadcast relevant state changes
-    if (newState.mode !== previousState.mode || newState.isAutonomousEnabled !== previousState.isAutonomousEnabled) {
+    if (newState.mode !== previousState.mode ||
+        newState.isAutonomousEnabled !== previousState.isAutonomousEnabled ||
+        newState.maxAutonomousTurns !== previousState.maxAutonomousTurns) {
         existingState.broadcastFn(conversationId, { 
             type: "state_update", 
             mode: newState.mode, 
@@ -330,7 +361,7 @@ function updateConversationState(
 }
 
 // Initialize state when orchestrator is first needed for a conversation
-function initializeConversationState(conversationId: number, activeExperts: Expert[], moderatorExpert: ModeratorContext, userMessage: Message, broadcastFn: (convId: number, data: any) => void): ConversationState {
+function initializeConversationState(conversationId: number, activeExperts: Expert[], moderatorExpert: ModeratorContext, userMessage: Message, broadcastFn: (convId: number, data: any) => void, maxAutonomousTurns = DEFAULT_TURN_BUDGET): ConversationState {
     const initialState: ConversationState = {
         conversationId,
         activeExperts,
@@ -341,7 +372,7 @@ function initializeConversationState(conversationId: number, activeExperts: Expe
         broadcastFn: broadcastFn,
         // Initialize autonomous settings
         isAutonomousEnabled: true, // Autonomous is ON by default
-        maxAutonomousTurns: DEFAULT_TURN_BUDGET,
+        maxAutonomousTurns: effectiveTurnBudget(maxAutonomousTurns),
         totalAutonomousTurnsTaken: 0,
         wasInterrupted: false, // Initialize interrupted flag
         pendingUserMessage: null,
@@ -360,7 +391,7 @@ function initializeConversationState(conversationId: number, activeExperts: Expe
         moderatorNoticeSent: false
     };
     conversationStates.set(conversationId, initialState);
-    debugLog(`Initialized state for ${conversationId}, Auto ON (max ${DEFAULT_TURN_BUDGET} turns)`);
+    debugLog(`Initialized state for ${conversationId}, Auto ON (max ${initialState.maxAutonomousTurns} turns)`);
     // G7: the fresh idle state is this server's recovery truth for the
     // conversation — persist it immediately so a snapshot left by a previous
     // process (paused, or a dead processing loop) is corrected the moment we
@@ -391,9 +422,11 @@ export async function restorePausedFromSnapshot(
     if (typeof storage.getConversation !== "function" || typeof storage.getConversationExperts !== "function") return false;
 
     let storedSnapshot: OrchestratorSnapshot | null = null;
+    let configuredBudget: number | null | undefined;
     try {
         const conversationRow = await storage.getConversation(conversationId);
         storedSnapshot = conversationRow?.orchestratorState ?? null;
+        configuredBudget = conversationRow?.turnBudget;
     } catch (error) {
         console.error(`Orchestrator: Could not read stored orchestrator snapshot for conversation ${conversationId}:`, error);
         return false;
@@ -426,8 +459,8 @@ export async function restorePausedFromSnapshot(
         lastUserMessage: null,
         mode: "idle",
         broadcastFn,
-        isAutonomousEnabled: true,
-        maxAutonomousTurns: DEFAULT_TURN_BUDGET,
+        isAutonomousEnabled: snapshotBooleanOrDefault(storedSnapshot.isAutonomousEnabled, true),
+        maxAutonomousTurns: snapshotBudgetOrFallback(storedSnapshot.maxAutonomousTurns, configuredBudget),
         totalAutonomousTurnsTaken: Number.isInteger(storedSnapshot.totalAutonomousTurnsTaken)
             ? storedSnapshot.totalAutonomousTurnsTaken
             : 0,
@@ -802,7 +835,14 @@ export class InteractionOrchestrator {
                     (latestState.lastUserMessage !== routingMessage && latestState.farmerJustSpoke)) continue;
 
                 suggestedRole = await getModeratorNextSpeakerSuggestion(
-                    moderator, history.slice(-6), latestState.activeExperts.map(expert => expert.role), farmerJustSpoke
+                    moderator,
+                    history.slice(-6),
+                    latestState.activeExperts.map(expert => expert.role),
+                    farmerJustSpoke,
+                    {
+                        turnNumber: Math.min(latestState.totalAutonomousTurnsTaken + 1, latestState.maxAutonomousTurns),
+                        turnBudget: latestState.maxAutonomousTurns,
+                    },
                 );
                 latestState = getConversationState(this.conversationId)!;
                 if (latestState.wasInterrupted) continue;
@@ -1332,13 +1372,25 @@ export class InteractionOrchestrator {
     }
 
     // --- Autonomous Control Methods ---
-    enableAutonomous(maxTurns?: number): void {
+    setTurnBudget(turnBudget: number | null): void {
+        const state = getConversationState(this.conversationId);
+        if (!state) return;
+        updateConversationState(this.conversationId, {
+            maxAutonomousTurns: effectiveTurnBudget(turnBudget),
+        });
+    }
+
+    enableAutonomous(maxTurns?: number | null): void {
         const state = getConversationState(this.conversationId);
         if (!state) return;
 
-        const newMaxTurns = typeof maxTurns === "number" && Number.isFinite(maxTurns) && maxTurns >= 0
-            ? (maxTurns === 0 ? MAX_TURN_BUDGET : Math.max(1, Math.min(MAX_TURN_BUDGET, Math.floor(maxTurns))))
-            : DEFAULT_TURN_BUDGET;
+        const newMaxTurns = maxTurns === undefined
+            ? state.maxAutonomousTurns
+            : maxTurns === null || maxTurns === 0
+                ? MAX_TURN_BUDGET
+                : typeof maxTurns === "number" && Number.isFinite(maxTurns) && maxTurns >= 1
+                    ? Math.min(MAX_TURN_BUDGET, Math.floor(maxTurns))
+                    : DEFAULT_TURN_BUDGET;
 
         debugLog(`Orchestrator enabling autonomous mode for ${this.conversationId} (max ${newMaxTurns} turns)`);
         updateConversationState(this.conversationId, { 
@@ -1410,20 +1462,48 @@ export async function processMessageTurnBased(
             // previous behavior exactly. A stale-but-present in-memory state
             // keeps its existing recovery semantics regardless of the row.
             let storedSnapshot: OrchestratorSnapshot | null = null;
-            if (!state && typeof storage.getConversation === "function") {
+            let configuredBudget: number | null | undefined;
+            if (typeof storage.getConversation === "function") {
                 try {
                     const conversationRow = await storage.getConversation(conversationId);
-                    storedSnapshot = conversationRow?.orchestratorState ?? null;
+                    configuredBudget = conversationRow?.turnBudget;
+                    if (!state) storedSnapshot = conversationRow?.orchestratorState ?? null;
                 } catch (error) {
-                    console.error(`Orchestrator: Could not read stored orchestrator snapshot for conversation ${conversationId}:`, error);
+                    // A settings read failure must not lose the already-stored
+                    // farmer message. Continue safely with the default budget.
+                    console.error(`Orchestrator: Could not read conversation settings/snapshot for ${conversationId}; using safe budget defaults:`, error);
                 }
+            }
+            if (!state) {
                 if (storedSnapshot && (storedSnapshot.mode === "processing_sequential" || storedSnapshot.mode === "autonomous")) {
                     console.warn(`Orchestrator: conversation ${conversationId} snapshot says "${storedSnapshot.mode}" from before a restart — the turn chain died with the old process. Recovering to idle.`);
                 }
             }
             // Initialize if first message for this server instance, or recover
             // from a state left behind by a crashed loop.
-            state = initializeConversationState(conversationId, activeExperts, moderatorExpert, userMessage, broadcastFn);
+            state = initializeConversationState(
+                conversationId,
+                activeExperts,
+                moderatorExpert,
+                userMessage,
+                broadcastFn,
+                effectiveTurnBudget(configuredBudget),
+            );
+            if (storedSnapshot) {
+                // Restore the configured autonomy and cap even when a dead
+                // processing chain is mapped to idle. This preserves settings
+                // across a cold start without reviving the dead chain.
+                state = updateConversationState(conversationId, {
+                    isAutonomousEnabled: snapshotBooleanOrDefault(
+                        storedSnapshot.isAutonomousEnabled,
+                        state.isAutonomousEnabled,
+                    ),
+                    maxAutonomousTurns: snapshotBudgetOrFallback(
+                        storedSnapshot.maxAutonomousTurns,
+                        configuredBudget,
+                    ),
+                });
+            }
             if (storedSnapshot?.mode === "paused") {
                 updateConversationState(conversationId, {
                     mode: "paused",
@@ -1433,7 +1513,7 @@ export async function processMessageTurnBased(
                         : -1,
                     totalAutonomousTurnsTaken: Number.isInteger(storedSnapshot.totalAutonomousTurnsTaken)
                         ? storedSnapshot.totalAutonomousTurnsTaken
-                        : 0
+                        : 0,
                 });
                 state = getConversationState(conversationId)!;
             }

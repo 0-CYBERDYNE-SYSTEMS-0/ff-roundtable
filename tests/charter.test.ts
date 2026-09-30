@@ -8,11 +8,11 @@
  *    prompt (via the provider seam, inspecting the messages array)
  *  - generateClosingSynthesis: charter flows into the Moderator system prompt
  *    and the closing prompt honors goal/stop criteria
- *  - PUT /api/protected/conversations/:id: title-only update, charter set,
- *    charter cleared with null, over-cap charter (400), unknown fields (400),
- *    empty body (400), non-owner (404), unauthenticated (401)
+ *  - PUT /api/protected/conversations/:id: title/charter/turn-budget updates,
+ *    validation, unknown fields (400), empty body (400), non-owner (404),
+ *    unauthenticated (401)
  *  - MemStorage.updateConversation: merge, clear-with-null, omitted-key
- *    preservation, undefined for a missing id
+ *    preservation, turn-budget default/normalization, undefined for a missing id
  *
  * Uses vitest + supertest. Forces MemStorage (DATABASE_URL="" via
  * vitest.config.ts). The orchestrator is mocked so no AI work runs behind the
@@ -32,8 +32,9 @@ process.env.NODE_ENV = "test";
 process.env.LOGIN_RATELIMIT_MAX = "1000";
 
 // ── Mock orchestrator (routes import it; never let it reach the AI layer) ──
-const { mockProcessMessageTurnBased } = vi.hoisted(() => ({
+const { mockProcessMessageTurnBased, mockSetTurnBudget } = vi.hoisted(() => ({
   mockProcessMessageTurnBased: vi.fn(),
+  mockSetTurnBudget: vi.fn(),
 }));
 
 vi.mock("../server/orchestrator", () => ({
@@ -43,6 +44,7 @@ vi.mock("../server/orchestrator", () => ({
     resume() {}
     enableAutonomous(_maxTurns?: number) {}
     disableAutonomous() {}
+    setTurnBudget(turnBudget: number | null) { mockSetTurnBudget(turnBudget); }
   },
   getConversationState: vi.fn().mockReturnValue(null),
 }));
@@ -61,14 +63,14 @@ vi.mock("../server/ai-providers", () => ({
 }));
 
 import { registerRoutes } from "../server/routes";
-import { storage, MemStorage } from "../server/storage";
+import { storage, MemStorage, PostgresStorage } from "../server/storage";
 import {
   generateSystemPrompt,
   getModeratorNextSpeakerSuggestion,
   generateClosingSynthesis,
 } from "../server/ai";
 import type { ModeratorContext } from "../server/ai";
-import type { Expert } from "../shared/schema";
+import { conversations, type Expert } from "../shared/schema";
 
 const CHARTER = "Goal: pick a cover crop for the north field. Stop when a seed and a planting week are chosen.";
 
@@ -196,6 +198,62 @@ describe("getModeratorNextSpeakerSuggestion charter awareness", () => {
     expect(userQuery.content).toContain("council charter");
     expect(userQuery.content).toContain("stop criteria");
   });
+
+  it("gives the Moderator the next turn position and explicit routing choices", async () => {
+    const convo = await storage.createConversation({ userId: 1, title: "Budget-aware routing" });
+    const moderator = createMockModerator(null, convo.id);
+
+    const suggestion = await getModeratorNextSpeakerSuggestion(
+      moderator,
+      [],
+      ["Soil Scientist", "Crop Specialist"],
+      false,
+      { turnNumber: 3, turnBudget: 8 },
+    );
+
+    expect(suggestion).toBe("Soil Scientist");
+    const messages = mockProviderChat.mock.calls[0][0];
+    const userQuery = messages.filter((m: any) => m.role === "user").pop();
+    expect(userQuery.content).toContain("This is turn 3 of 8.");
+    expect(userQuery.content).toContain("'Continue'");
+    expect(userQuery.content).toContain("'Go deeper: <available role>'");
+    expect(userQuery.content).toContain("'Conclude'");
+  });
+
+  it.each([
+    ["Continue", "RoundRobin"],
+    ["Go deeper: Soil Scientist", "Soil Scientist"],
+    ["Conclude", "Conclude"],
+    ["Soil Scientist", "Soil Scientist"],
+    ["RoundRobin", "RoundRobin"],
+  ])("normalizes the Moderator choice %s to %s", async (response, expected) => {
+    const convo = await storage.createConversation({ userId: 1, title: `Choice ${response}` });
+    mockProviderChat.mockResolvedValueOnce({ message: { role: "assistant", content: response } });
+
+    const suggestion = await getModeratorNextSpeakerSuggestion(
+      createMockModerator(null, convo.id),
+      [],
+      ["Soil Scientist", "Crop Specialist"],
+    );
+
+    expect(suggestion).toBe(expected);
+  });
+
+  it.each(["Go deeper: Unknown Role", "Go deeper:", "Unknown Role"]) (
+    "falls back for an invalid Moderator role choice: %s",
+    async (response) => {
+      const convo = await storage.createConversation({ userId: 1, title: `Invalid choice ${response}` });
+      mockProviderChat.mockResolvedValueOnce({ message: { role: "assistant", content: response } });
+
+      const suggestion = await getModeratorNextSpeakerSuggestion(
+        createMockModerator(null, convo.id),
+        [],
+        ["Soil Scientist", "Crop Specialist"],
+      );
+
+      expect(suggestion).toBeNull();
+    },
+  );
 
   it("stays charter-free when the conversation has no charter", async () => {
     const convo = await storage.createConversation({ userId: 1, title: "Unchartered" });
@@ -337,6 +395,8 @@ describe("PUT /api/protected/conversations/:id (charter + title)", () => {
     await registerRoutes(app);
   });
 
+  beforeEach(() => mockSetTurnBudget.mockReset());
+
   async function registerAndLogin(
     agent: request.SuperAgentTest,
     username: string,
@@ -375,6 +435,85 @@ describe("PUT /api/protected/conversations/:id (charter + title)", () => {
     expect(res.status).toBe(200);
     expect(res.body.title).toBe("After");
     expect(res.body.charter ?? null).toBeNull();
+    expect(res.body.turnBudget).toBe(25);
+  });
+
+  it("accepts turn budgets, normalizes zero to null, and preserves omitted values", async () => {
+    const agent = request.agent(app);
+    await registerAndLogin(agent, "charterTurnBudgetUser");
+    const convo = await createConversation(agent);
+
+    const set = await agent
+      .put(`/api/protected/conversations/${convo.id}`)
+      .send({ turnBudget: 40 });
+    expect(set.status).toBe(200);
+    expect(set.body.turnBudget).toBe(40);
+    expect(mockSetTurnBudget).toHaveBeenCalledWith(40);
+
+    const omitted = await agent
+      .put(`/api/protected/conversations/${convo.id}`)
+      .send({ title: "Budget preserved" });
+    expect(omitted.status).toBe(200);
+    expect(omitted.body.turnBudget).toBe(40);
+    expect(mockSetTurnBudget).toHaveBeenCalledTimes(1);
+
+    const zero = await agent
+      .put(`/api/protected/conversations/${convo.id}`)
+      .send({ turnBudget: 0 });
+    expect(zero.status).toBe(200);
+    expect(zero.body.turnBudget).toBeNull();
+    expect(mockSetTurnBudget).toHaveBeenLastCalledWith(null);
+
+    const explicitNull = await agent
+      .put(`/api/protected/conversations/${convo.id}`)
+      .send({ turnBudget: null });
+    expect(explicitNull.status).toBe(200);
+    expect(explicitNull.body.turnBudget).toBeNull();
+    expect(mockSetTurnBudget).toHaveBeenCalledTimes(3);
+
+    const lowerBound = await agent
+      .put(`/api/protected/conversations/${convo.id}`)
+      .send({ turnBudget: 1 });
+    const upperBound = await agent
+      .put(`/api/protected/conversations/${convo.id}`)
+      .send({ turnBudget: 100 });
+    expect(lowerBound.body.turnBudget).toBe(1);
+    expect(upperBound.body.turnBudget).toBe(100);
+    expect(mockSetTurnBudget).toHaveBeenLastCalledWith(100);
+  });
+
+  it("rejects invalid turn budgets without changing the stored value", async () => {
+    const agent = request.agent(app);
+    await registerAndLogin(agent, "charterInvalidTurnBudgetUser");
+    const convo = await createConversation(agent);
+
+    for (const turnBudget of [-1, 1.5, "25", "not-a-number", 101]) {
+      const res = await agent
+        .put(`/api/protected/conversations/${convo.id}`)
+        .send({ turnBudget });
+      expect(res.status).toBe(400);
+    }
+
+    const get = await agent.get(`/api/protected/conversations/${convo.id}`);
+    expect(get.body.turnBudget).toBe(25);
+  });
+
+  it("accepts both numeric turn-budget boundaries", async () => {
+    const agent = request.agent(app);
+    await registerAndLogin(agent, "charterTurnBudgetBoundsUser");
+    const convo = await createConversation(agent);
+
+    const minimum = await agent
+      .put(`/api/protected/conversations/${convo.id}`)
+      .send({ turnBudget: 1 });
+    expect(minimum.status).toBe(200);
+    expect(minimum.body.turnBudget).toBe(1);
+
+    const maximum = await agent
+      .put(`/api/protected/conversations/${convo.id}`)
+      .send({ turnBudget: 100 });
+    expect(maximum.status).toBe(200);
+    expect(maximum.body.turnBudget).toBe(100);
   });
 
   it("sets the charter and returns the updated conversation", async () => {
@@ -508,6 +647,7 @@ describe("MemStorage.updateConversation", () => {
     mem = new MemStorage();
     const convo = await mem.createConversation({ userId: 1, title: "Original" });
     convoId = convo.id;
+    expect(convo.turnBudget).toBe(25);
   });
 
   it("merges provided fields and preserves omitted ones", async () => {
@@ -527,8 +667,79 @@ describe("MemStorage.updateConversation", () => {
     expect(updated!.title).toBe("Original");
   });
 
+  it("normalizes zero on create and update, and preserves null/omitted update values", async () => {
+    const zeroCreated = await mem.createConversation({ userId: 1, title: "No turn cap", turnBudget: 0 });
+    const nullCreated = await mem.createConversation({ userId: 1, title: "Nullable cap", turnBudget: null });
+    expect(zeroCreated.turnBudget).toBeNull();
+    expect(nullCreated.turnBudget).toBeNull();
+
+    expect((await mem.updateConversation(convoId, { turnBudget: 0 }))!.turnBudget).toBeNull();
+    expect((await mem.updateConversation(convoId, { turnBudget: null }))!.turnBudget).toBeNull();
+    expect((await mem.updateConversation(convoId, { turnBudget: 35 }))!.turnBudget).toBe(35);
+    expect((await mem.updateConversation(convoId, { title: "Renamed" }))!.turnBudget).toBe(35);
+  });
+
   it("returns undefined for a missing conversation id", async () => {
     const updated = await mem.updateConversation(999999, { title: "Ghost" });
     expect(updated).toBeUndefined();
+  });
+});
+
+describe("PostgresStorage conversation turn-budget parity", () => {
+  it("defaults new rows and normalizes zero/null while preserving omitted updates", async () => {
+    class FakeConversationDb {
+      private row: any;
+      private nextId = 1;
+
+      insert(table: unknown) {
+        if (table !== conversations) throw new Error("Unexpected table");
+        return {
+          values: (values: any) => ({
+            returning: async () => {
+              this.row = {
+                ...values,
+                id: this.nextId++,
+                title: values.title ?? "New Conversation",
+                charter: values.charter ?? null,
+                orchestratorState: null,
+                turnBudget: values.turnBudget === undefined ? 25 : values.turnBudget,
+                createdAt: new Date(),
+              };
+              return [{ ...this.row }];
+            },
+          }),
+        };
+      }
+
+      update(table: unknown) {
+        if (table !== conversations) throw new Error("Unexpected table");
+        return {
+          set: (updates: any) => ({
+            where: () => ({
+              returning: async () => {
+                if (!this.row) return [];
+                this.row = { ...this.row, ...updates };
+                return [{ ...this.row }];
+              },
+            }),
+          }),
+        };
+      }
+    }
+
+    const pg = Object.create(PostgresStorage.prototype) as any;
+    pg.db = new FakeConversationDb();
+
+    const created = await pg.createConversation({ userId: 1 });
+    expect(created.turnBudget).toBe(25);
+    expect((await pg.updateConversation(created.id, { turnBudget: 0 })).turnBudget).toBeNull();
+    expect((await pg.updateConversation(created.id, { turnBudget: 37 })).turnBudget).toBe(37);
+    expect((await pg.updateConversation(created.id, { title: "Preserve budget" })).turnBudget).toBe(37);
+    expect((await pg.updateConversation(created.id, { turnBudget: null })).turnBudget).toBeNull();
+
+    const zeroCreated = await pg.createConversation({ userId: 1, turnBudget: 0 });
+    expect(zeroCreated.turnBudget).toBeNull();
+    const nullCreated = await pg.createConversation({ userId: 1, turnBudget: null });
+    expect(nullCreated.turnBudget).toBeNull();
   });
 });

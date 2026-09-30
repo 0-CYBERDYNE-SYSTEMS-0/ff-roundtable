@@ -221,6 +221,7 @@ describe("Conversations & Expert Flows", () => {
       expect(res.status).toBe(201);
       expect(res.body).toHaveProperty("id");
       expect(res.body.title).toBe("Crop Rotation Discussion");
+      expect(res.body.turnBudget).toBe(25);
       expect(res.body).toHaveProperty("createdAt");
       expect(res.body.userId).toBe(1); // developer user id
     });

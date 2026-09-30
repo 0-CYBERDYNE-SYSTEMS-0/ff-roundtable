@@ -935,7 +935,8 @@ export async function getModeratorNextSpeakerSuggestion(
     moderatorExpert: ModeratorContext,
     history: Message[],
     availableRoles: string[],
-    farmerJustSpoke = false
+    farmerJustSpoke = false,
+    options: { turnNumber?: number; turnBudget?: number } = {}
 ): Promise<string | null> {
     console.log("Asking Moderator for next speaker suggestion...");
     try {
@@ -945,7 +946,13 @@ export async function getModeratorNextSpeakerSuggestion(
         const charter = conversation?.charter ?? null;
         const expertRoles = availableRoles.filter(role => role !== "Moderator");
         const moderatorSystemPrompt = generateSystemPrompt(moderatorExpert, expertRoles, undefined, undefined, charter);
-        let queryPrompt = `Based on the recent conversation history, which expert should speak next to best advance the discussion towards resolution or new insights? The available expert roles are: [${expertRoles.join(', ')}]. If the discussion has already run its course — the question is resolved and another turn would only repeat the table — answer 'Conclude' instead. Respond only with the role name, 'Conclude', or 'RoundRobin'.`;
+        const turnBudget = Number.isInteger(options.turnBudget) && (options.turnBudget ?? 0) > 0
+            ? options.turnBudget!
+            : 25;
+        const turnNumber = Number.isInteger(options.turnNumber) && (options.turnNumber ?? 0) > 0
+            ? Math.min(options.turnNumber!, turnBudget)
+            : 1;
+        let queryPrompt = `This is turn ${turnNumber} of ${turnBudget}. Based on the recent conversation history, choose how the council should proceed. Available expert roles: [${expertRoles.join(', ')}]. Respond with exactly one of these choices: 'Continue' to keep the discussion moving and let the next speaker be chosen by round-robin; 'Go deeper: <available role>' to direct the next contribution to one of those roles; or 'Conclude' if the discussion has run its course, the question is resolved, decisions are made, and further turns would only repeat the table. When continuing, prefer the role that best advances resolution or useful new insights. If deeper analysis is useful, name that role after 'Go deeper:'.`;
         if (charter?.trim()) {
             queryPrompt += ` The council charter in your instructions states this roundtable's goal and stop criteria — factor them into the decision.`;
         }
@@ -985,13 +992,33 @@ export async function getModeratorNextSpeakerSuggestion(
         }
 
         const response = await callOpenRouterAPI(messages, auxModel);
-        const suggestedRole = response.message.content.trim().replace(/\.$/, '');
+        const rawSuggestion = response.message.content.trim().replace(/\.$/, '').trim();
+        let suggestedRole: string | null = null;
 
-        if (expertRoles.includes(suggestedRole) || suggestedRole === 'RoundRobin' || suggestedRole === 'Conclude') {
+        if (rawSuggestion.toLowerCase() === 'continue') {
+            suggestedRole = 'RoundRobin';
+        } else if (rawSuggestion.toLowerCase() === 'conclude') {
+            suggestedRole = 'Conclude';
+        } else if (rawSuggestion === 'RoundRobin') {
+            // Keep accepting the legacy response while newer prompts ask for
+            // the clearer "Continue" choice.
+            suggestedRole = 'RoundRobin';
+        } else {
+            const goDeeperMatch = rawSuggestion.match(/^Go deeper:\s*(.+)$/i);
+            const requestedRole = goDeeperMatch?.[1]?.trim();
+            if (requestedRole && expertRoles.includes(requestedRole)) {
+                suggestedRole = requestedRole;
+            } else if (!goDeeperMatch && expertRoles.includes(rawSuggestion)) {
+                // Existing providers may still return a plain role name.
+                suggestedRole = rawSuggestion;
+            }
+        }
+
+        if (suggestedRole) {
             console.log(`Moderator suggested next speaker: ${suggestedRole}`);
             return suggestedRole;
         }
-        console.warn(`Moderator suggested an invalid role: '${suggestedRole}'. Falling back.`);
+        console.warn(`Moderator suggested an invalid role: '${rawSuggestion}'. Falling back.`);
         return null;
     } catch (error) {
         console.error("Error preparing or querying Moderator for next speaker:", error);

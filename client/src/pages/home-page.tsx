@@ -519,6 +519,11 @@ export default function HomePage() {
   // The active conversation's record from the list query (title, charter).
   const activeConversationData =
     conversations?.find((conversation) => conversation.id === activeConversation) ?? null;
+  // G13: older conversation responses may omit turnBudget; the dialog applies
+  // the standard 25-turn default in that case. Null means "Let it run".
+  const activeTurnBudget = (
+    activeConversationData as (typeof activeConversationData & { turnBudget?: number | null }) | null
+  )?.turnBudget;
 
   // Charter badge/nudge: a blank string counts as "no charter".
   const activeHasCharter = !!activeConversationData?.charter;
@@ -1218,6 +1223,7 @@ export default function HomePage() {
         open={charterDialogOpen}
         conversationId={activeConversation}
         currentCharter={activeConversationData?.charter ?? null}
+        currentTurnBudget={activeTurnBudget}
         onClose={() => setCharterDialogOpen(false)}
       />
     </div>

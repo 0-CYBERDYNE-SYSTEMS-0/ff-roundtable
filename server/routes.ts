@@ -84,13 +84,15 @@ function getSubscriptionClientSecret(subscription: Stripe.Subscription): string 
 // Development mode flag - uses NODE_ENV to determine dev vs production
 const DEVELOPMENT_MODE = process.env.NODE_ENV !== "production";
 
-// G6: body for PUT /api/protected/conversations/:id — update title and/or the
-// council charter. Strict: unknown fields are rejected, not silently dropped.
+// G6/G13: body for PUT /api/protected/conversations/:id — update title,
+// council charter, and optional turn budget. Strict: unknown fields are
+// rejected, not silently dropped.
 // Title caps at 500 chars (the length the create path already accepts);
 // charter caps hard at 2,000 chars.
 const updateConversationSchema = z.object({
   title: z.string().trim().min(1, "Title cannot be empty").max(500, "Title must be at most 500 characters").optional(),
   charter: z.string().max(2000, "Charter must be at most 2,000 characters").nullable().optional(),
+  turnBudget: z.number().int().min(0, "Turn budget must be 0 or an integer from 1 to 100").max(100, "Turn budget must be at most 100").nullable().optional(),
 });
 
 // Extract and VERIFY the express-session id from a WS upgrade request's
@@ -978,7 +980,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Update a conversation's title and/or council charter (G6). Ownership is
+  // Update a conversation's title, council charter, and/or turn budget
+  // (G6/G13). Ownership is
   // enforced exactly like the sibling protected conversation routes (a
   // mismatched or missing conversation is a 404 — no existence leak).
   app.put("/api/protected/conversations/:id", async (req, res) => {
@@ -995,12 +998,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(400).json({ message: "Invalid conversation update", errors: parsed.error.flatten() });
       }
       if (Object.keys(parsed.data).length === 0) {
-        return res.status(400).json({ message: "Nothing to update: provide a title and/or charter" });
+        return res.status(400).json({ message: "Nothing to update: provide a title, charter, or turn budget" });
       }
 
-      const updatedConversation = await storage.updateConversation(conversationId, parsed.data);
+      const updates = parsed.data.turnBudget === 0
+        ? { ...parsed.data, turnBudget: null }
+        : parsed.data;
+      const updatedConversation = await storage.updateConversation(conversationId, updates);
       if (!updatedConversation) {
         return res.status(404).json({ message: "Conversation not found" });
+      }
+
+      if (updates.turnBudget !== undefined) {
+        new InteractionOrchestrator(conversationId).setTurnBudget(updates.turnBudget);
       }
 
       res.json(updatedConversation);
