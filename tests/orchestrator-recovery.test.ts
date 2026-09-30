@@ -88,6 +88,7 @@ function createMockMessage(id: number, content: string): Message {
     expertRole: null,
     artifacts: [],
     mentions: null,
+    stance: null,
     timestamp: new Date(),
   };
 }
@@ -159,6 +160,7 @@ describe("Orchestrator recovery (G7 snapshots)", () => {
       expertRole: expert.role,
       artifacts: [],
     }));
+    return { messages };
   }
 
   // A persisted conversation row with the given snapshot (or none).
@@ -331,10 +333,12 @@ describe("Orchestrator recovery (G7 snapshots)", () => {
     expect(mockGetModeratorNextSpeakerSuggestion.mock.calls[0]?.[4]).toEqual({
       turnNumber: 1,
       turnBudget: 2,
+      stanceLedger: { Agronomist: null, "Soil Scientist": null, "Weather Expert": null },
     });
     expect(mockGetModeratorNextSpeakerSuggestion.mock.calls[1]?.[4]).toEqual({
       turnNumber: 2,
       turnBudget: 2,
+      stanceLedger: { Agronomist: null, "Soil Scientist": null, "Weather Expert": null },
     });
     expect(getConversationState(conversationId)?.mode).toBe("idle");
   });
@@ -513,6 +517,43 @@ describe("Orchestrator recovery (G7 snapshots)", () => {
       isAutonomousEnabled: true,
       maxAutonomousTurns: 25,
     });
+  });
+
+  it("fails closed on cold-restored stance evidence without question provenance", async () => {
+    const conversationId = nextConvId();
+    const { messages } = setupFullRound(conversationId);
+    messages.push(
+      { ...createMockMessage(1, "Older question"), conversationId },
+      { ...createMockMessage(2, "Newer question"), conversationId },
+      {
+        id: 3,
+        conversationId,
+        expertId: 1,
+        userId: null,
+        content: "Late answer to the older question.",
+        role: "assistant",
+        expertName: "Alice",
+        expertRole: "Agronomist",
+        artifacts: [],
+        mentions: null,
+        isSynthesis: null,
+        answersQuestionId: null,
+        stance: { stance: "agree", confidence: 4, position: "Old question supports this." },
+        timestamp: new Date(),
+      },
+    );
+    persistRow(conversationId, {
+      mode: "paused",
+      currentExpertIndex: 0,
+      totalAutonomousTurnsTaken: 1,
+      wasInterrupted: false,
+      pausedFromMode: "autonomous",
+    });
+
+    expect(await restorePausedFromSnapshot(conversationId, broadcastFn)).toBe(true);
+    const state = getConversationState(conversationId)!;
+    expect(state.stanceQuestionMessageId).toBe(2);
+    expect(state.stanceLedger.Agronomist).toBeNull();
   });
 
   it("maps a paused processing_sequential phase to autonomous on restore", async () => {

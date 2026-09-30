@@ -69,8 +69,11 @@ import {
   getConversationState,
   isUsableConversationState,
   processMessageTurnBased,
+  isStanceLedgerConverged,
+  getStableStanceSplitSignature,
+  canConcludeWithStanceEvidence,
 } from "../server/orchestrator";
-import type { Expert, Message } from "../shared/schema";
+import type { Expert, Message, MessageStance } from "../shared/schema";
 
 type ModeratorIdentity = Omit<Expert, "id"> & { id: number | null };
 
@@ -105,6 +108,7 @@ function createMockMessage(
     expertRole: null,
     artifacts: [],
     mentions: mentions ?? null,
+    stance: null,
     timestamp: new Date(),
   };
 }
@@ -864,6 +868,12 @@ describe("Orchestrator", () => {
         sequenceExpertContents: [],
         roundExperts: experts,
         mentionPairStreak: null,
+        stanceQuestionMessageId: null,
+        stanceLedger: Object.fromEntries(experts.map((expert) => [expert.role, null])),
+        stanceCycleRoles: [],
+        stableSplitSignature: null,
+        stableSplitCycleCount: 0,
+        dissentersNeedingTurn: [],
         moderatorNoticeSent: false,
       };
     }
@@ -895,6 +905,12 @@ describe("Orchestrator", () => {
     it("rejects a state missing the scheduled failure counter", () => {
       const partial = usableState();
       delete partial.scheduledFailureAttempts;
+      expect(isUsableConversationState(partial as any)).toBe(false);
+    });
+
+    it("rejects a state missing the active-question stance ledger", () => {
+      const partial = usableState();
+      delete partial.stanceLedger;
       expect(isUsableConversationState(partial as any)).toBe(false);
     });
   });
@@ -1971,6 +1987,7 @@ describe("G4 mention mechanics", () => {
     function setupGatedModeratorConversation(
       conversationId: number,
       includeRosterModerator = true,
+      stanceForTurn?: (expert: Expert, turnNumber: number) => MessageStance | null,
     ) {
       const configuredModerator = createMockExpert(4, "Matt", "Moderator");
       configuredModerator.model = "test/configured-moderator-model";
@@ -1998,6 +2015,9 @@ describe("G4 mention mechanics", () => {
       const gates: Array<() => void> = [];
       const startedNames: string[] = [];
       let contentCounter = 0;
+      // Existing G5 conclusion cases get affirmative structured evidence so
+      // they keep exercising the approved close path under G15. Focused G15
+      // cases override this callback with dissent, abstention, or no stance.
       mockGetExpertResponseStream.mockImplementation((expert: Expert) => {
         if (expert.conversationId !== conversationId) {
           return new Promise(() => {}); // park foreign chains forever
@@ -2015,6 +2035,9 @@ describe("G4 mention mechanics", () => {
               expertName: expert.name,
               expertRole: expert.role,
               artifacts: [],
+              stance: stanceForTurn
+                ? stanceForTurn(expert, contentCounter)
+                : { stance: "agree", confidence: 4, position: "Test position supports the proposal." },
             }),
           );
         });
@@ -2111,11 +2134,178 @@ describe("G4 mention mechanics", () => {
             expertRole: "Moderator",
             isSynthesis: true,
             mentions: [],
+            stance: null,
           });
           broadcast(cid, { type: "expert_stream_done", expertId: moderator.id, message: stored });
         },
       );
     }
+
+    describe("G15 stance ledger and conclusion gate", () => {
+      const stance = (value: MessageStance["stance"], position = "Position recorded."): MessageStance => ({
+        stance: value,
+        confidence: 4,
+        position,
+      });
+
+      it("treats agreement and conditional positions as convergence, but abstention or disagreement as unresolved", () => {
+        expect(isStanceLedgerConverged({ Agronomist: stance("agree"), "Soil Scientist": stance("conditional") })).toBe(true);
+        // The approved gate requires >=1 non-abstaining stance and all
+        // non-abstaining stances to be supportive; missing/abstaining entries
+        // are excluded rather than treated as dissent.
+        expect(isStanceLedgerConverged({ Agronomist: stance("agree"), "Soil Scientist": null })).toBe(true);
+        expect(isStanceLedgerConverged({ Agronomist: stance("abstain"), "Soil Scientist": null })).toBe(false);
+        expect(isStanceLedgerConverged({ Agronomist: stance("agree"), "Soil Scientist": stance("disagree") })).toBe(false);
+        expect(isStanceLedgerConverged({ Agronomist: null })).toBe(false);
+      });
+
+      it("allows a stable split only after two matching cycles and the 80% threshold, or at the hard cap", () => {
+        const split = {
+          Agronomist: stance("agree"),
+          "Soil Scientist": stance("disagree"),
+          "Weather Expert": stance("conditional"),
+        };
+        expect(getStableStanceSplitSignature(split)).not.toBeNull();
+        expect(getStableStanceSplitSignature({ Agronomist: stance("agree"), "Soil Scientist": stance("abstain") })).toBeNull();
+        const signature = getStableStanceSplitSignature(split);
+        expect(canConcludeWithStanceEvidence(split, 4, 6, 2, signature)).toBe(false); // ceil(80% of 6) = 5
+        expect(canConcludeWithStanceEvidence(split, 5, 6, 1, signature)).toBe(false);
+        expect(canConcludeWithStanceEvidence(split, 5, 6, 2, signature)).toBe(true);
+        expect(canConcludeWithStanceEvidence(split, 5, 6, 2, "old split")).toBe(false);
+        expect(canConcludeWithStanceEvidence(split, 6, 6, 0, null)).toBe(true);
+      });
+
+      it("blocks Conclude and forces an unaddressed dissenter to speak while budget remains", async () => {
+        const conversationId = nextConvId();
+        const { waitForTurns, releaseNextTurn, addUserMessageToHistory, turnNames, events } =
+          setupGatedModeratorConversation(conversationId, true, (expert) =>
+            expert.role === "Agronomist" ? stance("disagree", "The drainage plan is too shallow.") : stance("agree"),
+          );
+        mockGetModeratorNextSpeakerSuggestion.mockResolvedValue("Conclude");
+        mockSynthesisTurn(conversationId);
+
+        const userMessage = createMockMessage(1, "@[Agronomist] Recommend a drainage plan", "user", undefined, ["Agronomist"]);
+        addUserMessageToHistory(userMessage);
+        await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn);
+        await waitForTurns(1);
+        await releaseNextTurn();
+        await waitForTurns(2);
+
+        expect(turnNames()).toEqual(["Alice", "Alice"]);
+        expect(getConversationState(conversationId)!.totalAutonomousTurnsTaken).toBeLessThan(
+          getConversationState(conversationId)!.maxAutonomousTurns,
+        );
+        expect(mockGenerateClosingSynthesis.mock.calls.filter(([cid]) => cid === conversationId)).toHaveLength(0);
+        expect(events().some((event) => event.type === "concluding")).toBe(false);
+
+        new InteractionOrchestrator(conversationId).disableAutonomous();
+        await releaseNextTurn();
+        await waitForMode(conversationId, "idle");
+      });
+
+      it("concludes a persistent split only after two complete cycles and 80% of budget", async () => {
+        const conversationId = nextConvId();
+        const { waitForTurns, releaseNextTurn, addUserMessageToHistory, turnNames, waitForEvent } =
+          setupGatedModeratorConversation(conversationId, true, (expert) =>
+            expert.role === "Agronomist"
+              ? stance("agree")
+              : expert.role === "Soil Scientist"
+                ? stance("disagree")
+                : stance("conditional"),
+          );
+        mockGetModeratorNextSpeakerSuggestion.mockReset();
+        mockGetModeratorNextSpeakerSuggestion.mockResolvedValue("RoundRobin");
+        for (let i = 0; i < 8; i++) mockGetModeratorNextSpeakerSuggestion.mockResolvedValueOnce("RoundRobin");
+        mockGetModeratorNextSpeakerSuggestion.mockResolvedValueOnce("Conclude");
+
+        let releaseSynthesis = () => {};
+        const synthesisHeld = new Promise<void>((resolve) => { releaseSynthesis = resolve; });
+        mockSynthesisTurn(conversationId, () => synthesisHeld);
+
+        const userMessage = createMockMessage(1, "Assess whether the current plan is safe.");
+        addUserMessageToHistory(userMessage);
+        await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn);
+
+        for (let turn = 1; turn <= 8; turn++) {
+          await waitForTurns(turn);
+          if (turn === 1) new InteractionOrchestrator(conversationId).enableAutonomous(10);
+          await releaseNextTurn();
+        }
+        await waitForEvent("concluding");
+
+        // Bob's first dissent earns one explicit follow-up before normal
+        // round-robin resumes; both later complete cycles keep the same camps.
+        expect(turnNames()).toEqual(["Alice", "Bob", "Bob", "Carol", "Alice", "Bob", "Carol", "Alice"]);
+        expect(getConversationState(conversationId)!.totalAutonomousTurnsTaken).toBe(8);
+        expect(getConversationState(conversationId)!.stableSplitCycleCount).toBe(2);
+        expect(mockGenerateClosingSynthesis.mock.calls.filter(([cid]) => cid === conversationId)).toHaveLength(1);
+
+        releaseSynthesis();
+        await waitForMode(conversationId, "idle");
+      });
+
+      it("forces a final synthesis at hard budget exhaustion and passes the remaining ledger", async () => {
+        const conversationId = nextConvId();
+        const { waitForTurns, releaseNextTurn, addUserMessageToHistory, turnNames, waitForEvent } =
+          setupGatedModeratorConversation(conversationId, true, (expert) =>
+            expert.role === "Agronomist" ? stance("agree") : stance("disagree"),
+          );
+        mockGetModeratorNextSpeakerSuggestion.mockResolvedValue("RoundRobin");
+        let releaseSynthesis = () => {};
+        const synthesisHeld = new Promise<void>((resolve) => { releaseSynthesis = resolve; });
+        mockSynthesisTurn(conversationId, () => synthesisHeld);
+
+        const userMessage = createMockMessage(1, "Compare the plan's safety tradeoffs.");
+        addUserMessageToHistory(userMessage);
+        await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn);
+        await waitForTurns(1);
+        new InteractionOrchestrator(conversationId).enableAutonomous(2);
+        await releaseNextTurn();
+        await waitForTurns(2);
+        await releaseNextTurn();
+        await waitForEvent("concluding");
+
+        expect(turnNames()).toHaveLength(2);
+        expect(getConversationState(conversationId)!.totalAutonomousTurnsTaken).toBe(2);
+        const synthesisCall = mockGenerateClosingSynthesis.mock.calls.find(([cid]) => cid === conversationId);
+        expect(synthesisCall?.[3]).toMatchObject({
+          Agronomist: { stance: "agree" },
+          "Soil Scientist": { stance: "disagree" },
+        });
+
+        releaseSynthesis();
+        await waitForMode(conversationId, "idle");
+      });
+
+      it("resets the stance ledger for a joined question and ignores the older in-flight stance", async () => {
+        const conversationId = nextConvId();
+        const { waitForTurns, releaseNextTurn, addUserMessageToHistory } =
+          setupGatedModeratorConversation(conversationId, true, () => stance("disagree", "Old question position."));
+        mockGetModeratorNextSpeakerSuggestion.mockResolvedValue("RoundRobin");
+
+        const firstQuestion = createMockMessage(1, "First question");
+        addUserMessageToHistory(firstQuestion);
+        await processMessageTurnBased(userId, conversationId, firstQuestion, broadcastFn);
+        await waitForTurns(1);
+
+        const joinedQuestion = createMockMessage(2, "A distinct follow-up question");
+        addUserMessageToHistory(joinedQuestion);
+        await processMessageTurnBased(userId, conversationId, joinedQuestion, broadcastFn);
+        expect(getConversationState(conversationId)!.stanceQuestionMessageId).toBe(joinedQuestion.id);
+        expect(Object.values(getConversationState(conversationId)!.stanceLedger).every((value) => value === null)).toBe(true);
+
+        await releaseNextTurn();
+        await waitForTurns(2);
+        expect(Object.values(getConversationState(conversationId)!.stanceLedger).every((value) => value === null)).toBe(true);
+
+        new InteractionOrchestrator(conversationId).disableAutonomous();
+        await releaseNextTurn();
+        await waitForMode(conversationId, "idle");
+        const ledger = getConversationState(conversationId)!.stanceLedger;
+        expect(ledger.Agronomist).toBeNull();
+        expect(Object.values(ledger).some((value) => value?.stance === "disagree")).toBe(true);
+      });
+    });
 
     it("uses the configured roster Moderator for conclusion without an ordinary turn", async () => {
       const conversationId = nextConvId();

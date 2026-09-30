@@ -68,6 +68,10 @@ import {
   generateSystemPrompt,
   getModeratorNextSpeakerSuggestion,
   generateClosingSynthesis,
+  buildClosingSynthesisPrompt,
+  getExpertResponse,
+  getExpertResponseStream,
+  parseTrailingStanceLine,
 } from "../server/ai";
 import type { ModeratorContext } from "../server/ai";
 import { conversations, type Expert } from "../shared/schema";
@@ -161,10 +165,80 @@ describe("generateSystemPrompt charter injection", () => {
     expect(prompt).toContain("Add new information or an objection instead of repeating settled points");
     expect(prompt).toContain("@[User] <question>?");
     expect(prompt).toContain("without waiting for the farmer to answer");
-    expect(prompt).not.toContain("STANCE:");
+    expect(prompt).toContain("STANCE: <agree|disagree|conditional|abstain> | <confidence 1-5> | <one-line position>");
 
     const moderatorPrompt = generateSystemPrompt(createMockModerator(null, 1), roles);
     expect(moderatorPrompt).not.toContain("💬 CROSS-TALK");
+    expect(moderatorPrompt).not.toContain("STANCE:");
+  });
+});
+
+describe("G15 expert stance parsing", () => {
+  beforeEach(() => {
+    mockProviderChat.mockReset();
+    mockProviderChatStream.mockReset();
+  });
+
+  it("parses case-insensitive valid values and strips a trailing stance line", () => {
+    expect(parseTrailingStanceLine("Recommendation.\n  STANCE: conditional | 5 | Wait for a soil test\n\n")).toEqual({
+      content: "Recommendation.\n",
+      stance: {
+        stance: "conditional",
+        confidence: 5,
+        position: "Wait for a soil test",
+      },
+    });
+  });
+
+  it("strips malformed trailing stance lines, but preserves non-trailing and absent lines", () => {
+    expect(parseTrailingStanceLine("Body\nSTANCE: maybe | 9 | invalid\n")).toEqual({
+      content: "Body\n",
+      stance: null,
+    });
+    const nonTrailing = "Body\nSTANCE: agree | 4 | an earlier note\nMore body";
+    expect(parseTrailingStanceLine(nonTrailing)).toEqual({ content: nonTrailing, stance: null });
+    expect(parseTrailingStanceLine("Body without metadata")).toEqual({
+      content: "Body without metadata",
+      stance: null,
+    });
+  });
+
+  it("withholds a trailing stance from live stream tokens and returns it as metadata", async () => {
+    const convo = await storage.createConversation({ userId: 1, title: "Streaming stance" });
+    const expert = createMockExpert(12, convo.id, "Dr. Terra", "Soil Scientist");
+    const emitted: string[] = [];
+    const stanceLine = "  STANCE: AgReE | 4 | Reduces erosion risk";
+    mockProviderChatStream.mockImplementation(async (_messages: any, _model: string, onToken: (token: string) => void) => {
+      onToken("Use a cover crop.\n");
+      onToken("  STANCE:");
+      onToken(" AgReE | 4 | Reduces erosion risk");
+      return { message: { role: "assistant", content: `Use a cover crop.\n${stanceLine}` } };
+    });
+
+    const result = await getExpertResponseStream(expert, [], "What should I plant?", [], [expert.role], token => emitted.push(token));
+
+    expect(emitted.join("")).toBe("Use a cover crop.\n");
+    expect(emitted.join("")).not.toContain("STANCE:");
+    expect(result.content).toBe("Use a cover crop.");
+    expect(result.stance).toEqual({ stance: "agree", confidence: 4, position: "Reduces erosion risk" });
+    const stored = await storage.createMessage(result);
+    expect(stored.content).toBe("Use a cover crop.");
+    expect(stored.content).not.toContain("STANCE:");
+    expect(stored.stance).toEqual(result.stance);
+  });
+
+  it("strips stance metadata from the non-stream response too", async () => {
+    const convo = await storage.createConversation({ userId: 1, title: "Non-stream stance" });
+    const expert = createMockExpert(13, convo.id, "Dr. Terra", "Soil Scientist");
+    mockProviderChat.mockResolvedValue({
+      message: { role: "assistant", content: "Use a cover crop.\nSTANCE: disagree | 2 | Seed cost is too high" },
+    });
+
+    const result = await getExpertResponse(expert, [], "What should I plant?", [], [expert.role]);
+
+    expect(result.content).toBe("Use a cover crop.");
+    expect(result.content).not.toContain("STANCE:");
+    expect(result.stance).toEqual({ stance: "disagree", confidence: 2, position: "Seed cost is too high" });
   });
 });
 
@@ -327,6 +401,46 @@ describe("getModeratorNextSpeakerSuggestion charter awareness", () => {
     expect(userQuery.content).toContain("The test last month measured 5.8.");
     expect(userQuery.content).toContain("Revisit any assumptions that conflict with this answer.");
   });
+
+  it("provides the Moderator current stances and unanswered questions for evidence-based routing", async () => {
+    const convo = await storage.createConversation({ userId: 1, title: "Evidence-aware routing" });
+    const sourceMessage = await storage.createMessage({
+      conversationId: convo.id,
+      expertId: null,
+      userId: null,
+      content: "What is the soil pH? Assuming it is near neutral.",
+      role: "assistant",
+      expertName: "Dr. Terra",
+      expertRole: "Soil Scientist",
+    });
+    await storage.createOpenQuestion({
+      conversationId: convo.id,
+      messageId: sourceMessage.id,
+      expertRole: "Soil Scientist",
+      question: "What is the soil pH?",
+      assumption: "it is near neutral.",
+    });
+
+    await getModeratorNextSpeakerSuggestion(
+      createMockModerator(null, convo.id),
+      [sourceMessage],
+      ["Soil Scientist", "Crop Specialist"],
+      false,
+      {
+        stanceLedger: {
+          "Soil Scientist": { stance: "disagree", confidence: 4, position: "Test before liming" },
+          "Crop Specialist": null,
+        },
+      },
+    );
+
+    const messages = mockProviderChat.mock.calls[0][0];
+    const userQuery = messages.filter((m: any) => m.role === "user").pop();
+    expect(userQuery.content).toContain('"expertRole":"Soil Scientist","stance":"disagree"');
+    expect(userQuery.content).toContain("What is the soil pH?");
+    expect(userQuery.content).toContain("it is near neutral.");
+    expect(userQuery.content).toContain("Suggest Conclude only when the discussion and charter provide evidence");
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════
@@ -395,6 +509,59 @@ describe("generateClosingSynthesis charter awareness", () => {
     expect(systemMessage.content).not.toContain("COUNCIL CHARTER");
     const closingPrompt = messages.filter((m: any) => m.role === "user").pop();
     expect(closingPrompt.content).not.toContain("council charter");
+  });
+
+  it("uses the five required headings and carries open questions plus abstaining stances", async () => {
+    const convo = await storage.createConversation({ userId: 1, title: "Unresolved closing" });
+    const sourceMessage = await storage.createMessage({
+      conversationId: convo.id,
+      expertId: null,
+      userId: null,
+      content: "What was the soil pH? Assuming it was near neutral.",
+      role: "assistant",
+      expertName: "Dr. Terra",
+      expertRole: "Soil Scientist",
+    });
+    await storage.createOpenQuestion({
+      conversationId: convo.id,
+      messageId: sourceMessage.id,
+      expertRole: "Soil Scientist",
+      question: "What was the soil pH?",
+      assumption: "it was near neutral.",
+    });
+
+    await generateClosingSynthesis(
+      convo.id,
+      createMockModerator(null, convo.id),
+      vi.fn(),
+      {
+        "Soil Scientist": { stance: "abstain", confidence: 1, position: "Need a soil test" },
+        "Crop Specialist": null,
+      },
+    );
+
+    const messages = mockProviderChatStream.mock.calls[0][0];
+    const closingPrompt = messages.filter((m: any) => m.role === "user").pop();
+    expect(closingPrompt.content.match(/^## .+$/gm)).toEqual([
+      "## Verdict",
+      "## Consensus",
+      "## Dissent",
+      "## Open questions for you",
+      "## Assumptions awaiting confirmation",
+    ]);
+    expect(closingPrompt.content).toContain("What was the soil pH?");
+    expect(closingPrompt.content).toContain("it was near neutral.");
+    expect(closingPrompt.content).toContain("The Verdict must be conditional or unresolved");
+    expect(closingPrompt.content).toContain("explicitly state that there is no expert consensus");
+    expect(closingPrompt.content).toContain("Do not invent consensus.");
+  });
+
+  it("exposes a pure prompt builder for the no-stance unresolved case", () => {
+    const prompt = buildClosingSynthesisPrompt({ "Soil Scientist": null });
+    expect(prompt).toContain("## Verdict\n## Consensus\n## Dissent");
+    expect(prompt).toContain("The Verdict must be conditional or unresolved");
+    expect(prompt).toContain("Do not invent consensus.");
+    expect(prompt).toContain("In Dissent, name each expert role from the ledger");
   });
 });
 

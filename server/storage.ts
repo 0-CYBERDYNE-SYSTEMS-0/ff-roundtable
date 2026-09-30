@@ -348,6 +348,8 @@ export class MemStorage implements IStorage {
       // G5 synthesis: pass the closing-synthesis flag through (null when unset).
       isSynthesis: insertMessage.isSynthesis ?? null,
       answersQuestionId: insertMessage.answersQuestionId ?? null,
+      // G15 stance: legacy and non-expert messages have no stance.
+      stance: insertMessage.stance ?? null,
       timestamp: now,
     };
     this.messages.set(id, message);
@@ -749,6 +751,7 @@ export class PostgresStorage implements IStorage {
     return {
       ...raw,
       artifacts: (raw.artifacts || []) as Message["artifacts"],
+      stance: raw.stance ?? null,
     } as Message;
   }
 
@@ -762,6 +765,7 @@ export class PostgresStorage implements IStorage {
     return result.map((m) => ({
       ...m,
       artifacts: (m.artifacts || []) as Message["artifacts"],
+      stance: m.stance ?? null,
     })) as Message[];
   }
 

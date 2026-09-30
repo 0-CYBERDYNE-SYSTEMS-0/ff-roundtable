@@ -2,7 +2,7 @@ import { storage } from "./storage";
 import { getExpertResponse, getExpertResponseStream, generateInsights, getModeratorNextSpeakerSuggestion, generateClosingSynthesis, resolveAuxModel } from "./ai";
 import type { ModeratorContext } from "./ai";
 import { shouldStopForRedundancy, REDUNDANCY_STOP_SIMILARITY_THRESHOLD } from "./text-similarity";
-import type { InsertMessage, Expert, Message, File, OrchestratorSnapshot } from "@shared/schema";
+import type { InsertMessage, Expert, Message, File, MessageStance, OrchestratorSnapshot } from "@shared/schema";
 import { extractFarmerQuestions } from "@shared/mentions";
 
 // Verbose per-turn tracing is opt-in (ORCH_DEBUG=1). The default flood slows
@@ -81,6 +81,17 @@ interface ConversationState {
     // mention-routed turn plus how many consecutive mention-routed turns that
     // pair has logged. null whenever the previous turn was not mention-routed.
     mentionPairStreak: { key: string; count: number } | null;
+    // G15: current-question stance ledger. Each speakable expert role is
+    // present with null until it supplies a valid stance for this question.
+    stanceQuestionMessageId: number | null;
+    stanceLedger: Record<string, MessageStance | null>;
+    // A cycle is complete when every active expert has finished one turn.
+    // Two consecutive matching camp signatures make a split stable.
+    stanceCycleRoles: string[];
+    stableSplitSignature: string | null;
+    stableSplitCycleCount: number;
+    // Disagreement is queued until that expert receives a follow-up turn.
+    dissentersNeedingTurn: string[];
     // G8 aux hygiene: the "Moderator unavailable — speaking in round-robin."
     // notice is broadcast at most ONCE PER SEQUENCE. Set when the notice goes
     // out; reset when a new sequence starts (startProcessingSequence /
@@ -102,6 +113,141 @@ const conversationStates: Map<number, ConversationState> = new Map();
 const STALE_PROCESSING_MS = 5 * 60 * 1000;
 const DEFAULT_TURN_BUDGET = 25;
 const MAX_TURN_BUDGET = 100;
+
+type StanceLedger = Record<string, MessageStance | null>;
+
+function emptyStanceLedger(activeExperts: Expert[]): StanceLedger {
+    return Object.fromEntries(activeExperts.map(expert => [expert.role, null]));
+}
+
+function isMessageStance(value: unknown): value is MessageStance {
+    if (!value || typeof value !== "object") return false;
+    const stance = value as Partial<MessageStance>;
+    return ["agree", "disagree", "conditional", "abstain"].includes(String(stance.stance).toLowerCase()) &&
+        Number.isInteger(stance.confidence) && Number(stance.confidence) >= 1 && Number(stance.confidence) <= 5 &&
+        typeof stance.position === "string";
+}
+
+/** Convergence excludes abstentions and requires at least one substantive stance. */
+export function isStanceLedgerConverged(ledger: StanceLedger): boolean {
+    const substantive = Object.values(ledger).filter((stance): stance is MessageStance =>
+        Boolean(stance && stance.stance !== "abstain")
+    );
+    return substantive.length > 0 && substantive.every(stance =>
+        stance.stance === "agree" || stance.stance === "conditional"
+    );
+}
+
+/** Stable split means the same named experts occupy both camps for two cycles. */
+export function getStableStanceSplitSignature(ledger: StanceLedger): string | null {
+    const aligned = Object.entries(ledger)
+        .filter(([, stance]) => stance?.stance === "agree" || stance?.stance === "conditional")
+        .map(([role]) => role)
+        .sort();
+    const dissenting = Object.entries(ledger)
+        .filter(([, stance]) => stance?.stance === "disagree")
+        .map(([role]) => role)
+        .sort();
+    if (aligned.length === 0 || dissenting.length === 0) return null;
+    return JSON.stringify({ aligned, dissenting });
+}
+
+/** Pure, testable gate: convergence, a stable split after 80%, or the hard cap. */
+export function canConcludeWithStanceEvidence(
+    ledger: StanceLedger,
+    turnsTaken: number,
+    effectiveBudget: number,
+    stableSplitCycleCount: number,
+    stableSplitSignature: string | null,
+): boolean {
+    if (turnsTaken >= effectiveBudget) return true;
+    if (isStanceLedgerConverged(ledger)) return true;
+    const threshold = Math.ceil(0.8 * effectiveBudget);
+    const currentSignature = getStableStanceSplitSignature(ledger);
+    return turnsTaken >= threshold && stableSplitCycleCount >= 2 && currentSignature !== null &&
+        currentSignature === stableSplitSignature;
+}
+
+function resetStanceEvidence(userMessage: Message, activeExperts: Expert[]) {
+    return {
+        stanceQuestionMessageId: Number.isInteger(userMessage.id) ? userMessage.id : null,
+        stanceLedger: emptyStanceLedger(activeExperts),
+        stanceCycleRoles: [] as string[],
+        stableSplitSignature: null,
+        stableSplitCycleCount: 0,
+        dissentersNeedingTurn: [] as string[],
+    };
+}
+
+function stanceStateForRestoredQuestion(messages: Message[], activeExperts: Expert[]) {
+    const ledger = emptyStanceLedger(activeExperts);
+    const latestQuestionIndex = messages.map(message => message.role).lastIndexOf("user");
+    const latestQuestion = latestQuestionIndex >= 0 ? messages[latestQuestionIndex] : null;
+    if (!latestQuestion) {
+        return { stanceQuestionMessageId: null, stanceLedger: ledger, dissentersNeedingTurn: [] as string[] };
+    }
+    // Message rows do not persist which question a turn began answering. A
+    // turn already in flight when a newer farmer message arrived can therefore
+    // be stored after that newer message. On cold restore, keep the question
+    // anchor but fail closed on all stance evidence instead of attributing a
+    // stale turn to the wrong question.
+    return {
+        stanceQuestionMessageId: Number.isInteger(latestQuestion.id) ? latestQuestion.id : null,
+        stanceLedger: ledger,
+        dissentersNeedingTurn: [] as string[],
+    };
+}
+
+function completedTurnStanceUpdates(
+    state: ConversationState,
+    expertRole: string,
+    stanceValue: unknown,
+    questionMessageId: number | null,
+): Partial<ConversationState> {
+    // A response drafted before a newer farmer question arrived belongs to
+    // that old question. Keep its stored message, but do not feed it into the
+    // active question's decision ledger.
+    if (state.stanceQuestionMessageId !== questionMessageId || !(expertRole in state.stanceLedger)) return {};
+
+    const stance = isMessageStance(stanceValue) ? stanceValue : null;
+    const previousStance = state.stanceLedger[expertRole];
+    const stanceLedger = { ...state.stanceLedger, [expertRole]: stance };
+    const dissentersNeedingTurn = state.dissentersNeedingTurn.filter(role => role !== expertRole);
+    if (stance?.stance === "disagree" && previousStance?.stance !== "disagree") {
+        dissentersNeedingTurn.push(expertRole);
+    }
+
+    const cycleRoles = new Set([...state.stanceCycleRoles, expertRole]);
+    const completeCycle = state.activeExperts.every(expert => cycleRoles.has(expert.role));
+    if (!completeCycle) {
+        return {
+            stanceLedger,
+            dissentersNeedingTurn,
+            stanceCycleRoles: Array.from(cycleRoles),
+        };
+    }
+
+    const signature = getStableStanceSplitSignature(stanceLedger);
+    if (signature === null) {
+        return {
+            stanceLedger,
+            dissentersNeedingTurn,
+            stanceCycleRoles: [],
+            stableSplitSignature: null,
+            stableSplitCycleCount: 0,
+        };
+    }
+    const stableSplitCycleCount = signature === state.stableSplitSignature
+        ? state.stableSplitCycleCount + 1
+        : 1;
+    return {
+        stanceLedger,
+        dissentersNeedingTurn,
+        stanceCycleRoles: [],
+        stableSplitSignature: signature,
+        stableSplitCycleCount,
+    };
+}
 
 // ─── G7: Survivable orchestrator state ───────────────────────────────────────
 // A minimal snapshot is persisted to the conversation row at TURN BOUNDARIES
@@ -217,6 +363,13 @@ export function isUsableConversationState(state: ConversationState | undefined):
         Array.isArray(state.sequenceExpertContents) &&
         Array.isArray(state.roundExperts) &&
         state.roundExperts.every(e => isSpeakableExpertRole(e.role)) &&
+        (state.stanceQuestionMessageId === null || Number.isInteger(state.stanceQuestionMessageId)) &&
+        Boolean(state.stanceLedger && typeof state.stanceLedger === "object" && !Array.isArray(state.stanceLedger)) &&
+        Object.values(state.stanceLedger ?? {}).every(stance => stance === null || isMessageStance(stance)) &&
+        Array.isArray(state.stanceCycleRoles) && state.stanceCycleRoles.every(role => typeof role === "string") &&
+        (state.stableSplitSignature === null || typeof state.stableSplitSignature === "string") &&
+        Number.isInteger(state.stableSplitCycleCount) && state.stableSplitCycleCount >= 0 &&
+        Array.isArray(state.dissentersNeedingTurn) && state.dissentersNeedingTurn.every(role => typeof role === "string") &&
         // G8/G10: fields initializeConversationState always sets must be asserted
         // here (established invariant) — a partial/stale state object missing
         // one is re-initialized instead of limping through the sequence.
@@ -388,6 +541,7 @@ function initializeConversationState(conversationId: number, activeExperts: Expe
         sequenceExpertContents: [],
         roundExperts: selectRoundExperts(activeExperts, userMessage.mentions),
         mentionPairStreak: null,
+        ...resetStanceEvidence(userMessage, activeExperts),
         moderatorNoticeSent: false
     };
     conversationStates.set(conversationId, initialState);
@@ -478,6 +632,13 @@ export async function restorePausedFromSnapshot(
         sequenceExpertContents: [],
         roundExperts: activeExperts,
         mentionPairStreak: null,
+        ...stanceStateForRestoredQuestion(await Promise.resolve().then(() => storage.getConversationMessages(conversationId)).then(messages => messages ?? []).catch(error => {
+            console.error(`Orchestrator: Could not rebuild stance ledger for paused conversation ${conversationId}:`, error);
+            return [];
+        }), activeExperts),
+        stanceCycleRoles: [],
+        stableSplitSignature: null,
+        stableSplitCycleCount: 0,
         moderatorNoticeSent: false,
     };
     conversationStates.set(conversationId, restored);
@@ -544,6 +705,7 @@ export class InteractionOrchestrator {
             farmerJustSpoke: true,
             singleTurnOnly,
             mentionPairStreak: null, // New sequence: mention pair streak starts fresh
+            ...(state.lastUserMessage ? resetStanceEvidence(state.lastUserMessage, state.activeExperts) : {}),
             moderatorNoticeSent: false // New sequence: the G8 degradation notice may fire once more
         });
 
@@ -610,6 +772,7 @@ export class InteractionOrchestrator {
                 sequenceExpertContents: [],
                 roundExperts: [],
                 mentionPairStreak: null,
+                ...resetStanceEvidence(pendingMessage, state.activeExperts),
                 moderatorNoticeSent: false,
                 turnInFlight: false,
                 turnChainScheduled: true
@@ -746,6 +909,21 @@ export class InteractionOrchestrator {
         // guard while it streams (see below) so pause/resume treat it as a
         // real in-flight turn.
         let concludeSynthesisDelivered = false;
+        const streamConclusion = async (conclusionState: ConversationState) => {
+            conclusionState.broadcastFn(this.conversationId, { type: "concluding", conversationId: this.conversationId });
+            updateConversationState(this.conversationId, { turnInFlight: true });
+            try {
+                await generateClosingSynthesis(
+                    this.conversationId,
+                    conclusionState.moderatorExpert,
+                    conclusionState.broadcastFn,
+                    conclusionState.stanceLedger,
+                );
+                concludeSynthesisDelivered = true;
+            } finally {
+                updateConversationState(this.conversationId, { turnInFlight: false });
+            }
+        };
         let selectedMentionRoute: PendingMentionRoute | null = null;
         // These are speakable expert roles only. The system Moderator advises
         // routing but is never a role the chair can select as a speaker.
@@ -842,6 +1020,7 @@ export class InteractionOrchestrator {
                     {
                         turnNumber: Math.min(latestState.totalAutonomousTurnsTaken + 1, latestState.maxAutonomousTurns),
                         turnBudget: latestState.maxAutonomousTurns,
+                        stanceLedger: latestState.stanceLedger,
                     },
                 );
                 latestState = getConversationState(this.conversationId)!;
@@ -857,6 +1036,26 @@ export class InteractionOrchestrator {
                 if (suggestedRole === "Conclude" && state.pendingUserMessage) {
                     suggestedRole = "RoundRobin";
                 }
+                // Give every newly observed dissenter one explicit follow-up
+                // before allowing a Moderator pick or a conclusion to pass.
+                const forcedDissenter = state!.dissentersNeedingTurn.find(role =>
+                    state!.activeExperts.some(expert => expert.role === role) &&
+                    state!.stanceLedger[role]?.stance === "disagree"
+                );
+                if (forcedDissenter && !state.pendingUserMessage) {
+                    suggestedRole = forcedDissenter;
+                } else if (suggestedRole === "Conclude" && !canConcludeWithStanceEvidence(
+                    state.stanceLedger,
+                    state.totalAutonomousTurnsTaken,
+                    state.maxAutonomousTurns,
+                    state.stableSplitCycleCount,
+                    state.stableSplitSignature,
+                )) {
+                    // Keep the room moving. If there is no unaddressed
+                    // dissenter, let the chair continue the roster cycle; a
+                    // later Conclude is rechecked after each completed turn.
+                    suggestedRole = "RoundRobin";
+                }
                 break;
             }
 
@@ -870,14 +1069,7 @@ export class InteractionOrchestrator {
                 }
                 if (suggestedRole === "Conclude") {
                     debugLog(`Orchestrator: Moderator concluded the discussion for ${this.conversationId} — streaming the closing synthesis.`);
-                    state.broadcastFn(this.conversationId, { type: "concluding", conversationId: this.conversationId });
-                    updateConversationState(this.conversationId, { turnInFlight: true });
-                    try {
-                        await generateClosingSynthesis(this.conversationId, moderator, state.broadcastFn);
-                        concludeSynthesisDelivered = true;
-                    } finally {
-                        updateConversationState(this.conversationId, { turnInFlight: false });
-                    }
+                    await streamConclusion(state);
                 } else if (suggestedRole && suggestedRole !== "RoundRobin") {
                     const startIndex = (state.currentExpertIndex + 1) % state.activeExperts.length;
                     for (let i = 0; i < state.activeExperts.length; i++) {
@@ -948,6 +1140,7 @@ export class InteractionOrchestrator {
                 : state.activeExperts[nextExpertIndex]; // Guaranteed to exist now
 
             const currentUserContext = state.pendingUserMessage;
+            let turnQuestionMessageId: number | null = null;
             const priorTurnIndex = state.currentExpertIndex;
             const priorTurnCount = state.totalAutonomousTurnsTaken;
 
@@ -1036,6 +1229,10 @@ export class InteractionOrchestrator {
                         messageId: promptContext.id
                     });
                 }
+                // Match the input context used to form this prompt. A farmer
+                // message that arrives during the stream resets the ledger and
+                // makes this response historical for convergence purposes.
+                turnQuestionMessageId = latestState.stanceQuestionMessageId;
                 const pendingUpdate = latestState.pendingUserMessage === promptContext
                     ? { pendingUserMessage: null }
                     : {};
@@ -1121,10 +1318,16 @@ export class InteractionOrchestrator {
                 if (latestAfterStore) {
                     updateConversationState(this.conversationId, storedExpertMessage.role === "assistant" ? {
                         scheduledFailureAttempts: 0,
-                            pendingMentionRoutes: [
-                                ...latestAfterStore.pendingMentionRoutes,
-                                ...mentionRoutesForMessage(storedExpertMessage.mentions, currentExpert.role, latestAfterStore.activeExperts)
-                            ]
+                        pendingMentionRoutes: [
+                            ...latestAfterStore.pendingMentionRoutes,
+                            ...mentionRoutesForMessage(storedExpertMessage.mentions, currentExpert.role, latestAfterStore.activeExperts)
+                        ],
+                        ...completedTurnStanceUpdates(
+                            latestAfterStore,
+                            currentExpert.role,
+                            storedExpertMessage.stance,
+                            turnQuestionMessageId,
+                        ),
                     } : {});
                 }
                 state.broadcastFn(this.conversationId, {
@@ -1231,6 +1434,9 @@ export class InteractionOrchestrator {
              // its next routed response stays in this same sequence.
              if (currentState.totalAutonomousTurnsTaken >= currentState.maxAutonomousTurns) {
                  debugLog("Orchestrator: Reached max autonomous turns. Setting mode to idle.");
+                 // The cap is a hard stop, but it still records a final
+                 // synthesis with the remaining stance ledger and dissent.
+                 if (!concludeSynthesisDelivered) await streamConclusion(currentState);
                  processingEndedNaturally = true;
              } else if (currentState.pendingUserMessage) {
                  updateConversationState(this.conversationId, {
@@ -1534,6 +1740,7 @@ export async function processMessageTurnBased(
                 farmerJustSpoke: true,
                 singleTurnOnly: false,
                 wasInterrupted: true,
+                ...resetStanceEvidence(userMessage, activeExperts),
                 scheduledFailureAttempts: 0
             });
             broadcastFn(conversationId, { type: "steering" });
@@ -1563,7 +1770,8 @@ export async function processMessageTurnBased(
                 lastUserMessage: userMessage,
                 pendingUserMessage: userMessage,
                 pendingMentionRoutes: [...existingFarmerRoutes, ...newFarmerRoutes, ...existingExpertRoutes],
-                farmerJustSpoke: true
+                farmerJustSpoke: true,
+                ...resetStanceEvidence(userMessage, activeExperts)
             });
             broadcastFn(conversationId, {
                 type: "message_queued",
@@ -1589,6 +1797,7 @@ export async function processMessageTurnBased(
             farmerJustSpoke: true,
             singleTurnOnly: false,
             wasInterrupted: false,
+            ...resetStanceEvidence(userMessage, activeExperts),
             ...(explicitRestart ? { scheduledFailureAttempts: 0 } : {})
         });
         state = getConversationState(conversationId)!;

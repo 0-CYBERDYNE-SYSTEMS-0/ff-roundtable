@@ -77,6 +77,12 @@ const getExpertRingColor = (expertId: number) => {
 };
 
 const NEUTRAL_MENTION_CLASSES = "bg-neutral-100 text-neutral-600 border-neutral-300";
+const STANCE_CHIP_CLASSES = {
+  agree: "bg-emerald-100 text-emerald-800 border-emerald-300/60",
+  disagree: "bg-rose-100 text-rose-800 border-rose-300/60",
+  conditional: "bg-amber-100 text-amber-900 border-amber-300/60",
+  abstain: "bg-neutral-100 text-neutral-700 border-neutral-300",
+} as const;
 
 const findExpertByRole = (experts: Expert[], role: string) =>
   experts.find((expert) => normalizeRoleText(expert.role) === normalizeRoleText(role));
@@ -247,6 +253,48 @@ export default function ChatInterface({
   const latestMentionedRoles = new Set(
     (latestMessage?.mentions ?? []).map((role) => normalizeRoleText(role))
   );
+  // Keep each speaker's latest non-null persisted stance visible in the
+  // Expert Panel. Legacy messages without a stance do not erase a prior one.
+  const latestStanceByExpertId = useMemo(() => {
+    const latest = new Map<number, NonNullable<Message["stance"]>>();
+    for (const message of messages) {
+      if (
+        message.role === "assistant" &&
+        message.expertId !== null &&
+        !message.isSynthesis &&
+        message.stance
+      ) {
+        latest.set(message.expertId, message.stance);
+      }
+    }
+    return latest;
+  }, [messages]);
+
+  const stanceForExpert = (expert: Expert) => {
+    if (["Moderator", "User", "Farmer"].includes(expert.role)) return null;
+    return latestStanceByExpertId.get(expert.id) ?? null;
+  };
+
+  const renderStanceChip = (expert: Expert) => {
+    const stance = stanceForExpert(expert);
+    if (!stance) return null;
+    const label = stance.stance.charAt(0).toUpperCase() + stance.stance.slice(1);
+    return (
+      <span
+        className={`mt-1 inline-flex items-center rounded-full border px-1.5 py-0.5 text-[10px] font-semibold leading-none ${STANCE_CHIP_CLASSES[stance.stance]}`}
+        title={`${stance.position} (confidence ${stance.confidence} of 5)`}
+        aria-label={`${label} stance, confidence ${stance.confidence} of 5`}
+        data-testid={`expert-stance-${expert.id}`}
+      >
+        {label} · {stance.confidence}/5
+      </span>
+    );
+  };
+
+  const stanceTitle = (expert: Expert) => {
+    const stance = stanceForExpert(expert);
+    return stance ? `\nLatest stance: ${stance.stance} (${stance.confidence}/5)` : "";
+  };
   const isExpertMentioned = (expert: Expert) =>
     latestMentionedRoles.has(normalizeRoleText(expert.role));
 
@@ -362,9 +410,31 @@ export default function ChatInterface({
     }),
     [experts]
   );
-  const renderMessageBody = (content: string) => {
+  const synthesisMarkdownComponents = useMemo(
+    () => ({
+      ...markdownComponents,
+      h1: ({ children }: { children?: ReactNode }) => (
+        <h1 className="mb-2 border-b border-amber-200 pb-1 text-base font-bold text-amber-950">{children}</h1>
+      ),
+      h2: ({ children }: { children?: ReactNode }) => (
+        <h2 className="mt-4 mb-1 border-b border-amber-100 pb-1 text-sm font-semibold text-amber-900">{children}</h2>
+      ),
+      h3: ({ children }: { children?: ReactNode }) => (
+        <h3 className="mt-3 mb-1 text-sm font-semibold text-amber-900">{children}</h3>
+      ),
+    }),
+    [markdownComponents]
+  );
+  const renderMessageBody = (content: string, isSynthesis = false) => {
     const prepared = content.replace(/@\[([^\]]+)\]/g, (tag) => `\`${tag}\``);
-    return <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{prepared}</ReactMarkdown>;
+    return (
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={isSynthesis ? synthesisMarkdownComponents : markdownComponents}
+      >
+        {prepared}
+      </ReactMarkdown>
+    );
   };
 
   const getExpertBubbleColor = (expertId: number) => {
@@ -546,7 +616,7 @@ export default function ChatInterface({
                     key={expert.id}
                     onClick={() => handleExpertClick(expert)}
                     className={`w-full p-3 bg-white rounded-lg border border-farm-tan/30 shadow-sm hover:shadow-md hover:border-farm-blue/40 transition-all cursor-pointer text-left group ${isExpertMentioned(expert) ? `animate-pulse ring-2 ${getExpertRingColor(expert.id)}` : ""}`}
-                    title={isExpertMentioned(expert) ? `${expert.name} was mentioned in the latest message` : undefined}
+                    title={`${isExpertMentioned(expert) ? `${expert.name} was mentioned in the latest message` : "Click to edit expert settings"}${stanceTitle(expert)}`}
                   >
                     <div className="flex items-start gap-2">
                       <div className="relative">
@@ -568,6 +638,7 @@ export default function ChatInterface({
                           {expert.name}
                         </p>
                         <p className="text-xs text-neutral-600 truncate">{expert.role}</p>
+                        {renderStanceChip(expert)}
                         {/* G9: this expert was announced as the next turn — chip
                             plus the avatar shimmer above, distinct from the
                             mention pulse (row ring) and typing (green dot). */}
@@ -591,11 +662,11 @@ export default function ChatInterface({
           {expertsCollapsed && (
             <div className="flex-1 p-2 space-y-3 overflow-y-auto">
               {experts.map((expert) => (
-                <button
-                  key={expert.id}
-                  onClick={() => handleExpertClick(expert)}
-                  className={`flex justify-center hover:bg-farm-powder/30 rounded-lg p-1 transition-colors w-full ${isExpertMentioned(expert) ? `animate-pulse ring-2 ${getExpertRingColor(expert.id)}` : ""}`}
-                  title={`${expert.name} - ${expert.role}\nClick to edit settings`}
+                  <button
+                    key={expert.id}
+                    onClick={() => handleExpertClick(expert)}
+                    className={`flex justify-center hover:bg-farm-powder/30 rounded-lg p-1 transition-colors w-full ${isExpertMentioned(expert) ? `animate-pulse ring-2 ${getExpertRingColor(expert.id)}` : ""}`}
+                    title={`${expert.name} - ${expert.role}\nClick to edit settings${stanceTitle(expert)}`}
                 >
                   {/* G9: collapsed panel shows only the up-next avatar shimmer */}
                   <Avatar className={`h-8 w-8 ring-2 hover:ring-farm-blue/40 transition-all ${upNextExpertId === expert.id ? `animate-pulse ${getExpertRingColor(expert.id)}` : "ring-farm-green/20"}`}>
@@ -734,7 +805,7 @@ export default function ChatInterface({
                         </Avatar>
                       </div>
                       <div className="max-w-[85%] space-y-2">
-                        <div className={`${getExpertBubbleColor(expert?.id ?? 0)} rounded-xl p-4 border shadow-sm`}>
+                        <div className={`${getExpertBubbleColor(expert?.id ?? 0)} ${message.isSynthesis ? "border-amber-300/70 bg-amber-50/70 shadow-md" : ""} rounded-xl p-4 border shadow-sm`}>
                           <div className="flex items-center justify-between gap-2 mb-2">
                             <div className="flex items-center gap-2 min-w-0">
                               <p className="text-sm font-semibold text-farm-blue">{speakerName} <span className="text-neutral-600 font-normal">({speakerRole})</span></p>
@@ -749,9 +820,24 @@ export default function ChatInterface({
                             {expert && <ModelBadge modelId={expert.model} size="sm" />}
                           </div>
                           <MentionChips mentions={message.mentions} experts={experts} className="mb-2" />
-                          <div className="markdown-content text-sm leading-relaxed text-neutral-700">
-                            {renderMessageBody(message.content)}
-                          </div>
+                          {message.isSynthesis ? (
+                            <section
+                              aria-label="Council verdict"
+                              data-testid={`council-verdict-${message.id}`}
+                              className="rounded-lg border border-amber-300/60 bg-white/80 p-3 shadow-sm"
+                            >
+                              <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-amber-900">
+                                Council verdict
+                              </h3>
+                              <div className="markdown-content text-sm leading-relaxed text-neutral-700">
+                                {renderMessageBody(message.content, true)}
+                              </div>
+                            </section>
+                          ) : (
+                            <div className="markdown-content text-sm leading-relaxed text-neutral-700">
+                              {renderMessageBody(message.content)}
+                            </div>
+                          )}
                         </div>
                         
                         {/* Render artifacts inline */}

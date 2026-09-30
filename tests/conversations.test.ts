@@ -778,6 +778,7 @@ describe("Conversations & Expert Flows", () => {
           role: "assistant",
           expertName: speaker.name,
           expertRole: speaker.role,
+          stance: { stance: "agree", confidence: 4, position: "The revised topic supports this plan." },
         };
       });
       mockGetExpertResponseStream.mockImplementationOnce((speaker: any, _history: any, reference: string) => {

@@ -58,6 +58,12 @@ export const experts = pgTable("experts", {
   avatarUrl: text("avatar_url"),
 });
 
+export type MessageStance = {
+  stance: "agree" | "disagree" | "conditional" | "abstain";
+  confidence: 1 | 2 | 3 | 4 | 5;
+  position: string;
+};
+
 export const messages = pgTable("messages", {
   id: serial("id").primaryKey(),
   conversationId: integer("conversation_id").notNull().references(() => conversations.id),
@@ -77,6 +83,8 @@ export const messages = pgTable("messages", {
   isSynthesis: boolean("is_synthesis"),
   // G12: links a farmer answer to the open question it resolves.
   answersQuestionId: integer("answers_question_id").references((): AnyPgColumn => openQuestions.id),
+  // G15: latest structured expert stance. Nullable for non-expert/legacy rows.
+  stance: jsonb("stance").$type<MessageStance>(),
   timestamp: timestamp("timestamp").defaultNow(),
 });
 
@@ -213,18 +221,21 @@ export type Expert = typeof experts.$inferSelect;
 
 // drizzle-zod's inferred jsonb shape does not line up with the column's
 // $type<string[]> on the insert path — pin mentions to the canonical type.
-export type InsertMessage = Omit<z.infer<typeof insertMessageSchema>, 'mentions' | 'isSynthesis'> & {
+export type InsertMessage = Omit<z.infer<typeof insertMessageSchema>, 'mentions' | 'isSynthesis' | 'stance'> & {
   mentions?: string[] | null;
   // G5: pinned like mentions so object literals can omit the nullable flag.
   isSynthesis?: boolean | null;
+  // G15: pin the nullable JSON stance type for object literals.
+  stance?: MessageStance | null;
 };
 // Extend Message type to properly type artifacts as Artifact[]
 // (and keep the nullable G4/G5 columns optional for object literals)
-export type Message = Omit<typeof messages.$inferSelect, 'artifacts' | 'mentions' | 'isSynthesis' | 'answersQuestionId'> & {
+export type Message = Omit<typeof messages.$inferSelect, 'artifacts' | 'mentions' | 'isSynthesis' | 'answersQuestionId' | 'stance'> & {
   artifacts?: Artifact[];
   mentions?: string[] | null;
   isSynthesis?: boolean | null;
   answersQuestionId?: number | null;
+  stance?: MessageStance | null;
 };
 
 export type InsertFile = z.infer<typeof insertFileSchema>;

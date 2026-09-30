@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemStorage, PostgresStorage, type IStorage } from "../server/storage";
-import { messages, openQuestions, type Message, type OpenQuestion } from "../shared/schema";
+import { messages, openQuestions, type Message, type MessageStance, type OpenQuestion } from "../shared/schema";
 
 type Predicate = { key: string; value: unknown };
 
@@ -22,6 +22,7 @@ class FakeOpenQuestionDb {
               id: this.nextMessageId++,
               timestamp: new Date(1),
               artifacts: values.artifacts ?? [],
+              stance: values.stance ?? null,
             } as Message;
             this.messages.push(created);
             return [{ ...created }];
@@ -71,6 +72,12 @@ class FakeOpenQuestionDb {
             return {
               limit: async (limit: number) => matching().slice(0, limit).map((row) => ({ ...row })),
               orderBy: async (...orderings: unknown[]) => {
+                if (table === messages) {
+                  if (orderings.length !== 1) throw new Error("Postgres message history must sort by timestamp");
+                  return matching()
+                    .sort((a, b) => (a.timestamp?.getTime() ?? 0) - (b.timestamp?.getTime() ?? 0) || a.id - b.id)
+                    .map((row) => ({ ...row }));
+                }
                 if (orderings.length !== 2) {
                   throw new Error("Postgres open-question listing must sort by createdAt and id");
                 }
@@ -189,6 +196,38 @@ describe.each(storageCases)("%s open question ledger", (_name, makeStorage) => {
     content: "@[User] What information should the farmer provide?\nAssuming it is not yet known.",
     role: "assistant",
     expertRole: "Agronomist",
+  });
+
+  it("round-trips structured stance and maps missing legacy stance to null", async () => {
+    const stance: MessageStance = {
+      stance: "conditional",
+      confidence: 4,
+      position: "Proceed after confirming the drainage plan.",
+    };
+    const withStance = await storage.createMessage({
+      conversationId: 7,
+      userId: null,
+      expertId: 1,
+      content: "I can support this plan if drainage is confirmed.",
+      role: "assistant",
+      expertRole: "Agronomist",
+      stance,
+    });
+    const legacy = await storage.createMessage({
+      conversationId: 7,
+      userId: null,
+      expertId: 2,
+      content: "Legacy message without a stance.",
+      role: "assistant",
+      expertRole: "Soil Scientist",
+    });
+
+    expect(withStance.stance).toEqual(stance);
+    expect(legacy.stance ?? null).toBeNull();
+
+    const history = await storage.getConversationMessages(7);
+    expect(history.find((message) => message.id === withStance.id)?.stance).toEqual(stance);
+    expect(history.find((message) => message.id === legacy.id)?.stance ?? null).toBeNull();
   });
 
   it("creates, lists only open rows, and answers once idempotently", async () => {
