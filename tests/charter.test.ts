@@ -149,6 +149,23 @@ describe("generateSystemPrompt charter injection", () => {
     expect(prompt).toContain("beginning Assuming <reasonable assumption>");
     expect(prompt).toContain("without waiting for the farmer to answer");
   });
+
+  it("adds concise expert cross-talk guidance without changing the Moderator or farmer-question instructions", () => {
+    const prompt = generateSystemPrompt(expert, roles);
+    expect(prompt).toContain("💬 CROSS-TALK");
+    expect(prompt).toContain("I agree with X because");
+    expect(prompt).toContain("I disagree with X on");
+    expect(prompt).toContain("Colleagues (not you): [Crop Specialist]");
+    expect(prompt).toContain("Tag @[Role] only when you need that specialty");
+    expect(prompt).toContain("never tag yourself or force a tag every turn");
+    expect(prompt).toContain("Add new information or an objection instead of repeating settled points");
+    expect(prompt).toContain("@[User] <question>?");
+    expect(prompt).toContain("without waiting for the farmer to answer");
+    expect(prompt).not.toContain("STANCE:");
+
+    const moderatorPrompt = generateSystemPrompt(createMockModerator(null, 1), roles);
+    expect(moderatorPrompt).not.toContain("💬 CROSS-TALK");
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════

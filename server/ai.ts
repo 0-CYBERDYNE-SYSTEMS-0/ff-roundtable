@@ -86,6 +86,16 @@ You are part of a team of experts: [${availableRoles?.join(', ') || 'various rol
     basePrompt += `\nMODERATOR SYSTEM INSTRUCTIONS:\n${expert.systemPrompt.trim()}\n`;
   }
 
+  // G14: keep cross-talk guidance on ordinary expert prompts only; the
+  // Moderator/chair prompt remains unchanged.
+  if (expert.role !== "Moderator") {
+    const colleagueRoles = (availableRoles ?? []).filter(
+      role => role !== expert.role && role !== "Moderator" && role !== "User" && role !== "Farmer",
+    );
+    const colleagues = colleagueRoles.length > 0 ? ` Colleagues (not you): [${colleagueRoles.join(", ")}].` : "";
+    basePrompt += `\n💬 CROSS-TALK: Build on or challenge colleagues by name ("I agree with X because…" / "I disagree with X on…").${colleagues} Tag @[Role] only when you need that specialty or want that expert to defend a point; never tag yourself or force a tag every turn. Add new information or an objection instead of repeating settled points.\n`;
+  }
+
   // Inject farmer's custom instructions for this expert if present
   if (expert.customInstructions?.trim()) {
     basePrompt += `\n📌 CUSTOM INSTRUCTIONS FROM THE FARMER (follow these closely):\n${expert.customInstructions.trim()}\n`;
