@@ -51,6 +51,8 @@ vi.mock("../server/ai", () => ({
   generateInsights: mockGenerateInsights,
   getModeratorNextSpeakerSuggestion: mockGetModeratorNextSpeakerSuggestion,
   generateClosingSynthesis: mockGenerateClosingSynthesis,
+  resolveAuxModel: (moderatorModel: string | null | undefined, firstExpertModel: string | null | undefined) =>
+    moderatorModel?.trim() || process.env.DEFAULT_AUX_MODEL?.trim() || firstExpertModel?.trim() || null,
 }));
 
 import {
@@ -280,11 +282,13 @@ describe("Orchestrator recovery (G7 snapshots)", () => {
   // (a) Kill-mid-round: persisted autonomous snapshot (dead loop)
   // ─────────────────────────────────────────────────────────────────
 
-  it("recovers a persisted autonomous snapshot to idle and starts a normal fresh round", async () => {
+  it.each(["processing_sequential", "autonomous"] as const)(
+    "recovers a persisted %s snapshot to idle and starts a normal fresh round",
+    async (mode) => {
     const conversationId = nextConvId();
     setupFullRound(conversationId);
     persistRow(conversationId, {
-      mode: "autonomous",
+      mode,
       currentExpertIndex: 2,
       totalAutonomousTurnsTaken: 3,
       wasInterrupted: false,
@@ -335,7 +339,8 @@ describe("Orchestrator recovery (G7 snapshots)", () => {
     expect(modes[modes.length - 1]).toBe("idle");
     expect(getConversationState(conversationId)?.mode).toBe("idle");
     expect(assistantCount()).toBe(9);
-  });
+    },
+  );
 
   // ─────────────────────────────────────────────────────────────────
   // (b) Paused restore + implicit resume-and-restart
@@ -382,6 +387,32 @@ describe("Orchestrator recovery (G7 snapshots)", () => {
 
     // The restart ran a full fresh round on the message.
     expect(assistantCount()).toBe(9);
+    expect(getConversationState(conversationId)?.mode).toBe("idle");
+  });
+
+  it("maps a paused processing_sequential phase to autonomous on restore", async () => {
+    const conversationId = nextConvId();
+    setupFullRound(conversationId);
+    persistRow(conversationId, {
+      mode: "paused",
+      currentExpertIndex: 1,
+      totalAutonomousTurnsTaken: 1,
+      wasInterrupted: false,
+      pausedFromMode: "processing_sequential",
+    });
+
+    await processMessageTurnBased(
+      userId,
+      conversationId,
+      createMockMessage(8, "Continue the paused council"),
+      broadcastFn,
+    );
+    await drainFullRound(conversationId);
+
+    expect(persistedSnapshots()[1]).toMatchObject({
+      mode: "paused",
+      pausedFromMode: "autonomous",
+    });
     expect(getConversationState(conversationId)?.mode).toBe("idle");
   });
 

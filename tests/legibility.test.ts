@@ -60,6 +60,8 @@ vi.mock("../server/ai", () => ({
   generateInsights: mockGenerateInsights,
   getModeratorNextSpeakerSuggestion: mockGetModeratorNextSpeakerSuggestion,
   generateClosingSynthesis: mockGenerateClosingSynthesis,
+  resolveAuxModel: (moderatorModel: string | null | undefined, firstExpertModel: string | null | undefined) =>
+    moderatorModel?.trim() || process.env.DEFAULT_AUX_MODEL?.trim() || firstExpertModel?.trim() || null,
 }));
 
 vi.mock("../server/ai-providers", () => ({

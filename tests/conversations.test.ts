@@ -53,6 +53,8 @@ vi.mock("../server/ai", () => ({
   callPerplexityAPI: vi.fn(),
   getExpertResponse: vi.fn(),
   generateInsights: vi.fn(),
+  resolveAuxModel: (moderatorModel: string | null | undefined, firstExpertModel: string | null | undefined) =>
+    moderatorModel?.trim() || process.env.DEFAULT_AUX_MODEL?.trim() || firstExpertModel?.trim() || null,
 }));
 
 import { registerRoutes } from "../server/routes";

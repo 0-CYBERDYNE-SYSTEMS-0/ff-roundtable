@@ -2,9 +2,9 @@
  * G8 — Aux-call hygiene tests
  *
  * Covers:
- *  - resolveAuxModel precedence: Moderator model → DEFAULT_AUX_MODEL → first
- *    expert's model → null; whitespace-only values count as empty; results
- *    are trimmed.
+ *  - G8/G10 resolveAuxModel precedence: configured Moderator model →
+ *    DEFAULT_AUX_MODEL → first expert's model → null; whitespace-only values
+ *    count as empty; results are trimmed.
  *  - Moderator routing degradation: a null verdict (provider failure /
  *    invalid verdict / no resolvable aux model) falls back to round-robin in
  *    roster order and broadcasts exactly ONE "notice" per sequence — even
@@ -49,6 +49,8 @@ vi.mock("../server/ai", () => ({
   generateInsights: mockGenerateInsights,
   getModeratorNextSpeakerSuggestion: mockGetModeratorNextSpeakerSuggestion,
   generateClosingSynthesis: mockGenerateClosingSynthesis,
+  resolveAuxModel: (moderatorModel: string | null | undefined, firstExpertModel: string | null | undefined) =>
+    moderatorModel?.trim() || process.env.DEFAULT_AUX_MODEL?.trim() || firstExpertModel?.trim() || null,
 }));
 
 // G7 snapshot persistence defaults: no stored snapshot, writes succeed.
@@ -106,10 +108,10 @@ function nextConvId(): number {
 }
 
 // ─────────────────────────────────────────────────────────────────
-// G8 — resolveAuxModel (pure resolver, real ai module)
+// G8/G10 — resolveAuxModel (pure resolver, real ai module)
 // ─────────────────────────────────────────────────────────────────
 
-describe("G8 resolveAuxModel", () => {
+describe("G8/G10 resolveAuxModel", () => {
   afterEach(() => {
     vi.unstubAllEnvs();
   });
@@ -121,7 +123,7 @@ describe("G8 resolveAuxModel", () => {
     expect(resolveAuxModel("  mod/model  ", "first/model")).toBe("mod/model");
   });
 
-  it("falls back to DEFAULT_AUX_MODEL when the Moderator has no model", () => {
+  it("uses DEFAULT_AUX_MODEL before the first expert when no Moderator model is configured", () => {
     vi.stubEnv("DEFAULT_AUX_MODEL", "env/default-model");
     expect(resolveAuxModel(null, "first/model")).toBe("env/default-model");
     expect(resolveAuxModel(undefined, "first/model")).toBe("env/default-model");
@@ -176,9 +178,10 @@ describe("G8 moderator degradation notice", () => {
     await waitFor(500);
   });
 
-  // Moderator-council fixture: 4 experts (Moderator speaks last in the
-  // sequential round), immediate unique-content responses so the redundancy
-  // early-stop stays out of play. A full sequential round is 4 turns.
+  // Moderator-council fixture: 3 active experts and a configured Moderator.
+  // The Moderator routes the autonomous extension but does not take an
+  // ordinary expert turn. Unique response content keeps redundancy out of
+  // play.
   function setupModeratorRound(conversationId: number) {
     const roster: Expert[] = [
       createMockExpert(1, "Alice", "Agronomist", conversationId),
@@ -253,9 +256,9 @@ describe("G8 moderator degradation notice", () => {
 
     await waitForIdle();
 
-    // Round-robin order preserved: sequential roster round, then the 2-turn
-    // autonomous extension continues from the top of the roster.
-    expect(turnNames()).toEqual(["Alice", "Bob", "Carol", "Matt", "Alice", "Bob"]);
+    // Round-robin order preserved: three active experts, then the 2-turn
+    // autonomous extension continues from the top of the active roster.
+    expect(turnNames()).toEqual(["Alice", "Bob", "Carol", "Alice", "Bob"]);
 
     // The Moderator was consulted before BOTH autonomous turns and returned
     // null both times — yet the notice went out exactly once.
@@ -291,7 +294,7 @@ describe("G8 moderator degradation notice", () => {
 
     // The Moderator WAS consulted (autonomous extension ran) and answered.
     expect(mockGetModeratorNextSpeakerSuggestion).toHaveBeenCalledTimes(1);
-    expect(turnNames()).toEqual(["Alice", "Bob", "Carol", "Matt", "Alice"]);
+    expect(turnNames()).toEqual(["Alice", "Bob", "Carol", "Alice"]);
     expect(notices()).toHaveLength(0);
     expect(getConversationState(conversationId)!.mode).toBe("idle");
   });
@@ -300,7 +303,7 @@ describe("G8 moderator degradation notice", () => {
     const conversationId = nextConvId();
     const { notices, waitForIdle } = setupModeratorRound(conversationId);
 
-    // Sequence 1: 4 sequential + 1 autonomous turn → one notice.
+    // Sequence 1: 3 sequential + 1 autonomous turn → one notice.
     const userMessage1 = createMockMessage(1, "First question");
     await processMessageTurnBased(userId, conversationId, userMessage1, broadcastFn);
     new InteractionOrchestrator(conversationId).enableAutonomous(1);

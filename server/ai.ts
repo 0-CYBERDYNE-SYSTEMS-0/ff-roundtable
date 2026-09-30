@@ -48,11 +48,25 @@ export interface AIModelResponse {
   citations?: string[];
 }
 
+// AI-facing Moderator identity. A roster Moderator carries its persisted
+// expert row ID; the system Moderator is synthetic and has no expert row.
+export interface ModeratorContext {
+  id: number | null;
+  conversationId: number;
+  name: string;
+  role: "Moderator";
+  model: string | null;
+  systemPrompt: string;
+}
+
 // Generate a system prompt for an expert
 // Pass availableRoles separately, plus optional farm context, weather, and the
 // conversation's council charter (G6 — governs every expert when present).
 export function generateSystemPrompt(
-  expert: Expert,
+  expert:
+    Pick<Expert, "role">
+    & Partial<Pick<Expert, "customInstructions">>
+    & Partial<Pick<ModeratorContext, "systemPrompt">>,
   availableRoles?: string[],
   farmContext?: string,
   weatherContext?: string,
@@ -64,6 +78,13 @@ Always be respectful, helpful, and conversational while maintaining your expert 
 
 You are part of a team of experts: [${availableRoles?.join(', ') || 'various roles'}].
 `;
+
+  // G10: the Moderator context may provide system-level instructions without
+  // needing a persisted Expert row. Keep those instructions on the Moderator
+  // prompt path only; ordinary experts retain their existing prompt behavior.
+  if (expert.role === "Moderator" && expert.systemPrompt?.trim()) {
+    basePrompt += `\nMODERATOR SYSTEM INSTRUCTIONS:\n${expert.systemPrompt.trim()}\n`;
+  }
 
   // Inject farmer's custom instructions for this expert if present
   if (expert.customInstructions?.trim()) {
@@ -872,7 +893,8 @@ export async function generateInsights(conversationId: number, broadcastFn?: (co
     // insights: log and return instead of calling a dead legacy slug.
     const experts = await storage.getConversationExperts(conversationId);
     const moderatorExpert = experts.find(e => e.role === 'Moderator') ?? null;
-    const auxModel = resolveAuxModel(moderatorExpert?.model ?? null, experts[0]?.model ?? null);
+    const firstExpertModel = experts.find(e => e.role !== 'Moderator')?.model ?? null;
+    const auxModel = resolveAuxModel(moderatorExpert?.model ?? null, firstExpertModel);
     if (!auxModel) {
       console.error(`generateInsights: no aux model could be resolved for conversation ${conversationId} (no Moderator model, DEFAULT_AUX_MODEL unset, roster empty) — skipping insights.`);
       return;
@@ -909,21 +931,18 @@ export async function generateInsights(conversationId: number, broadcastFn?: (co
 
 // New function to ask the Moderator who should speak next
 export async function getModeratorNextSpeakerSuggestion(
-  moderatorExpert: Expert,
+  moderatorExpert: ModeratorContext,
   history: Message[],
   availableRoles: string[]
 ): Promise<string | null> {
-    if (moderatorExpert.role !== 'Moderator') {
-        console.warn("Attempted to get speaker suggestion from non-moderator expert.");
-        return null;
-    }
     console.log("Asking Moderator for next speaker suggestion...");
     // G6: the speak-next / conclude judgment is charter-aware — the Moderator
     // weighs the charter's goal and stop criteria.
     const conversation = await storage.getConversation(moderatorExpert.conversationId);
     const charter = conversation?.charter ?? null;
-    const moderatorSystemPrompt = generateSystemPrompt(moderatorExpert, availableRoles, undefined, undefined, charter);
-    let queryPrompt = `Based on the recent conversation history, which expert should speak next to best advance the discussion towards resolution or new insights? The available expert roles are: [${availableRoles.join(', ')}]. If the discussion has already run its course — the question is resolved and another turn would only repeat the table — answer 'Conclude' instead. Respond only with the role name, 'Conclude', or 'RoundRobin'.`;
+    const expertRoles = availableRoles.filter(role => role !== "Moderator");
+    const moderatorSystemPrompt = generateSystemPrompt(moderatorExpert, expertRoles, undefined, undefined, charter);
+    let queryPrompt = `Based on the recent conversation history, which expert should speak next to best advance the discussion towards resolution or new insights? The available expert roles are: [${expertRoles.join(', ')}]. If the discussion has already run its course — the question is resolved and another turn would only repeat the table — answer 'Conclude' instead. Respond only with the role name, 'Conclude', or 'RoundRobin'.`;
     if (charter?.trim()) {
       queryPrompt += ` The council charter in your instructions states this roundtable's goal and stop criteria — factor them into the decision.`;
     }
@@ -943,7 +962,8 @@ export async function getModeratorNextSpeakerSuggestion(
     // Nothing resolvable behaves exactly like a failed call: return null so
     // the orchestrator falls back to round-robin.
     const experts = await storage.getConversationExperts(moderatorExpert.conversationId);
-    const auxModel = resolveAuxModel(moderatorExpert.model, experts[0]?.model ?? null);
+    const firstExpertModel = experts.find(expert => expert.role !== "Moderator")?.model ?? null;
+    const auxModel = resolveAuxModel(moderatorExpert.model, firstExpertModel);
     if (!auxModel) {
         console.error("getModeratorNextSpeakerSuggestion: no aux model could be resolved (Moderator has no model, DEFAULT_AUX_MODEL unset, roster empty) — falling back to round-robin.");
         return null;
@@ -953,7 +973,7 @@ export async function getModeratorNextSpeakerSuggestion(
         const response = await callOpenRouterAPI(messages, auxModel);
         const suggestedRole = response.message.content.trim().replace(/\.$/, '');
         
-        if (availableRoles.includes(suggestedRole) || suggestedRole === 'RoundRobin' || suggestedRole === 'Conclude') {
+        if (expertRoles.includes(suggestedRole) || suggestedRole === 'RoundRobin' || suggestedRole === 'Conclude') {
              console.log(`Moderator suggested next speaker: ${suggestedRole}`);
             return suggestedRole;
         } else {
@@ -981,17 +1001,19 @@ export async function getModeratorNextSpeakerSuggestion(
  */
 export async function generateClosingSynthesis(
   conversationId: number,
-  moderatorExpert: Expert,
+  moderatorExpert: ModeratorContext,
   broadcastFn: (convId: number, data: any) => void
 ): Promise<void> {
   console.log(`[SYNTHESIS] Generating closing synthesis for conversation ${conversationId}`);
   try {
     const history = await storage.getConversationMessages(conversationId);
     const experts = await storage.getConversationExperts(conversationId);
-    const availableRoles = experts.map(e => e.role);
+    const availableRoles = experts.map(e => e.role).filter(role => role !== "Moderator");
     const conversation = await storage.getConversation(conversationId);
     const charter = conversation?.charter ?? null;
     const systemPrompt = generateSystemPrompt(moderatorExpert, availableRoles, undefined, undefined, charter);
+    const firstExpertModel = experts.find(expert => expert.role !== "Moderator")?.model ?? null;
+    const closingModel = resolveAuxModel(moderatorExpert.model, firstExpertModel);
 
     const closingPrompt = `The discussion has run its course and the council is closing. Write the council's closing synthesis for the farmer:
 - Summarize the consensus the council reached and the concrete decisions made.
@@ -1016,9 +1038,13 @@ Be brief — a farmer should be able to act on this in one read.` + (charter?.tr
       expertRole: "Moderator",
     });
 
-    // G8 amendment: no hardcoded fallback slug. The model column is NOT NULL;
-    // an (unexpected) empty value surfaces through the honest-error path below.
-    const response = await callOpenRouterAPIStream(messages, moderatorExpert.model, (token) => {
+    // G8/G10: resolve the Moderator's model, configured aux fallback, then
+    // first council expert. If none is available, the honest-error path below
+    // persists and broadcasts a closing failure instead of using a dead slug.
+    if (!closingModel) {
+      throw new Error("No auxiliary model could be resolved for the Moderator closing synthesis.");
+    }
+    const response = await callOpenRouterAPIStream(messages, closingModel, (token) => {
       broadcastFn(conversationId, {
         type: "expert_stream_token",
         expertId: moderatorExpert.id,
@@ -1034,7 +1060,7 @@ Be brief — a farmer should be able to act on this in one read.` + (charter?.tr
       content,
       role: "assistant",
       expertName: moderatorExpert.name,
-      expertRole: "Moderator",
+      expertRole: moderatorExpert.role,
       isSynthesis: true,
       mentions: extractMentions(content, availableRoles),
     });
@@ -1065,7 +1091,7 @@ Be brief — a farmer should be able to act on this in one read.` + (charter?.tr
         content: errorMsg,
         role: "assistant",
         expertName: moderatorExpert.name,
-        expertRole: "Moderator",
+        expertRole: moderatorExpert.role,
         isSynthesis: true,
       });
     } catch (storeError) {

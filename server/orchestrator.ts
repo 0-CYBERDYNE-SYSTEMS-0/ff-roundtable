@@ -1,5 +1,6 @@
 import { storage } from "./storage";
-import { getExpertResponse, getExpertResponseStream, generateInsights, getModeratorNextSpeakerSuggestion, generateClosingSynthesis } from "./ai";
+import { getExpertResponse, getExpertResponseStream, generateInsights, getModeratorNextSpeakerSuggestion, generateClosingSynthesis, resolveAuxModel } from "./ai";
+import type { ModeratorContext } from "./ai";
 import { shouldStopForRedundancy, REDUNDANCY_STOP_SIMILARITY_THRESHOLD } from "./text-similarity";
 import type { InsertMessage, Expert, Message, File, OrchestratorSnapshot } from "@shared/schema";
 
@@ -19,7 +20,10 @@ type InteractionMode =
 
 interface ConversationState {
     conversationId: number;
+    // Speakable, persisted experts only. The system Moderator has its own
+    // context below and must never occupy a turn index or roster position.
     activeExperts: Expert[];
+    moderatorExpert: ModeratorContext;
     currentExpertIndex: number;
     lastUserMessage: Message | null; // Store the user message that triggered the sequence
     mode: InteractionMode;
@@ -132,12 +136,21 @@ export function isUsableConversationState(state: ConversationState | undefined):
         typeof state.broadcastFn === "function" &&
         Array.isArray(state.activeExperts) &&
         state.activeExperts.length > 0 &&
+        state.activeExperts.every(e => e.role !== "Moderator") &&
+        state.moderatorExpert &&
+        state.moderatorExpert.conversationId === state.conversationId &&
+        state.moderatorExpert.role === "Moderator" &&
+        (state.moderatorExpert.id === null || Number.isInteger(state.moderatorExpert.id)) &&
+        typeof state.moderatorExpert.name === "string" &&
+        (state.moderatorExpert.model === null || typeof state.moderatorExpert.model === "string") &&
+        typeof state.moderatorExpert.systemPrompt === "string" &&
         Number.isInteger(state.currentExpertIndex) &&
         ["idle", "processing_sequential", "paused", "autonomous"].includes(state.mode) &&
         typeof state.lastProgressAt === "number" &&
         Array.isArray(state.sequenceExpertContents) &&
         Array.isArray(state.roundExperts) &&
-        // G8: fields initializeConversationState always sets must be asserted
+        state.roundExperts.every(e => e.role !== "Moderator") &&
+        // G8/G10: fields initializeConversationState always sets must be asserted
         // here (established invariant) — a partial/stale state object missing
         // one is re-initialized instead of limping through the sequence.
         typeof state.moderatorNoticeSent === "boolean"
@@ -149,9 +162,44 @@ export function isUsableConversationState(state: ConversationState | undefined):
 // addressed experts in roster order (selective wake). Stale/unknown mentions
 // that filter to nothing fall back to the full roster.
 function selectRoundExperts(activeExperts: Expert[], mentions?: string[] | null): Expert[] {
-    if (!mentions || mentions.length === 0) return activeExperts;
-    const narrowed = activeExperts.filter(e => mentions.includes(e.role));
-    return narrowed.length > 0 ? narrowed : activeExperts;
+    // Be defensive at the round boundary too: the Moderator is a chair, not
+    // an expert that a user mention can wake into the speaking round.
+    const speakableExperts = activeExperts.filter(e => e.role !== "Moderator");
+    if (!mentions || mentions.length === 0) return speakableExperts;
+    const narrowed = speakableExperts.filter(e => mentions.includes(e.role));
+    return narrowed.length > 0 ? narrowed : speakableExperts;
+}
+
+/**
+ * Split the persisted roster into ordinary speakers and the separate system
+ * chair context. A configured Moderator row supplies chair identity/model
+ * settings but never enters the speaker collection. Without one, create an
+ * in-memory chair context; it is never inserted into storage.
+ */
+function partitionExpertRoster(conversationId: number, roster: Expert[]): {
+    activeExperts: Expert[];
+    moderatorExpert: ModeratorContext;
+} {
+    const activeExperts = roster.filter(expert => expert.role !== "Moderator");
+    const configuredModerator = roster.find(expert => expert.role === "Moderator");
+    const moderatorExpert: ModeratorContext = configuredModerator
+        ? {
+            id: configuredModerator.id,
+            conversationId,
+            name: configuredModerator.name,
+            role: "Moderator",
+            model: configuredModerator.model,
+            systemPrompt: configuredModerator.systemPrompt,
+        }
+        : {
+            id: null,
+            conversationId,
+            name: "Moderator",
+            role: "Moderator",
+            model: resolveAuxModel(null, activeExperts[0]?.model ?? null),
+            systemPrompt: "You are the system Moderator, chairing the agricultural roundtable and routing discussion among its experts.",
+        };
+    return { activeExperts, moderatorExpert };
 }
 
 // History scans must never mistake a stored failure for a real expert
@@ -188,7 +236,7 @@ function updateConversationState(
     // the persisted fields actually changed. No-op updates, lastProgressAt
     // ticks, internal-only flips (turnInFlight/turnChainScheduled) and
     // in-memory-only changes (sequenceExpertContents/mentionPairStreak/
-    // roundExperts) never write.
+    // roundExperts/moderatorExpert) never write.
     const previousSnapshot = buildSnapshot(previousState);
     const nextSnapshot = buildSnapshot(newState);
     if (snapshotsDiffer(previousSnapshot, nextSnapshot)) {
@@ -212,11 +260,12 @@ function updateConversationState(
 }
 
 // Initialize state when orchestrator is first needed for a conversation
-function initializeConversationState(conversationId: number, experts: Expert[], userMessage: Message, broadcastFn: (convId: number, data: any) => void): ConversationState {
-    const defaultMaxAutonomousTurns = experts.length * 2; // Example: Allow 2 full rounds by default
+function initializeConversationState(conversationId: number, activeExperts: Expert[], moderatorExpert: ModeratorContext, userMessage: Message, broadcastFn: (convId: number, data: any) => void): ConversationState {
+    const defaultMaxAutonomousTurns = activeExperts.length * 2; // Two turns per speakable expert; the chair is not a turn
     const initialState: ConversationState = {
         conversationId,
-        activeExperts: experts,
+        activeExperts,
+        moderatorExpert,
         currentExpertIndex: -1, 
         lastUserMessage: userMessage,
         mode: "idle", 
@@ -231,7 +280,7 @@ function initializeConversationState(conversationId: number, experts: Expert[], 
         turnChainScheduled: false,
         lastProgressAt: Date.now(),
         sequenceExpertContents: [],
-        roundExperts: selectRoundExperts(experts, userMessage.mentions),
+        roundExperts: selectRoundExperts(activeExperts, userMessage.mentions),
         mentionPairStreak: null,
         moderatorNoticeSent: false
     };
@@ -281,6 +330,11 @@ export async function restorePausedFromSnapshot(
         debugLog(`Orchestrator: no experts for conversation ${conversationId} — cannot restore the paused state.`);
         return false;
     }
+    const { activeExperts, moderatorExpert } = partitionExpertRoster(conversationId, experts);
+    if (activeExperts.length === 0) {
+        debugLog(`Orchestrator: no speakable experts for conversation ${conversationId} — cannot restore the paused state.`);
+        return false;
+    }
 
     // Fresh in-memory state, then restore the pause through the shared update
     // path so the paused state_update broadcast and the persisted paused
@@ -291,7 +345,8 @@ export async function restorePausedFromSnapshot(
     // snapshot was parked in.
     const restored: ConversationState = {
         conversationId,
-        activeExperts: experts,
+        activeExperts,
+        moderatorExpert,
         currentExpertIndex: Number.isInteger(storedSnapshot.currentExpertIndex)
             ? storedSnapshot.currentExpertIndex
             : -1,
@@ -299,7 +354,7 @@ export async function restorePausedFromSnapshot(
         mode: "idle",
         broadcastFn,
         isAutonomousEnabled: true,
-        maxAutonomousTurns: experts.length * 2, // same cap as a fresh sequence
+        maxAutonomousTurns: activeExperts.length * 2, // same cap as a fresh sequence; the chair is not a turn
         totalAutonomousTurnsTaken: Number.isInteger(storedSnapshot.totalAutonomousTurnsTaken)
             ? storedSnapshot.totalAutonomousTurnsTaken
             : 0,
@@ -309,7 +364,7 @@ export async function restorePausedFromSnapshot(
         turnChainScheduled: false,
         lastProgressAt: Date.now(),
         sequenceExpertContents: [],
-        roundExperts: experts,
+        roundExperts: activeExperts,
         mentionPairStreak: null,
         moderatorNoticeSent: false,
     };
@@ -317,7 +372,7 @@ export async function restorePausedFromSnapshot(
     updateConversationState(conversationId, {
         mode: "paused",
         pausedFromMode: storedSnapshot.pausedFromMode === "processing_sequential" || storedSnapshot.pausedFromMode === "autonomous"
-            ? storedSnapshot.pausedFromMode
+            ? "autonomous"
             : null
     });
     debugLog(`Orchestrator: restored paused state for ${conversationId} from snapshot (from ${storedSnapshot.pausedFromMode ?? "unknown"}, index ${restored.currentExpertIndex}).`);
@@ -464,6 +519,8 @@ export class InteractionOrchestrator {
         // guard while it streams (see below) so pause/resume treat it as a
         // real in-flight turn.
         let concludeSynthesisDelivered = false;
+        // These are speakable expert roles only. The system Moderator advises
+        // routing but is never a role the chair can select as a speaker.
         const availableRoles = state.activeExperts.map(e => e.role);
 
         if (state.mode === "autonomous") {
@@ -511,9 +568,9 @@ export class InteractionOrchestrator {
                 // Any turn not routed by a mention breaks the pair streak.
                 updateConversationState(this.conversationId, { mentionPairStreak: null });
             }
-            const moderator = state.activeExperts.find(e => e.role === 'Moderator');
+            const moderator = state.moderatorExpert;
             let suggestedRole: string | null = null;
-            if (!mentionRouted && moderator) {
+            if (!mentionRouted) {
                  suggestedRole = await getModeratorNextSpeakerSuggestion(moderator, history.slice(-6), availableRoles);
                 // G8 aux hygiene: a null verdict (provider failure, invalid
                 // response, or no resolvable aux model) degrades to
@@ -532,7 +589,7 @@ export class InteractionOrchestrator {
                 }
             }
             if (!mentionRouted) {
-                if (suggestedRole === 'Conclude' && moderator) {
+                if (suggestedRole === 'Conclude') {
                     // G5 semantic conclusion: the Moderator called the round.
                     // The closing synthesis runs as one full streamed turn,
                     // inline in this chain (no new scheduling site — the
@@ -955,9 +1012,14 @@ export async function processMessageTurnBased(
     try {
         // Get current state and experts
         let state = getConversationState(conversationId);
-        const experts = await storage.getConversationExperts(conversationId);
-        if (!experts || experts.length === 0) {
+        const roster = await storage.getConversationExperts(conversationId);
+        if (!roster || roster.length === 0) {
             debugLog(`No experts assigned to conversation ${conversationId}. Cannot process message.`);
+            return;
+        }
+        const { activeExperts, moderatorExpert } = partitionExpertRoster(conversationId, roster);
+        if (activeExperts.length === 0) {
+            debugLog(`No speakable experts assigned to conversation ${conversationId}. Cannot process message.`);
             return;
         }
 
@@ -993,12 +1055,12 @@ export async function processMessageTurnBased(
             }
             // Initialize if first message for this server instance, or recover
             // from a state left behind by a crashed loop.
-            state = initializeConversationState(conversationId, experts, userMessage, broadcastFn);
+            state = initializeConversationState(conversationId, activeExperts, moderatorExpert, userMessage, broadcastFn);
             if (storedSnapshot?.mode === "paused") {
                 updateConversationState(conversationId, {
                     mode: "paused",
                     pausedFromMode: storedSnapshot.pausedFromMode === "processing_sequential" || storedSnapshot.pausedFromMode === "autonomous"
-                        ? storedSnapshot.pausedFromMode
+                        ? "autonomous"
                         : null
                 });
                 state = getConversationState(conversationId)!;
@@ -1012,7 +1074,8 @@ export async function processMessageTurnBased(
                   // finish its current expert and immediately restart this message.
                  updateConversationState(conversationId, {
                      wasInterrupted: true,
-                     activeExperts: experts, // Update experts list potentially
+                     activeExperts, // Refresh only the speakable expert roster.
+                     moderatorExpert,
                      lastUserMessage: userMessage // Store newest user message
                  });
                  // Tell the client its message was accepted as steering: the
@@ -1022,7 +1085,8 @@ export async function processMessageTurnBased(
             } else {
                 // If not busy (idle or paused), just update state normally
                  updateConversationState(conversationId, {
-                    activeExperts: experts,
+                    activeExperts,
+                    moderatorExpert,
                     lastUserMessage: userMessage,
                     wasInterrupted: false // Ensure flag is clear if we were idle/paused
                 });
@@ -1074,4 +1138,4 @@ export async function processMessageTurnBased(
         console.error(`Error in processMessageTurnBased for conversation ${conversationId}:`, error);
         broadcastFn(conversationId, { type: "error", message: "Failed to process message." });
     }
-} 
+}

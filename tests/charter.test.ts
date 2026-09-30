@@ -67,6 +67,7 @@ import {
   getModeratorNextSpeakerSuggestion,
   generateClosingSynthesis,
 } from "../server/ai";
+import type { ModeratorContext } from "../server/ai";
 import type { Expert } from "../shared/schema";
 
 const CHARTER = "Goal: pick a cover crop for the north field. Stop when a seed and a planting week are chosen.";
@@ -80,6 +81,17 @@ function createMockExpert(id: number, conversationId: number, name: string, role
     model: "deepseek/deepseek-v3:free",
     systemPrompt: `You are ${name}, a ${role}.`,
     avatarUrl: null,
+  };
+}
+
+function createMockModerator(id: number | null, conversationId: number, name = "Moderator"): ModeratorContext {
+  return {
+    id,
+    conversationId,
+    name,
+    role: "Moderator",
+    model: "deepseek/deepseek-v3:free",
+    systemPrompt: `You are ${name}, chairing the council.`,
   };
 }
 
@@ -148,7 +160,7 @@ describe("getModeratorNextSpeakerSuggestion charter awareness", () => {
       title: "Chartered roundtable",
       charter: CHARTER,
     });
-    const moderator = createMockExpert(901, convo.id, "Matt", "Moderator");
+    const moderator = createMockModerator(901, convo.id, "Matt");
 
     const suggestion = await getModeratorNextSpeakerSuggestion(moderator, [], [
       "Soil Scientist",
@@ -168,7 +180,7 @@ describe("getModeratorNextSpeakerSuggestion charter awareness", () => {
       title: "Chartered roundtable 2",
       charter: CHARTER,
     });
-    const moderator = createMockExpert(902, convo.id, "Matt", "Moderator");
+    const moderator = createMockModerator(902, convo.id, "Matt");
 
     await getModeratorNextSpeakerSuggestion(moderator, [], ["Soil Scientist", "Moderator"]);
 
@@ -181,7 +193,7 @@ describe("getModeratorNextSpeakerSuggestion charter awareness", () => {
   it("stays charter-free when the conversation has no charter", async () => {
     const convo = await storage.createConversation({ userId: 1, title: "Unchartered" });
     expect(convo.charter ?? null).toBeNull();
-    const moderator = createMockExpert(903, convo.id, "Matt", "Moderator");
+    const moderator = createMockModerator(903, convo.id, "Matt");
 
     await getModeratorNextSpeakerSuggestion(moderator, [], ["Soil Scientist", "Moderator"]);
 
@@ -211,7 +223,7 @@ describe("generateClosingSynthesis charter awareness", () => {
       title: "Chartered closing",
       charter: CHARTER,
     });
-    const moderator = createMockExpert(904, convo.id, "Matt", "Moderator");
+    const moderator = createMockModerator(904, convo.id, "Matt");
     const broadcastFn = vi.fn();
 
     await generateClosingSynthesis(convo.id, moderator, broadcastFn);
@@ -228,11 +240,29 @@ describe("generateClosingSynthesis charter awareness", () => {
     // The synthesis lifecycle completed normally.
     const done = broadcastFn.mock.calls.map((c) => c[1]).find((d) => d.type === "expert_stream_done");
     expect(done?.message?.isSynthesis).toBe(true);
+    expect(done?.message?.expertRole).toBe("Moderator");
+    expect(done?.message?.expertId).toBe(904);
+  });
+
+  it("stores a synthetic Moderator synthesis without an expert foreign key", async () => {
+    const convo = await storage.createConversation({ userId: 1, title: "System Moderator closing" });
+    const moderator = createMockModerator(null, convo.id);
+
+    await generateClosingSynthesis(convo.id, moderator, vi.fn());
+
+    const messages = await storage.getConversationMessages(convo.id);
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      expertId: null,
+      expertName: "Moderator",
+      expertRole: "Moderator",
+      isSynthesis: true,
+    });
   });
 
   it("keeps the closing prompt charter-free when no charter exists", async () => {
     const convo = await storage.createConversation({ userId: 1, title: "Unchartered closing" });
-    const moderator = createMockExpert(905, convo.id, "Matt", "Moderator");
+    const moderator = createMockModerator(905, convo.id, "Matt");
 
     await generateClosingSynthesis(convo.id, moderator, vi.fn());
 

@@ -75,8 +75,8 @@ export default function HomePage() {
   });
 
   // Streaming state
-  const [streamingMessages, setStreamingMessages] = useState<Map<number, { content: string; expertName: string; expertRole: string }>>(new Map());
-  const [typingExpertIds, setTypingExpertIds] = useState<Set<number>>(new Set());
+  const [streamingMessages, setStreamingMessages] = useState<Map<number | null, { content: string; expertName: string; expertRole: string }>>(new Map());
+  const [typingExpertIds, setTypingExpertIds] = useState<Set<number | null>>(new Set());
 
   // G9: expert announced by the server's next_speaker broadcast — the Expert
   // Panel shows an "up next" treatment on their row until their stream starts

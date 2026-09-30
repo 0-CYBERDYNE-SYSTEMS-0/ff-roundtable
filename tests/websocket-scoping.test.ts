@@ -51,6 +51,8 @@ vi.mock("../server/ai", () => ({
   generateInsights: mockGenerateInsights,
   getModeratorNextSpeakerSuggestion: mockGetModeratorNextSpeakerSuggestion,
   generateClosingSynthesis: vi.fn().mockResolvedValue(undefined),
+  resolveAuxModel: (moderatorModel: string | null | undefined, firstExpertModel: string | null | undefined) =>
+    moderatorModel?.trim() || process.env.DEFAULT_AUX_MODEL?.trim() || firstExpertModel?.trim() || null,
 }));
 
 import { registerRoutes } from "../server/routes";
@@ -467,12 +469,13 @@ describe("WebSocket scoping (G3)", () => {
       });
       expect(res.status).toBe(200);
 
-      // The sequence leaves paused (state_update) and streams turns to its
-      // natural idle end: the rebuilt paused state is genuinely resumable.
+      // A legacy pausedFromMode of processing_sequential resumes as
+      // autonomous: the dead sequential chain is not revived.
       await nextMessage(
         client,
-        (m) => m.type === "state_update" && m.conversationId === convo.id && m.mode === "processing_sequential",
+        (m) => m.type === "state_update" && m.conversationId === convo.id && m.mode === "autonomous",
       );
+      await nextMessage(client, (m) => m.type === "expert_stream_start" && m.conversationId === convo.id);
       await nextMessage(client, (m) => m.type === "expert_stream_start" && m.conversationId === convo.id);
       await waitForConversationMode(convo.id, "idle");
       await nextMessage(

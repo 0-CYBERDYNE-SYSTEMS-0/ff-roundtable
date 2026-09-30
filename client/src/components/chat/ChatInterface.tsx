@@ -30,8 +30,8 @@ interface ChatInterfaceProps {
   user: User | null;
   insights: any[];
   visualizations: any[];
-  streamingMessages?: Map<number, { content: string; expertName: string; expertRole: string }>;
-  typingExpertIds?: Set<number>;
+  streamingMessages?: Map<number | null, { content: string; expertName: string; expertRole: string }>;
+  typingExpertIds?: Set<number | null>;
   // G9: expert announced as the next turn — shown as an "up next" preview in
   // the Expert Panel until their stream starts. Distinct from the mention
   // pulse (whole-row ring) and the typing indicator (green ping dot).
@@ -653,24 +653,29 @@ export default function ChatInterface({
                   );
                 }
                 
-                // Expert message
-                if (message.expertId) {
-                  const expert = findExpert(message.expertId);
-                  if (!expert) return null;
+                // Expert message, including the synthetic Moderator's closing
+                // synthesis (which deliberately has no expert foreign key).
+                const isSystemModeratorSynthesis =
+                  message.expertId === null && message.expertRole === "Moderator" && message.isSynthesis === true;
+                if (message.expertId !== null || isSystemModeratorSynthesis) {
+                  const expert = message.expertId !== null ? findExpert(message.expertId) : null;
+                  if (!expert && !isSystemModeratorSynthesis) return null;
+                  const speakerName = expert?.name ?? message.expertName ?? "Moderator";
+                  const speakerRole = expert?.role ?? message.expertRole ?? "Moderator";
 
                   return (
                     <div key={message.id} className="flex items-start mb-4">
                       <div className="flex-shrink-0 mr-3">
                         <Avatar className="h-10 w-10 ring-2 ring-farm-green/20">
-                          <AvatarImage src={expert.avatarUrl || ""} alt={expert.name} />
-                          <AvatarFallback className="bg-farm-green text-white font-semibold">{expert.name.charAt(0)}</AvatarFallback>
+                          <AvatarImage src={expert?.avatarUrl || ""} alt={speakerName} />
+                          <AvatarFallback className="bg-farm-green text-white font-semibold">{speakerName.charAt(0)}</AvatarFallback>
                         </Avatar>
                       </div>
                       <div className="max-w-[85%] space-y-2">
-                        <div className={`${getExpertBubbleColor(message.expertId)} rounded-xl p-4 border shadow-sm`}>
+                        <div className={`${getExpertBubbleColor(expert?.id ?? 0)} rounded-xl p-4 border shadow-sm`}>
                           <div className="flex items-center justify-between gap-2 mb-2">
                             <div className="flex items-center gap-2 min-w-0">
-                              <p className="text-sm font-semibold text-farm-blue">{expert.name} <span className="text-neutral-600 font-normal">({expert.role})</span></p>
+                              <p className="text-sm font-semibold text-farm-blue">{speakerName} <span className="text-neutral-600 font-normal">({speakerRole})</span></p>
                               {/* G5: the Moderator's closing synthesis of the roundtable */}
                               {message.isSynthesis && (
                                 <span className="inline-flex items-center gap-1 rounded-full border border-amber-300/60 bg-amber-100 px-2 py-0.5 text-xs font-medium leading-none text-amber-800 flex-shrink-0">
@@ -679,7 +684,7 @@ export default function ChatInterface({
                                 </span>
                               )}
                             </div>
-                            <ModelBadge modelId={expert.model} size="sm" />
+                            {expert && <ModelBadge modelId={expert.model} size="sm" />}
                           </div>
                           <MentionChips mentions={message.mentions} experts={experts} className="mb-2" />
                           <div className="markdown-content text-sm leading-relaxed text-neutral-700">
@@ -711,15 +716,17 @@ export default function ChatInterface({
           
           {/* Streaming messages (tokens arriving in real-time) */}
           {Array.from(streamingMessages.entries()).map(([expertId, stream]) => {
-            const expert = findExpert(expertId);
-            if (!expert) return null;
+            const expert = expertId === null ? null : findExpert(expertId);
+            const isSystemModerator = expertId === null && stream.expertRole === "Moderator";
+            if (!expert && !isSystemModerator) return null;
+            const speakerName = expert?.name ?? stream.expertName;
             return (
-              <div key={`stream-${expertId}`} className="flex items-start mb-4">
+              <div key={`stream-${expertId ?? "system-moderator"}`} className="flex items-start mb-4">
                 <div className="flex-shrink-0 mr-3">
                   <div className="relative">
                     <Avatar className="h-10 w-10 ring-2 ring-farm-green/20">
-                      <AvatarImage src={expert.avatarUrl || ""} alt={expert.name} />
-                      <AvatarFallback className="bg-farm-green text-white font-semibold">{expert.name.charAt(0)}</AvatarFallback>
+                      <AvatarImage src={expert?.avatarUrl || ""} alt={speakerName} />
+                      <AvatarFallback className="bg-farm-green text-white font-semibold">{speakerName.charAt(0)}</AvatarFallback>
                     </Avatar>
                     <span className="absolute -bottom-0.5 -right-0.5 flex h-3 w-3">
                       <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-farm-green opacity-75"></span>
@@ -728,12 +735,12 @@ export default function ChatInterface({
                   </div>
                 </div>
                 <div className="max-w-[85%] space-y-2">
-                  <div className={`${getExpertBubbleColor(expertId)} rounded-xl p-4 border shadow-sm`}>
+                  <div className={`${getExpertBubbleColor(expert?.id ?? 0)} rounded-xl p-4 border shadow-sm`}>
                     <div className="flex items-center justify-between mb-2">
                       <p className="text-sm font-semibold text-farm-blue">
                         {stream.expertName} <span className="text-neutral-600 font-normal">({stream.expertRole})</span>
                       </p>
-                      <ModelBadge modelId={expert.model} size="sm" />
+                      {expert && <ModelBadge modelId={expert.model} size="sm" />}
                     </div>
                     <div className="markdown-content text-sm leading-relaxed text-neutral-700">
                       {stream.content ? (
