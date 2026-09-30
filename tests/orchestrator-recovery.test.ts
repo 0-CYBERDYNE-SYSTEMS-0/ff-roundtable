@@ -3,16 +3,16 @@
  *
  * Covers:
  *  - Snapshot persistence at TURN BOUNDARIES ONLY: a full mocked round writes
- *    exactly the semantic transitions idle → processing_sequential (start)
- *    → per-turn boundaries → autonomous → idle (natural end), and internal
- *    flips (turnInFlight, turnChainScheduled, streak/history mutations) never
- *    write. Writes are serialized per conversation in enqueue order.
+ *    exactly the semantic transitions idle → autonomous (start) → per-turn
+ *    boundaries → idle (natural end), and internal flips (turnInFlight,
+ *    turnChainScheduled, streak/history mutations) never write. Writes are
+ *    serialized per conversation in enqueue order.
  *  - Cold-start reconstruction: a persisted autonomous snapshot (a dead loop
  *    from before a restart) recovers to idle with a warning and starts a
- *    normal fresh round — no steering, correct event order.
+ *    direct-autonomous run — no queued-message event, correct event order.
  *  - Cold-start paused restore: a persisted paused snapshot restores the
- *    paused badge (state_update), then the message takes the implicit
- *    resume-and-restart path and the round starts on it.
+ *    paused badge (state_update), then a message resumes from the saved mode
+ *    and sequence counters in place.
  *  - Snapshot write failures never break the turn loop.
  *
  * Uses vitest with vi.mock for storage and AI dependencies, mirroring the
@@ -51,11 +51,15 @@ vi.mock("../server/ai", () => ({
   generateInsights: mockGenerateInsights,
   getModeratorNextSpeakerSuggestion: mockGetModeratorNextSpeakerSuggestion,
   generateClosingSynthesis: mockGenerateClosingSynthesis,
+  resolveAuxModel: (moderatorModel: string | null | undefined, firstExpertModel: string | null | undefined) =>
+    moderatorModel?.trim() || process.env.DEFAULT_AUX_MODEL?.trim() || firstExpertModel?.trim() || null,
 }));
 
 import {
+  InteractionOrchestrator,
   getConversationState,
   processMessageTurnBased,
+  restorePausedFromSnapshot,
 } from "../server/orchestrator";
 import type { Expert, Message } from "../shared/schema";
 
@@ -84,6 +88,7 @@ function createMockMessage(id: number, content: string): Message {
     expertRole: null,
     artifacts: [],
     mentions: null,
+    stance: null,
     timestamp: new Date(),
   };
 }
@@ -125,8 +130,8 @@ describe("Orchestrator recovery (G7 snapshots)", () => {
   });
 
   // Full-round fixtures: 3 experts, immediate unique-content responses, so a
-  // complete round is 3 sequential turns + 6 autonomous turns (experts * 2)
-  // with no redundancy early-stop and no mention routing.
+  // fresh direct-autonomous run is 6 turns (experts * 2) with no redundancy
+  // early-stop and no mention routing.
   function setupFullRound(conversationId: number) {
     mockGetConversationExperts.mockResolvedValue(
       experts.map((e) => ({ ...e, conversationId })),
@@ -155,18 +160,25 @@ describe("Orchestrator recovery (G7 snapshots)", () => {
       expertRole: expert.role,
       artifacts: [],
     }));
+    return { messages };
   }
 
   // A persisted conversation row with the given snapshot (or none).
-  function persistRow(conversationId: number, orchestratorState: unknown) {
+  function persistRow(conversationId: number, orchestratorState: unknown, turnBudget?: number | null) {
     mockGetConversation.mockResolvedValue({
       id: conversationId,
       userId,
       title: "Recovered conversation",
       charter: null,
       orchestratorState,
+      ...(turnBudget !== undefined && { turnBudget }),
       createdAt: new Date(),
     });
+  }
+
+  async function startSixTurnRun(conversationId: number, message: Message) {
+    await processMessageTurnBased(userId, conversationId, message, broadcastFn);
+    new InteractionOrchestrator(conversationId).enableAutonomous(6);
   }
 
   // Snapshots handed to storage.updateConversation, in call order.
@@ -183,28 +195,25 @@ describe("Orchestrator recovery (G7 snapshots)", () => {
   const assistantCount = () =>
     mockCreateMessage.mock.calls.filter((c) => (c[0] as any)?.role === "assistant").length;
 
-  // Wait until the full 9-turn round settled back to idle, then let trailing
-  // snapshot writes (microtask-chained) land.
-  async function drainFullRound(conversationId: number) {
+  // Wait until the expected remaining autonomous turns settle back to idle,
+  // then let trailing snapshot writes (microtask-chained) land.
+  async function drainAutonomousRun(conversationId: number, expectedAssistantTurns = 6) {
     const deadline = Date.now() + 8000;
     while (Date.now() < deadline) {
       const s = getConversationState(conversationId);
-      if (s && s.mode === "idle" && assistantCount() >= 9) break;
+      if (s && s.mode === "idle" && assistantCount() >= expectedAssistantTurns) break;
       await waitFor(10);
     }
     await waitFor(200);
   }
 
-  // The exact turn-boundary write sequence of one full round:
-  // init (idle) → sequence start (ps) → 3 per-turn boundaries (ps) →
-  // sequential→autonomous transition → 6 autonomous turn boundaries →
-  // natural end (idle). Nothing else writes.
+  // The exact write sequence of one fresh six-turn run: init (idle) →
+  // autonomous start → explicit cap update to six → 6 turn boundaries →
+  // natural end (idle). Both the cap change and turn boundaries are semantic
+  // snapshot changes; internal-only flips still never write.
   const FULL_ROUND_SNAPSHOT_MODES = [
     "idle",
-    "processing_sequential",
-    "processing_sequential",
-    "processing_sequential",
-    "processing_sequential",
+    "autonomous",
     "autonomous",
     "autonomous",
     "autonomous",
@@ -241,13 +250,8 @@ describe("Orchestrator recovery (G7 snapshots)", () => {
       return undefined;
     });
 
-    await processMessageTurnBased(
-      userId,
-      conversationId,
-      createMockMessage(3, "Roundtable, go"),
-      broadcastFn,
-    );
-    await drainFullRound(conversationId);
+    await startSixTurnRun(conversationId, createMockMessage(3, "Roundtable, go"));
+    await drainAutonomousRun(conversationId);
 
     const modes = persistedSnapshots().map((s) => s.mode);
     expect(modes).toEqual(FULL_ROUND_SNAPSHOT_MODES);
@@ -258,21 +262,84 @@ describe("Orchestrator recovery (G7 snapshots)", () => {
     expect(events).toEqual(expectedEvents);
   });
 
-  it("cold-starts normally when no snapshot row exists", async () => {
+  it("cold-starts directly in autonomous mode when no snapshot row exists", async () => {
     const conversationId = nextConvId();
     setupFullRound(conversationId);
     // beforeEach default: getConversation → undefined (no row at all)
 
-    await processMessageTurnBased(
-      userId,
-      conversationId,
-      createMockMessage(4, "Fresh start"),
-      broadcastFn,
-    );
-    await drainFullRound(conversationId);
+    await startSixTurnRun(conversationId, createMockMessage(4, "Fresh start"));
+    await drainAutonomousRun(conversationId);
 
     expect(mockGetConversation).toHaveBeenCalledWith(conversationId);
     expect(persistedSnapshots().map((s) => s.mode)).toEqual(FULL_ROUND_SNAPSHOT_MODES);
+    expect(getConversationState(conversationId)?.mode).toBe("idle");
+  });
+
+  it.each([
+    ["missing", undefined, 25],
+    ["saved numeric", 17, 17],
+    ["let it run", null, 100],
+    ["legacy zero", 0, 100],
+    ["over-ceiling stored value", 140, 100],
+  ] as const)("initializes the runtime budget from %s conversation setting", async (_label, savedBudget, expectedBudget) => {
+    const conversationId = nextConvId();
+    setupFullRound(conversationId);
+    persistRow(conversationId, null, savedBudget);
+
+    await processMessageTurnBased(userId, conversationId, createMockMessage(40, "Budget initialization"), broadcastFn);
+    // Park before the first setImmediate turn so this assertion covers the
+    // initialized setting without running an entire 100-turn sequence.
+    new InteractionOrchestrator(conversationId).pause();
+
+    expect(getConversationState(conversationId)?.maxAutonomousTurns).toBe(expectedBudget);
+    await waitFor(30);
+  });
+
+  it("enforces the saved numeric budget as the runtime expert-turn ceiling", async () => {
+    const conversationId = nextConvId();
+    setupFullRound(conversationId);
+    persistRow(conversationId, null, 2);
+
+    await processMessageTurnBased(userId, conversationId, createMockMessage(41, "Use the saved budget"), broadcastFn);
+    await drainAutonomousRun(conversationId, 2);
+
+    expect(assistantCount()).toBe(2);
+    expect(getConversationState(conversationId)?.mode).toBe("idle");
+    expect(getConversationState(conversationId)?.maxAutonomousTurns).toBe(2);
+  });
+
+  it("lets the council run under the hard 100-turn ceiling when the saved budget is null", async () => {
+    const conversationId = nextConvId();
+    setupFullRound(conversationId);
+    persistRow(conversationId, null, null);
+
+    await processMessageTurnBased(userId, conversationId, createMockMessage(42, "Let it run"), broadcastFn);
+    await drainAutonomousRun(conversationId, 100);
+
+    expect(assistantCount()).toBe(100);
+    expect(getConversationState(conversationId)?.mode).toBe("idle");
+    expect(getConversationState(conversationId)?.maxAutonomousTurns).toBe(100);
+  });
+
+  it("passes the upcoming turn position and effective budget to the Moderator", async () => {
+    const conversationId = nextConvId();
+    setupFullRound(conversationId);
+    persistRow(conversationId, null, 2);
+    mockGetModeratorNextSpeakerSuggestion.mockResolvedValue("Conclude");
+
+    await processMessageTurnBased(userId, conversationId, createMockMessage(43, "Route by budget"), broadcastFn);
+    await drainAutonomousRun(conversationId, 1);
+
+    expect(mockGetModeratorNextSpeakerSuggestion.mock.calls[0]?.[4]).toEqual({
+      turnNumber: 1,
+      turnBudget: 2,
+      stanceLedger: { Agronomist: null, "Soil Scientist": null, "Weather Expert": null },
+    });
+    expect(mockGetModeratorNextSpeakerSuggestion.mock.calls[1]?.[4]).toEqual({
+      turnNumber: 2,
+      turnBudget: 2,
+      stanceLedger: { Agronomist: null, "Soil Scientist": null, "Weather Expert": null },
+    });
     expect(getConversationState(conversationId)?.mode).toBe("idle");
   });
 
@@ -280,11 +347,13 @@ describe("Orchestrator recovery (G7 snapshots)", () => {
   // (a) Kill-mid-round: persisted autonomous snapshot (dead loop)
   // ─────────────────────────────────────────────────────────────────
 
-  it("recovers a persisted autonomous snapshot to idle and starts a normal fresh round", async () => {
+  it.each(["processing_sequential", "autonomous"] as const)(
+    "recovers a persisted %s snapshot to idle and starts a direct-autonomous run",
+    async (mode) => {
     const conversationId = nextConvId();
     setupFullRound(conversationId);
     persistRow(conversationId, {
-      mode: "autonomous",
+      mode,
       currentExpertIndex: 2,
       totalAutonomousTurnsTaken: 3,
       wasInterrupted: false,
@@ -294,16 +363,11 @@ describe("Orchestrator recovery (G7 snapshots)", () => {
 
     let warnedAboutDeadLoop = false;
     try {
-      await processMessageTurnBased(
-        userId,
-        conversationId,
-        createMockMessage(5, "Hello after the crash"),
-        broadcastFn,
-      );
+      await startSixTurnRun(conversationId, createMockMessage(5, "Hello after the crash"));
       warnedAboutDeadLoop = warnSpy.mock.calls.some((args) =>
         args.join(" ").includes("Recovering to idle"),
       );
-      await drainFullRound(conversationId);
+      await drainAutonomousRun(conversationId);
     } finally {
       warnSpy.mockRestore();
     }
@@ -320,28 +384,52 @@ describe("Orchestrator recovery (G7 snapshots)", () => {
     const updates = stateUpdates(conversationId);
     expect(updates[0]).toMatchObject({ mode: "idle", isAutonomousEnabled: true });
 
-    // No steering event: the message started a fresh round, it did not
-    // interrupt a live sequence.
+    // No queue event: the message arrived into an idle recovered state.
     expect(
       broadcastFn.mock.calls.some(
-        (c) => c[0] === conversationId && (c[1] as any)?.type === "steering",
+        (c) => c[0] === conversationId && (c[1] as any)?.type === "message_queued",
       ),
     ).toBe(false);
 
-    // Normal fresh round ran to completion: sequential → autonomous → idle.
+    // The message starts autonomous directly, with no sequential phase.
     const modes = updates.map((u) => u.mode);
-    expect(modes).toContain("processing_sequential");
+    expect(modes).not.toContain("processing_sequential");
     expect(modes).toContain("autonomous");
     expect(modes[modes.length - 1]).toBe("idle");
     expect(getConversationState(conversationId)?.mode).toBe("idle");
-    expect(assistantCount()).toBe(9);
+    expect(assistantCount()).toBe(6);
+    },
+  );
+
+  it("recovers a dead autonomous snapshot to idle while retaining its settings", async () => {
+    const conversationId = nextConvId();
+    setupFullRound(conversationId);
+    persistRow(conversationId, {
+      mode: "autonomous",
+      currentExpertIndex: 2,
+      totalAutonomousTurnsTaken: 3,
+      wasInterrupted: false,
+      pausedFromMode: null,
+      isAutonomousEnabled: false,
+      maxAutonomousTurns: 8,
+    }, 25);
+
+    await processMessageTurnBased(userId, conversationId, createMockMessage(44, "Continue after recovery"), broadcastFn);
+    await drainAutonomousRun(conversationId, 1);
+
+    expect(getConversationState(conversationId)).toMatchObject({
+      mode: "idle",
+      isAutonomousEnabled: false,
+      maxAutonomousTurns: 8,
+    });
+    expect(assistantCount()).toBe(1);
   });
 
   // ─────────────────────────────────────────────────────────────────
-  // (b) Paused restore + implicit resume-and-restart
+  // (b) Paused restore + resume in place
   // ─────────────────────────────────────────────────────────────────
 
-  it("restores a persisted paused snapshot, then implicitly resumes and restarts on the message", async () => {
+  it("restores a persisted paused snapshot, then resumes in place on the message", async () => {
     const conversationId = nextConvId();
     setupFullRound(conversationId);
     persistRow(conversationId, {
@@ -352,25 +440,18 @@ describe("Orchestrator recovery (G7 snapshots)", () => {
       pausedFromMode: "autonomous",
     });
 
-    await processMessageTurnBased(
-      userId,
-      conversationId,
-      createMockMessage(6, "Waking the council"),
-      broadcastFn,
-    );
-    await drainFullRound(conversationId);
+    await startSixTurnRun(conversationId, createMockMessage(6, "Waking the council"));
+    await drainAutonomousRun(conversationId, 4);
 
     const updates = stateUpdates(conversationId);
 
     // 1. idle   — initializeConversationState broadcast
-    // 2. paused — restored via updateConversationState (client badge shows
-    //             Paused after the restart, with pausedFromMode "autonomous")
-    // 3. idle   — the implicit resume-and-restart reset
-    // 4. processing_sequential — the round started on the message
+    // 2. paused    — restored via updateConversationState
+    // 3. autonomous — resumed in place; mode and counters are not reset
     expect(updates[0]).toMatchObject({ mode: "idle" });
     expect(updates[1]).toMatchObject({ mode: "paused" });
-    expect(updates[2]).toMatchObject({ mode: "idle" });
-    expect(updates[3]).toMatchObject({ mode: "processing_sequential" });
+    expect(updates[2]).toMatchObject({ mode: "autonomous" });
+    expect(updates.map((update) => update.mode)).not.toContain("processing_sequential");
     expect(updates[updates.length - 1]).toMatchObject({ mode: "idle" });
 
     // The restored paused state was itself persisted (and the round then
@@ -378,10 +459,121 @@ describe("Orchestrator recovery (G7 snapshots)", () => {
     const modes = persistedSnapshots().map((s) => s.mode);
     expect(modes[0]).toBe("idle");
     expect(modes[1]).toBe("paused");
+    expect(persistedSnapshots()[2]).toMatchObject({
+      mode: "autonomous",
+      currentExpertIndex: 1,
+      totalAutonomousTurnsTaken: 2,
+    });
     expect(modes[modes.length - 1]).toBe("idle");
 
-    // The restart ran a full fresh round on the message.
-    expect(assistantCount()).toBe(9);
+    // Two prior autonomous turns remain counted; only the remaining four run.
+    expect(assistantCount()).toBe(4);
+    expect(getConversationState(conversationId)?.mode).toBe("idle");
+  });
+
+  it("round-trips saved autonomy and turn budget through a paused snapshot", async () => {
+    const conversationId = nextConvId();
+    setupFullRound(conversationId);
+    persistRow(conversationId, {
+      mode: "paused",
+      currentExpertIndex: 1,
+      totalAutonomousTurnsTaken: 2,
+      wasInterrupted: false,
+      pausedFromMode: "autonomous",
+      isAutonomousEnabled: false,
+      maxAutonomousTurns: 44,
+    }, 12);
+
+    expect(await restorePausedFromSnapshot(conversationId, broadcastFn)).toBe(true);
+    const restored = getConversationState(conversationId)!;
+    expect(restored.mode).toBe("paused");
+    expect(restored.isAutonomousEnabled).toBe(false);
+    // The paused snapshot records the effective configured cap and wins over
+    // the conversation row's current default (which can differ after a save).
+    expect(restored.maxAutonomousTurns).toBe(44);
+
+    await waitFor(30);
+    expect(persistedSnapshots().at(-1)).toMatchObject({
+      mode: "paused",
+      isAutonomousEnabled: false,
+      maxAutonomousTurns: 44,
+    });
+  });
+
+  it("restores legacy paused snapshots without G13 settings using safe defaults", async () => {
+    const conversationId = nextConvId();
+    setupFullRound(conversationId);
+    persistRow(conversationId, {
+      mode: "paused",
+      currentExpertIndex: 0,
+      totalAutonomousTurnsTaken: 1,
+      wasInterrupted: false,
+      pausedFromMode: "autonomous",
+    });
+
+    expect(await restorePausedFromSnapshot(conversationId, broadcastFn)).toBe(true);
+    expect(getConversationState(conversationId)).toMatchObject({
+      mode: "paused",
+      isAutonomousEnabled: true,
+      maxAutonomousTurns: 25,
+    });
+  });
+
+  it("fails closed on cold-restored stance evidence without question provenance", async () => {
+    const conversationId = nextConvId();
+    const { messages } = setupFullRound(conversationId);
+    messages.push(
+      { ...createMockMessage(1, "Older question"), conversationId },
+      { ...createMockMessage(2, "Newer question"), conversationId },
+      {
+        id: 3,
+        conversationId,
+        expertId: 1,
+        userId: null,
+        content: "Late answer to the older question.",
+        role: "assistant",
+        expertName: "Alice",
+        expertRole: "Agronomist",
+        artifacts: [],
+        mentions: null,
+        isSynthesis: null,
+        answersQuestionId: null,
+        stance: { stance: "agree", confidence: 4, position: "Old question supports this." },
+        timestamp: new Date(),
+      },
+    );
+    persistRow(conversationId, {
+      mode: "paused",
+      currentExpertIndex: 0,
+      totalAutonomousTurnsTaken: 1,
+      wasInterrupted: false,
+      pausedFromMode: "autonomous",
+    });
+
+    expect(await restorePausedFromSnapshot(conversationId, broadcastFn)).toBe(true);
+    const state = getConversationState(conversationId)!;
+    expect(state.stanceQuestionMessageId).toBe(2);
+    expect(state.stanceLedger.Agronomist).toBeNull();
+  });
+
+  it("maps a paused processing_sequential phase to autonomous on restore", async () => {
+    const conversationId = nextConvId();
+    setupFullRound(conversationId);
+    persistRow(conversationId, {
+      mode: "paused",
+      currentExpertIndex: 1,
+      totalAutonomousTurnsTaken: 1,
+      wasInterrupted: false,
+      pausedFromMode: "processing_sequential",
+    });
+
+    await startSixTurnRun(conversationId, createMockMessage(8, "Continue the paused council"));
+    await drainAutonomousRun(conversationId, 5);
+
+    expect(persistedSnapshots()[1]).toMatchObject({
+      mode: "paused",
+      pausedFromMode: "autonomous",
+    });
     expect(getConversationState(conversationId)?.mode).toBe("idle");
   });
 
@@ -396,19 +588,14 @@ describe("Orchestrator recovery (G7 snapshots)", () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     try {
-      await processMessageTurnBased(
-        userId,
-        conversationId,
-        createMockMessage(7, "The round must survive"),
-        broadcastFn,
-      );
-      await drainFullRound(conversationId);
+      await startSixTurnRun(conversationId, createMockMessage(7, "The round must survive"));
+      await drainAutonomousRun(conversationId);
     } finally {
       errorSpy.mockRestore();
     }
 
     expect(getConversationState(conversationId)?.mode).toBe("idle");
-    expect(assistantCount()).toBe(9); // full round still ran
+    expect(assistantCount()).toBe(6); // full autonomous run still ran
     expect(persistedSnapshots().length).toBeGreaterThan(0); // writes were attempted
   });
 
@@ -428,24 +615,19 @@ describe("Orchestrator recovery (G7 snapshots)", () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     try {
-      await processMessageTurnBased(
-        userId,
-        conversationId,
-        createMockMessage(8, "The chain must not poison"),
-        broadcastFn,
-      );
-      await drainFullRound(conversationId);
+      await startSixTurnRun(conversationId, createMockMessage(8, "The chain must not poison"));
+      await drainAutonomousRun(conversationId);
     } finally {
       errorSpy.mockRestore();
     }
 
-    // Every snapshot write of the full round — including writes #2 and #3 —
-    // reached storage: the exact 13-write turn-boundary sequence, unbroken.
+    // Every snapshot write of the autonomous run — including writes #2 and
+    // #3 — reached storage: the exact turn-boundary sequence, unbroken.
     expect(mockUpdateConversation).toHaveBeenCalledTimes(FULL_ROUND_SNAPSHOT_MODES.length);
     expect(persistedSnapshots().map((s) => s.mode)).toEqual(FULL_ROUND_SNAPSHOT_MODES);
 
     // The round itself was unaffected by the failed write.
     expect(getConversationState(conversationId)?.mode).toBe("idle");
-    expect(assistantCount()).toBe(9);
+    expect(assistantCount()).toBe(6);
   });
 });

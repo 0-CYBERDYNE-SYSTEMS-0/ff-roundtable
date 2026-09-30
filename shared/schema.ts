@@ -1,4 +1,4 @@
-import { pgTable, text, serial, integer, boolean, timestamp, json, jsonb } from "drizzle-orm/pg-core";
+import { pgTable, pgEnum, text, serial, integer, boolean, timestamp, json, jsonb, uniqueIndex, type AnyPgColumn } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -24,7 +24,11 @@ export interface OrchestratorSnapshot {
   totalAutonomousTurnsTaken: number;
   wasInterrupted: boolean;
   pausedFromMode: string | null;
+  isAutonomousEnabled?: boolean;
+  maxAutonomousTurns?: number;
 }
+
+export const openQuestionStatus = pgEnum("open_question_status", ["open", "answered"]);
 
 export const conversations = pgTable("conversations", {
   id: serial("id").primaryKey(),
@@ -37,6 +41,9 @@ export const conversations = pgTable("conversations", {
   charter: text("charter"),
   // G7: last known orchestrator state, written at turn boundaries only.
   orchestratorState: jsonb("orchestrator_state").$type<OrchestratorSnapshot>(),
+  // G13: optional maximum number of turns for the next autonomous run.
+  // Nullable disables the cap; new conversations default to 25 turns.
+  turnBudget: integer("turn_budget").default(25),
   createdAt: timestamp("created_at").defaultNow(),
 });
 
@@ -50,6 +57,12 @@ export const experts = pgTable("experts", {
   customInstructions: text("custom_instructions"),
   avatarUrl: text("avatar_url"),
 });
+
+export type MessageStance = {
+  stance: "agree" | "disagree" | "conditional" | "abstain";
+  confidence: 1 | 2 | 3 | 4 | 5;
+  position: string;
+};
 
 export const messages = pgTable("messages", {
   id: serial("id").primaryKey(),
@@ -68,8 +81,29 @@ export const messages = pgTable("messages", {
   // G5: true for the Moderator's closing synthesis message that ends a
   // roundtable ('Conclude'). Nullable: legacy rows have no value.
   isSynthesis: boolean("is_synthesis"),
+  // G12: links a farmer answer to the open question it resolves.
+  answersQuestionId: integer("answers_question_id").references((): AnyPgColumn => openQuestions.id),
+  // G15: latest structured expert stance. Nullable for non-expert/legacy rows.
+  stance: jsonb("stance").$type<MessageStance>(),
   timestamp: timestamp("timestamp").defaultNow(),
 });
+
+// G12: durable ledger of explicit questions raised by experts. The message
+// and answer links preserve provenance while the unique key makes repeated
+// parsing of the same message idempotent.
+export const openQuestions = pgTable("open_questions", {
+  id: serial("id").primaryKey(),
+  conversationId: integer("conversation_id").notNull().references(() => conversations.id),
+  messageId: integer("message_id").notNull().references(() => messages.id),
+  expertRole: text("expert_role").notNull(),
+  question: text("question").notNull(),
+  assumption: text("assumption"),
+  status: openQuestionStatus("status").notNull().default("open"),
+  answerMessageId: integer("answer_message_id").references(() => messages.id),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({
+  messageQuestionUnique: uniqueIndex("open_questions_message_question_unique").on(table.messageId, table.question),
+}));
 
 export const files = pgTable("files", {
   id: serial("id").primaryKey(),
@@ -162,6 +196,13 @@ export const insertInsightSchema = createInsertSchema(insights).omit({
   createdAt: true,
 });
 
+export const insertOpenQuestionSchema = createInsertSchema(openQuestions, {
+  status: z.enum(["open", "answered"]).optional(),
+}).omit({
+  id: true,
+  createdAt: true,
+});
+
 export const insertFarmProfileSchema = createInsertSchema(farmProfiles).omit({
   id: true,
   createdAt: true,
@@ -180,17 +221,21 @@ export type Expert = typeof experts.$inferSelect;
 
 // drizzle-zod's inferred jsonb shape does not line up with the column's
 // $type<string[]> on the insert path — pin mentions to the canonical type.
-export type InsertMessage = Omit<z.infer<typeof insertMessageSchema>, 'mentions' | 'isSynthesis'> & {
+export type InsertMessage = Omit<z.infer<typeof insertMessageSchema>, 'mentions' | 'isSynthesis' | 'stance'> & {
   mentions?: string[] | null;
   // G5: pinned like mentions so object literals can omit the nullable flag.
   isSynthesis?: boolean | null;
+  // G15: pin the nullable JSON stance type for object literals.
+  stance?: MessageStance | null;
 };
 // Extend Message type to properly type artifacts as Artifact[]
 // (and keep the nullable G4/G5 columns optional for object literals)
-export type Message = Omit<typeof messages.$inferSelect, 'artifacts' | 'mentions' | 'isSynthesis'> & {
+export type Message = Omit<typeof messages.$inferSelect, 'artifacts' | 'mentions' | 'isSynthesis' | 'answersQuestionId' | 'stance'> & {
   artifacts?: Artifact[];
   mentions?: string[] | null;
   isSynthesis?: boolean | null;
+  answersQuestionId?: number | null;
+  stance?: MessageStance | null;
 };
 
 export type InsertFile = z.infer<typeof insertFileSchema>;
@@ -198,6 +243,9 @@ export type File = typeof files.$inferSelect;
 
 export type InsertInsight = z.infer<typeof insertInsightSchema>;
 export type Insight = typeof insights.$inferSelect;
+
+export type InsertOpenQuestion = z.infer<typeof insertOpenQuestionSchema>;
+export type OpenQuestion = typeof openQuestions.$inferSelect;
 
 export type InsertFarmProfile = z.infer<typeof insertFarmProfileSchema>;
 export type FarmProfile = typeof farmProfiles.$inferSelect;

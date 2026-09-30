@@ -29,10 +29,11 @@ function normalizeRole(role: string): string {
 /**
  * Extract the roles mentioned in `content`, resolved against `knownRoles`.
  * Returns canonical role names (spelled as in the roster), in order of first
- * appearance, deduped, filtered to the roster. Empty roster -> [].
+ * appearance, deduped, and filtered to the roster. The reserved farmer token
+ * is always returned as "User", even when that role is not in the roster.
  */
 export function extractMentions(content: string, knownRoles: string[]): string[] {
-  if (!content || knownRoles.length === 0) return [];
+  if (!content) return [];
 
   // Lookup by normalized name; the first spelling in the roster wins on dupes.
   const roleByNorm = new Map<string, string>();
@@ -60,8 +61,13 @@ export function extractMentions(content: string, knownRoles: string[]): string[]
     if (rest.startsWith("[")) {
       const close = rest.indexOf("]");
       if (close === -1) continue; // unterminated "@[..."
-      const canonical = roleByNorm.get(normalizeRole(rest.slice(1, close)));
-      if (canonical) addRole(canonical);
+      const normalized = normalizeRole(rest.slice(1, close));
+      if (normalized === "user" || normalized === "farmer") {
+        addRole("User");
+      } else {
+        const canonical = roleByNorm.get(normalized);
+        if (canonical) addRole(canonical);
+      }
       i += close + 1; // skip past the bracketed tag
       continue;
     }
@@ -91,4 +97,54 @@ export function extractMentions(content: string, knownRoles: string[]): string[]
   }
 
   return found;
+}
+
+export interface FarmerQuestion {
+  question: string;
+  assumption: string;
+}
+
+function stripOptionalBullet(line: string): string {
+  return line.trim().replace(/^[-*+]\s+/, "").trim();
+}
+
+/**
+ * Extract non-blocking farmer questions from expert response lines.
+ *
+ * Each pair must have the form `@[User] <question ending ?>` followed
+ * immediately by `Assuming <assumption>`. `@[Farmer]` is an accepted alias;
+ * Markdown bullet markers are optional. Malformed pairs are skipped, and
+ * exact duplicate extracted pairs are returned only once in source order.
+ */
+export function extractFarmerQuestions(content: string): FarmerQuestion[] {
+  if (!content) return [];
+
+  const lines = content.split(/\r?\n/);
+  const questions: FarmerQuestion[] = [];
+  const seenPairs = new Set<string>();
+
+  for (let i = 0; i < lines.length - 1; i++) {
+    const questionLine = stripOptionalBullet(lines[i]);
+    const questionMatch = questionLine.match(/^@\[\s*(?:user|farmer)\s*\]\s+(.+?)\s*$/i);
+    if (!questionMatch) continue;
+
+    const question = questionMatch[1].trim();
+    if (!question || question === "?" || !question.endsWith("?")) continue;
+
+    const assumptionLine = stripOptionalBullet(lines[i + 1]);
+    const assumptionMatch = assumptionLine.match(/^Assuming\s+(.+?)\s*$/);
+    if (!assumptionMatch) continue;
+
+    const assumption = assumptionMatch[1].trim();
+    if (!assumption) continue;
+
+    const pairKey = JSON.stringify([question, assumption]);
+    if (!seenPairs.has(pairKey)) {
+      seenPairs.add(pairKey);
+      questions.push({ question, assumption });
+    }
+    i++; // The immediately following line belongs to this question pair.
+  }
+
+  return questions;
 }

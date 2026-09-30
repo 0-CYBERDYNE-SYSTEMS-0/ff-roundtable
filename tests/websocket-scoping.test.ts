@@ -51,6 +51,8 @@ vi.mock("../server/ai", () => ({
   generateInsights: mockGenerateInsights,
   getModeratorNextSpeakerSuggestion: mockGetModeratorNextSpeakerSuggestion,
   generateClosingSynthesis: vi.fn().mockResolvedValue(undefined),
+  resolveAuxModel: (moderatorModel: string | null | undefined, firstExpertModel: string | null | undefined) =>
+    moderatorModel?.trim() || process.env.DEFAULT_AUX_MODEL?.trim() || firstExpertModel?.trim() || null,
 }));
 
 import { registerRoutes } from "../server/routes";
@@ -157,6 +159,24 @@ async function addExpert(baseUrl: string, cookie: string, conversationId: number
   });
   expect(res.status).toBe(201);
   return res.json();
+}
+
+async function createOpenQuestion(conversationId: number, question: string) {
+  const sourceMessage = await storage.createMessage({
+    conversationId,
+    userId: null,
+    expertId: null,
+    content: `@[User] ${question} Assuming the north field is first.`,
+    role: "assistant",
+    expertRole: "Agronomist",
+  });
+  return storage.createOpenQuestion({
+    conversationId,
+    messageId: sourceMessage.id,
+    expertRole: "Agronomist",
+    question,
+    assumption: "Assuming the north field is first.",
+  });
 }
 
 function waitForConversationMode(conversationId: number, mode: string, timeoutMs = 5000): Promise<void> {
@@ -324,6 +344,35 @@ describe("WebSocket scoping (G3)", () => {
     }
   });
 
+  it("forwards open-question status updates only to sockets subscribed to that conversation", async () => {
+    const subscribedQuestion = await createOpenQuestion(convoA1.id, "Which field should be planted first?");
+    const subscribedAnswer = await api(
+      baseUrl,
+      "POST",
+      `/api/protected/conversations/${convoA1.id}/open-questions/${subscribedQuestion.id}/answer`,
+      { cookie: cookieA, body: { content: "Plant the north field first." } },
+    );
+    expect(subscribedAnswer.status).toBe(201);
+    const delivered = await nextMessage(
+      clientA,
+      (m) => m.type === "open_questions_updated" && m.conversationId === convoA1.id,
+    );
+    expect(delivered).toEqual({ type: "open_questions_updated", conversationId: convoA1.id });
+
+    const unsubscribedQuestion = await createOpenQuestion(convoA2.id, "Which crop should be planted first?");
+    const unsubscribedAnswer = await api(
+      baseUrl,
+      "POST",
+      `/api/protected/conversations/${convoA2.id}/open-questions/${unsubscribedQuestion.id}/answer`,
+      { cookie: cookieA, body: { content: "Plant corn first." } },
+    );
+    expect(unsubscribedAnswer.status).toBe(201);
+    await waitFor(150);
+    expect(clientA.received.some(
+      (m) => m.type === "open_questions_updated" && m.conversationId === convoA2.id,
+    )).toBe(false);
+  });
+
   it("replays orchestrator state on resubscribe (reconnect path)", async () => {
     // convoA1's round finished earlier; its idle state persists server-side.
     expect(getConversationState(convoA1.id)?.mode).toBe("idle");
@@ -388,6 +437,72 @@ describe("WebSocket scoping (G3)", () => {
       }
     } finally {
       (storage.sessionStore as any).get = originalGet;
+    }
+  });
+
+  it("delivers queued and picked-up farmer-message events only to subscribed sockets", async () => {
+    const convo = await createConversation(baseUrl, cookieA, "Joined-message event flow");
+    await addExpert(baseUrl, cookieA, convo.id);
+
+    const clientSub = await connect(wsUrl, cookieA);
+    let releaseFirstTurn: () => void = () => {};
+    const firstTurnHeld = new Promise<void>((resolve) => { releaseFirstTurn = resolve; });
+    try {
+      await nextMessage(clientSub, (m) => m.type === "connection");
+      clientSub.ws.send(JSON.stringify({ type: "subscribe", conversationId: convo.id }));
+      await nextMessage(clientSub, (m) => m.type === "subscribed" && m.conversationId === convo.id);
+
+      mockGetExpertResponseStream.mockImplementationOnce(async (expert: any) => {
+        await firstTurnHeld;
+        return {
+          conversationId: expert.conversationId,
+          expertId: expert.id,
+          userId: null,
+          content: "The original response finishes.",
+          role: "assistant",
+          expertName: expert.name,
+          expertRole: expert.role,
+        };
+      });
+
+      const first = await api(baseUrl, "POST", `/api/protected/conversations/${convo.id}/messages`, {
+        cookie: cookieA,
+        body: { content: "Start the discussion" },
+      });
+      expect(first.status).toBe(201);
+      await nextMessage(clientSub, (m) => m.type === "expert_stream_start" && m.conversationId === convo.id);
+
+      const second = await api(baseUrl, "POST", `/api/protected/conversations/${convo.id}/messages`, {
+        cookie: cookieA,
+        body: { content: "Add this detail to the discussion" },
+      });
+      expect(second.status).toBe(201);
+      const secondMessage = await second.json();
+      const queued = await nextMessage(clientSub, (m) => m.type === "message_queued" && m.conversationId === convo.id);
+      expect(queued.messageId).toBe(secondMessage.id);
+
+      const disabled = await api(baseUrl, "POST", `/api/protected/conversations/${convo.id}/autonomous/disable`, {
+        cookie: cookieA,
+      });
+      expect(disabled.status).toBe(200);
+
+      releaseFirstTurn();
+      const pickedUp = await nextMessage(
+        clientSub,
+        (m) => m.type === "message_picked_up" && m.conversationId === convo.id && m.messageId === secondMessage.id,
+      );
+      expect(pickedUp.messageId).toBe(secondMessage.id);
+      await waitForConversationMode(convo.id, "idle");
+
+      // The already subscribed socket for a different conversation must not
+      // see either join-flow event.
+      await waitFor(100);
+      expect(clientA.received.some((m) =>
+        m.conversationId === convo.id && ["message_queued", "message_picked_up"].includes(m.type),
+      )).toBe(false);
+    } finally {
+      releaseFirstTurn();
+      clientSub.ws.close(1000, "test done");
     }
   });
 
@@ -467,12 +582,13 @@ describe("WebSocket scoping (G3)", () => {
       });
       expect(res.status).toBe(200);
 
-      // The sequence leaves paused (state_update) and streams turns to its
-      // natural idle end: the rebuilt paused state is genuinely resumable.
+      // A legacy pausedFromMode of processing_sequential resumes as
+      // autonomous: the dead sequential chain is not revived.
       await nextMessage(
         client,
-        (m) => m.type === "state_update" && m.conversationId === convo.id && m.mode === "processing_sequential",
+        (m) => m.type === "state_update" && m.conversationId === convo.id && m.mode === "autonomous",
       );
+      await nextMessage(client, (m) => m.type === "expert_stream_start" && m.conversationId === convo.id);
       await nextMessage(client, (m) => m.type === "expert_stream_start" && m.conversationId === convo.id);
       await waitForConversationMode(convo.id, "idle");
       await nextMessage(

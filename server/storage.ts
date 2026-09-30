@@ -1,16 +1,22 @@
-import { users, type User, type InsertUser, conversations, type Conversation, type InsertConversation, experts, type Expert, type InsertExpert, messages, type Message, type InsertMessage, files, type File, type InsertFile, insights, type Insight, type InsertInsight, farmProfiles, type FarmProfile, type InsertFarmProfile, weatherCache } from "@shared/schema";
+import { users, type User, type InsertUser, conversations, type Conversation, type InsertConversation, experts, type Expert, type InsertExpert, messages, type Message, type InsertMessage, openQuestions, type OpenQuestion, type InsertOpenQuestion, files, type File, type InsertFile, insights, type Insight, type InsertInsight, farmProfiles, type FarmProfile, type InsertFarmProfile, weatherCache } from "@shared/schema";
 import { encryptApiKey, decryptApiKey } from "./crypto";
 import createMemoryStore from "memorystore";
 import session from "express-session";
 import { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
-import { eq, desc, and } from "drizzle-orm";
+import { eq, desc, asc, and } from "drizzle-orm";
 import ConnectPgSimple from "connect-pg-simple";
 
 const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || "";
 
+function normalizeTurnBudget(turnBudget: number | null | undefined): number | null | undefined {
+  return turnBudget === 0 ? null : turnBudget;
+}
+
 const MemoryStore = createMemoryStore(session);
 const PgSessionStore = ConnectPgSimple(session);
+
+class OpenQuestionNoLongerOpenError extends Error {}
 
 // modify the interface with any CRUD methods
 // you might need
@@ -30,11 +36,11 @@ export interface IStorage {
   createConversation(conversation: InsertConversation): Promise<Conversation>;
   getConversation(id: number): Promise<Conversation | undefined>;
   getUserConversations(userId: number): Promise<Conversation[]>;
-  // Partial update (G6): only provided keys change. `charter: null` clears
-  // the charter; an omitted charter key leaves it untouched.
+  // Partial update (G6/G13): only provided keys change. Null clears the
+  // charter or turn budget; omitted keys stay untouched.
   // G7: `orchestratorState` joins the allowlist so the orchestrator can
   // persist its survivable snapshot at turn boundaries.
-  updateConversation(id: number, updates: Partial<Pick<Conversation, "title" | "charter" | "orchestratorState">>): Promise<Conversation | undefined>;
+  updateConversation(id: number, updates: Partial<Pick<Conversation, "title" | "charter" | "orchestratorState" | "turnBudget">>): Promise<Conversation | undefined>;
   
   // Expert operations
   createExpert(expert: InsertExpert): Promise<Expert>;
@@ -45,6 +51,14 @@ export interface IStorage {
   // Message operations
   createMessage(message: InsertMessage): Promise<Message>;
   getConversationMessages(conversationId: number): Promise<Message[]>;
+
+  // Open question ledger (G12)
+  createOpenQuestion(question: InsertOpenQuestion): Promise<OpenQuestion>;
+  listOpenQuestions(conversationId: number): Promise<OpenQuestion[]>;
+  getOpenQuestion(id: number): Promise<OpenQuestion | undefined>;
+  answerOpenQuestion(id: number, answerMessageId: number): Promise<OpenQuestion | undefined>;
+  claimOpenQuestionAnswer(id: number, answerMessageId: number): Promise<{ question: OpenQuestion; claimed: boolean } | undefined>;
+  createAnswerMessage(message: InsertMessage, questionId: number): Promise<{ message: Message; question: OpenQuestion } | undefined>;
   
   // File operations
   createFile(file: InsertFile): Promise<File>;
@@ -73,6 +87,7 @@ export class MemStorage implements IStorage {
   private conversations: Map<number, Conversation>;
   private experts: Map<number, Expert>;
   private messages: Map<number, Message>;
+  private openQuestions: Map<number, OpenQuestion>;
   private files: Map<number, File>;
   private insights: Map<number, Insight>;
   
@@ -81,6 +96,7 @@ export class MemStorage implements IStorage {
   private conversationId: number;
   private expertId: number;
   private messageId: number;
+  private openQuestionId: number;
   private fileId: number;
   private insightId: number;
 
@@ -89,6 +105,7 @@ export class MemStorage implements IStorage {
     this.conversations = new Map();
     this.experts = new Map();
     this.messages = new Map();
+    this.openQuestions = new Map();
     this.files = new Map();
     this.insights = new Map();
     
@@ -96,6 +113,7 @@ export class MemStorage implements IStorage {
     this.conversationId = 1;
     this.expertId = 1;
     this.messageId = 1;
+    this.openQuestionId = 1;
     this.fileId = 1;
     this.insightId = 1;
     
@@ -237,6 +255,9 @@ export class MemStorage implements IStorage {
       title: insertConversation.title ?? "New Conversation",
       charter: insertConversation.charter ?? null,
       orchestratorState: null,
+      turnBudget: insertConversation.turnBudget === undefined
+        ? 25
+        : normalizeTurnBudget(insertConversation.turnBudget) ?? null,
       createdAt: now,
     };
     this.conversations.set(id, conversation);
@@ -253,17 +274,18 @@ export class MemStorage implements IStorage {
       .sort((a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0));
   }
 
-  async updateConversation(id: number, updates: Partial<Pick<Conversation, "title" | "charter" | "orchestratorState">>): Promise<Conversation | undefined> {
+  async updateConversation(id: number, updates: Partial<Pick<Conversation, "title" | "charter" | "orchestratorState" | "turnBudget">>): Promise<Conversation | undefined> {
     const conversation = this.conversations.get(id);
     if (!conversation) return undefined;
 
-    // Explicit undefined-checks (not a plain spread) so an omitted key keeps
-    // its current value while `charter: null` clears it.
+    // Explicit undefined-checks (not a plain spread) so omitted keys keep
+    // their current values while explicit null clears a nullable value.
     const updated: Conversation = {
       ...conversation,
       ...(updates.title !== undefined && { title: updates.title }),
       ...(updates.charter !== undefined && { charter: updates.charter }),
       ...(updates.orchestratorState !== undefined && { orchestratorState: updates.orchestratorState }),
+      ...(updates.turnBudget !== undefined && { turnBudget: normalizeTurnBudget(updates.turnBudget) }),
     };
 
     this.conversations.set(id, updated);
@@ -308,7 +330,7 @@ export class MemStorage implements IStorage {
   }
   
   // Message operations
-  async createMessage(insertMessage: InsertMessage): Promise<Message> {
+  private createMessageRecord(insertMessage: InsertMessage): Message {
     const id = this.messageId++;
     const now = new Date();
     const message: Message = {
@@ -325,16 +347,104 @@ export class MemStorage implements IStorage {
       mentions: Array.isArray(insertMessage.mentions) ? insertMessage.mentions : null,
       // G5 synthesis: pass the closing-synthesis flag through (null when unset).
       isSynthesis: insertMessage.isSynthesis ?? null,
+      answersQuestionId: insertMessage.answersQuestionId ?? null,
+      // G15 stance: legacy and non-expert messages have no stance.
+      stance: insertMessage.stance ?? null,
       timestamp: now,
     };
     this.messages.set(id, message);
     return message;
+  }
+
+  async createMessage(insertMessage: InsertMessage): Promise<Message> {
+    return this.createMessageRecord(insertMessage);
   }
   
   async getConversationMessages(conversationId: number): Promise<Message[]> {
     return Array.from(this.messages.values())
       .filter(message => message.conversationId === conversationId)
       .sort((a, b) => (a.timestamp?.getTime() ?? 0) - (b.timestamp?.getTime() ?? 0));
+  }
+
+  // ── Open question ledger operations ────────────────────────────────────────
+
+  async createOpenQuestion(insertQuestion: InsertOpenQuestion): Promise<OpenQuestion> {
+    const sourceMessage = this.messages.get(insertQuestion.messageId);
+    if (!sourceMessage || sourceMessage.conversationId !== insertQuestion.conversationId) {
+      throw new Error("Open question source message must belong to the same conversation.");
+    }
+
+    const existing = Array.from(this.openQuestions.values()).find(
+      (question) => question.messageId === insertQuestion.messageId && question.question === insertQuestion.question,
+    );
+    if (existing) return existing;
+
+    const openQuestion: OpenQuestion = {
+      id: this.openQuestionId++,
+      conversationId: insertQuestion.conversationId,
+      messageId: insertQuestion.messageId,
+      expertRole: insertQuestion.expertRole,
+      question: insertQuestion.question,
+      assumption: insertQuestion.assumption ?? null,
+      status: "open",
+      answerMessageId: null,
+      createdAt: new Date(),
+    };
+    this.openQuestions.set(openQuestion.id, openQuestion);
+    return openQuestion;
+  }
+
+  async listOpenQuestions(conversationId: number): Promise<OpenQuestion[]> {
+    return Array.from(this.openQuestions.values())
+      .filter((question) => question.conversationId === conversationId && question.status === "open")
+      .sort((a, b) => (a.createdAt?.getTime() ?? 0) - (b.createdAt?.getTime() ?? 0) || a.id - b.id);
+  }
+
+  async getOpenQuestion(id: number): Promise<OpenQuestion | undefined> {
+    return this.openQuestions.get(id);
+  }
+
+  async answerOpenQuestion(id: number, answerMessageId: number): Promise<OpenQuestion | undefined> {
+    const existing = this.openQuestions.get(id);
+    if (!existing) return undefined;
+    if (existing.status === "answered") {
+      return existing.answerMessageId === answerMessageId ? existing : undefined;
+    }
+
+    const answered: OpenQuestion = { ...existing, status: "answered", answerMessageId };
+    this.openQuestions.set(id, answered);
+    return answered;
+  }
+
+  async claimOpenQuestionAnswer(
+    id: number,
+    answerMessageId: number,
+  ): Promise<{ question: OpenQuestion; claimed: boolean } | undefined> {
+    const existing = this.openQuestions.get(id);
+    if (!existing) return undefined;
+    if (existing.status === "answered") {
+      return existing.answerMessageId === answerMessageId ? { question: existing, claimed: false } : undefined;
+    }
+    const question: OpenQuestion = { ...existing, status: "answered", answerMessageId };
+    this.openQuestions.set(id, question);
+    return { question, claimed: true };
+  }
+
+  async createAnswerMessage(
+    insertMessage: InsertMessage,
+    questionId: number,
+  ): Promise<{ message: Message; question: OpenQuestion } | undefined> {
+    const existing = this.openQuestions.get(questionId);
+    if (!existing || existing.status !== "open" || existing.conversationId !== insertMessage.conversationId) {
+      return undefined;
+    }
+
+    // All map updates happen in this synchronous segment, so concurrent
+    // requests in this process cannot both claim the same open question.
+    const message = this.createMessageRecord({ ...insertMessage, answersQuestionId: questionId });
+    const question: OpenQuestion = { ...existing, status: "answered", answerMessageId: message.id };
+    this.openQuestions.set(questionId, question);
+    return { message, question };
   }
   
   // File operations
@@ -425,7 +535,7 @@ export class PostgresStorage implements IStorage {
     });
 
     this.db = drizzle(this.pool, {
-      schema: { users, conversations, experts, messages, files, insights, farmProfiles, weatherCache },
+      schema: { users, conversations, experts, messages, openQuestions, files, insights, farmProfiles, weatherCache },
     });
 
     this.sessionStore = new PgSessionStore({
@@ -547,7 +657,13 @@ export class PostgresStorage implements IStorage {
     // always starts stateless, whatever the (loosely jsonb-typed) insert
     // payload carries.
     const { orchestratorState: _ignoredSnapshot, ...values } = insertConversation;
-    const result = await this.db.insert(conversations).values(values).returning();
+    const normalizedValues = {
+      ...values,
+      turnBudget: values.turnBudget === undefined
+        ? 25
+        : normalizeTurnBudget(values.turnBudget) ?? null,
+    };
+    const result = await this.db.insert(conversations).values(normalizedValues).returning();
     return result[0];
   }
 
@@ -564,14 +680,14 @@ export class PostgresStorage implements IStorage {
       .orderBy(desc(conversations.createdAt));
   }
 
-  async updateConversation(id: number, updates: Partial<Pick<Conversation, "title" | "charter" | "orchestratorState">>): Promise<Conversation | undefined> {
-    // Only allow updating title, charter and the G7 orchestrator snapshot.
-    // Explicit undefined-checks (not a plain spread) so an omitted key stays
-    // untouched while `charter: null` clears the column.
-    const allowed: Partial<Pick<Conversation, "title" | "charter" | "orchestratorState">> = {
+  async updateConversation(id: number, updates: Partial<Pick<Conversation, "title" | "charter" | "orchestratorState" | "turnBudget">>): Promise<Conversation | undefined> {
+    // Only allow updating title, charter, the G7 orchestrator snapshot, and
+    // the G13 turn budget. Omitted keys stay untouched; explicit null clears.
+    const allowed: Partial<Pick<Conversation, "title" | "charter" | "orchestratorState" | "turnBudget">> = {
       ...(updates.title !== undefined && { title: updates.title }),
       ...(updates.charter !== undefined && { charter: updates.charter }),
       ...(updates.orchestratorState !== undefined && { orchestratorState: updates.orchestratorState }),
+      ...(updates.turnBudget !== undefined && { turnBudget: normalizeTurnBudget(updates.turnBudget) }),
     };
 
     const result = await this.db
@@ -635,6 +751,7 @@ export class PostgresStorage implements IStorage {
     return {
       ...raw,
       artifacts: (raw.artifacts || []) as Message["artifacts"],
+      stance: raw.stance ?? null,
     } as Message;
   }
 
@@ -648,7 +765,150 @@ export class PostgresStorage implements IStorage {
     return result.map((m) => ({
       ...m,
       artifacts: (m.artifacts || []) as Message["artifacts"],
+      stance: m.stance ?? null,
     })) as Message[];
+  }
+
+  // ── Open question ledger operations ────────────────────────────────────────
+
+  async createOpenQuestion(insertQuestion: InsertOpenQuestion): Promise<OpenQuestion> {
+    const sourceMessage = await this.db
+      .select({ id: messages.id })
+      .from(messages)
+      .where(and(
+        eq(messages.id, insertQuestion.messageId),
+        eq(messages.conversationId, insertQuestion.conversationId),
+      ))
+      .limit(1);
+    if (!sourceMessage[0]) {
+      throw new Error("Open question source message must belong to the same conversation.");
+    }
+
+    const inserted = await this.db
+      .insert(openQuestions)
+      .values({
+        conversationId: insertQuestion.conversationId,
+        messageId: insertQuestion.messageId,
+        expertRole: insertQuestion.expertRole,
+        question: insertQuestion.question,
+        assumption: insertQuestion.assumption ?? null,
+        status: "open",
+        answerMessageId: null,
+      })
+      .onConflictDoNothing({ target: [openQuestions.messageId, openQuestions.question] })
+      .returning();
+    if (inserted[0]) return inserted[0];
+
+    const existing = await this.db
+      .select()
+      .from(openQuestions)
+      .where(and(
+        eq(openQuestions.messageId, insertQuestion.messageId),
+        eq(openQuestions.question, insertQuestion.question),
+      ))
+      .limit(1);
+    if (!existing[0]) throw new Error("Open question insert conflicted but the existing row was not found");
+    return existing[0];
+  }
+
+  async listOpenQuestions(conversationId: number): Promise<OpenQuestion[]> {
+    return this.db
+      .select()
+      .from(openQuestions)
+      .where(and(
+        eq(openQuestions.conversationId, conversationId),
+        eq(openQuestions.status, "open"),
+      ))
+      .orderBy(asc(openQuestions.createdAt), asc(openQuestions.id));
+  }
+
+  async getOpenQuestion(id: number): Promise<OpenQuestion | undefined> {
+    const result = await this.db
+      .select()
+      .from(openQuestions)
+      .where(eq(openQuestions.id, id))
+      .limit(1);
+    return result[0];
+  }
+
+  async answerOpenQuestion(id: number, answerMessageId: number): Promise<OpenQuestion | undefined> {
+    const updated = await this.db
+      .update(openQuestions)
+      .set({ status: "answered", answerMessageId })
+      .where(and(eq(openQuestions.id, id), eq(openQuestions.status, "open")))
+      .returning();
+    if (updated[0]) return updated[0];
+
+    const existing = await this.getOpenQuestion(id);
+    if (existing?.status === "answered" && existing.answerMessageId === answerMessageId) return existing;
+    return undefined;
+  }
+
+  async claimOpenQuestionAnswer(
+    id: number,
+    answerMessageId: number,
+  ): Promise<{ question: OpenQuestion; claimed: boolean } | undefined> {
+    const updated = await this.db
+      .update(openQuestions)
+      .set({ status: "answered", answerMessageId })
+      .where(and(eq(openQuestions.id, id), eq(openQuestions.status, "open")))
+      .returning();
+    if (updated[0]) return { question: updated[0], claimed: true };
+
+    const existing = await this.getOpenQuestion(id);
+    if (existing?.status === "answered" && existing.answerMessageId === answerMessageId) {
+      return { question: existing, claimed: false };
+    }
+    return undefined;
+  }
+
+  async createAnswerMessage(
+    insertMessage: InsertMessage,
+    questionId: number,
+  ): Promise<{ message: Message; question: OpenQuestion } | undefined> {
+    try {
+      return await this.db.transaction(async (tx) => {
+        const matchingQuestion = await tx
+          .select()
+          .from(openQuestions)
+          .where(and(
+            eq(openQuestions.id, questionId),
+            eq(openQuestions.conversationId, insertMessage.conversationId),
+            eq(openQuestions.status, "open"),
+          ))
+          .limit(1);
+        if (!matchingQuestion[0]) return undefined;
+
+        const inserted = await tx
+          .insert(messages)
+          .values({ ...insertMessage, answersQuestionId: questionId, artifacts: insertMessage.artifacts || [] })
+          .returning();
+        const rawMessage = inserted[0];
+        const message: Message = {
+          ...rawMessage,
+          artifacts: (rawMessage.artifacts || []) as Message["artifacts"],
+        } as Message;
+
+        const updated = await tx
+          .update(openQuestions)
+          .set({ status: "answered", answerMessageId: message.id })
+          .where(and(
+            eq(openQuestions.id, questionId),
+            eq(openQuestions.conversationId, insertMessage.conversationId),
+            eq(openQuestions.status, "open"),
+          ))
+          .returning();
+        if (!updated[0]) {
+          // Raising inside the transaction rolls back the just-inserted
+          // message, preventing an answer that nobody processed.
+          throw new OpenQuestionNoLongerOpenError();
+        }
+        return { message, question: updated[0] };
+      });
+    } catch (error) {
+      if (error instanceof OpenQuestionNoLongerOpenError) return undefined;
+      throw error;
+    }
   }
 
   // ── File operations ────────────────────────────────────────────────────────
