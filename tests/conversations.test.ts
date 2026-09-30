@@ -71,6 +71,7 @@ vi.mock("../server/ai", () => ({
 }));
 
 import { registerRoutes } from "../server/routes";
+import { storage } from "../server/storage";
 
 // ── Test app factory ──
 async function createTestApp(): Promise<Express> {
@@ -144,6 +145,28 @@ async function addExpert(
     .send(expert);
   expect(res.status).toBe(201);
   return res.body;
+}
+
+async function createOpenQuestion(
+  conversationId: number,
+  question = "Which field will be planted first?",
+  assumption = "Assuming the north field is first.",
+) {
+  const sourceMessage = await storage.createMessage({
+    conversationId,
+    userId: null,
+    expertId: null,
+    content: `@[User] ${question} ${assumption}`,
+    role: "assistant",
+    expertRole: "Agronomist",
+  });
+  return storage.createOpenQuestion({
+    conversationId,
+    messageId: sourceMessage.id,
+    expertRole: "Agronomist",
+    question,
+    assumption,
+  });
 }
 
 async function waitForCondition(predicate: () => boolean, timeoutMs = 5000) {
@@ -904,6 +927,286 @@ describe("Conversations & Expert Flows", () => {
         `/api/protected/conversations/${convo.id}/messages`,
       );
       expect(res.status).toBe(404);
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────
+  // Open question ledger API
+  // ─────────────────────────────────────────────────────────────────
+
+  describe("Open question routes", () => {
+    it("lists open questions only for the owning conversation user", async () => {
+      const owner = request.agent(app);
+      await registerAndLogin(owner, "questionListOwner", "pass123");
+      const conversation = await createConversation(owner, "Open questions");
+      const question = await createOpenQuestion(conversation.id);
+
+      const list = await owner.get(`/api/protected/conversations/${conversation.id}/open-questions`);
+      expect(list.status).toBe(200);
+      expect(list.body).toEqual([
+        expect.objectContaining({
+          id: question.id,
+          conversationId: conversation.id,
+          question: question.question,
+          assumption: question.assumption,
+          status: "open",
+        }),
+      ]);
+
+      const unauthenticated = await request(app).get(
+        `/api/protected/conversations/${conversation.id}/open-questions`,
+      );
+      expect(unauthenticated.status).toBe(401);
+
+      const otherUser = request.agent(app);
+      await registerAndLogin(otherUser, "questionListOther", "pass456");
+      const denied = await otherUser.get(`/api/protected/conversations/${conversation.id}/open-questions`);
+      expect(denied.status).toBe(404);
+    });
+
+    it("stores an explicit answer link, closes the question, and starts normal processing", async () => {
+      const agent = request.agent(app);
+      await registerAndLogin(agent, "questionAnswerOwner", "pass123");
+      const conversation = await createConversation(agent, "Answer question");
+      const question = await createOpenQuestion(conversation.id);
+
+      const answer = await agent
+        .post(`/api/protected/conversations/${conversation.id}/open-questions/${question.id}/answer`)
+        .send({ content: "We will plant the south field first." });
+
+      expect(answer.status).toBe(201);
+      expect(answer.body).toMatchObject({
+        role: "user",
+        content: "We will plant the south field first.",
+        answersQuestionId: question.id,
+      });
+      const stored = await storage.getConversationMessages(conversation.id);
+      expect(stored.some(message => message.id === answer.body.id)).toBe(true);
+      expect(await storage.getOpenQuestion(question.id)).toMatchObject({
+        status: "answered",
+        answerMessageId: answer.body.id,
+      });
+      expect(mockProcessMessageTurnBased).toHaveBeenCalledWith(
+        expect.any(Number),
+        conversation.id,
+        expect.objectContaining({ id: answer.body.id, answersQuestionId: question.id }),
+        expect.any(Function),
+      );
+      expect((await agent.get(`/api/protected/conversations/${conversation.id}/open-questions`)).body).toEqual([]);
+    });
+
+    it("keeps an answer retryable when its atomic write fails before commit", async () => {
+      const agent = request.agent(app);
+      await registerAndLogin(agent, "questionAnswerRetry", "pass123");
+      const conversation = await createConversation(agent, "Retry answer");
+      const question = await createOpenQuestion(conversation.id);
+      const answerText = "We will plant the south field first.";
+      const originalCreateAnswer = storage.createAnswerMessage.bind(storage);
+      const answerQuestionSpy = vi.spyOn(storage, "createAnswerMessage")
+        .mockRejectedValueOnce(new Error("temporary ledger write failure"))
+        .mockImplementation((message, questionId) => originalCreateAnswer(message, questionId));
+
+      try {
+        const firstAttempt = await agent
+          .post(`/api/protected/conversations/${conversation.id}/open-questions/${question.id}/answer`)
+          .send({ content: answerText });
+        expect(firstAttempt.status).toBe(500);
+        expect(await storage.getOpenQuestion(question.id)).toMatchObject({ status: "open", answerMessageId: null });
+        expect((await storage.getConversationMessages(conversation.id)).filter(message =>
+          message.role === "user" && message.content === answerText,
+        )).toHaveLength(0);
+        expect(mockProcessMessageTurnBased).not.toHaveBeenCalled();
+
+        const retry = await agent
+          .post(`/api/protected/conversations/${conversation.id}/open-questions/${question.id}/answer`)
+          .send({ content: answerText });
+        expect(retry.status).toBe(201);
+        expect(retry.body.answersQuestionId).toBe(question.id);
+        const persistedAnswers = (await storage.getConversationMessages(conversation.id)).filter(message =>
+          message.role === "user" && message.content === answerText,
+        );
+        expect(persistedAnswers).toHaveLength(1);
+        expect(retry.body.id).toBe(persistedAnswers[0].id);
+        expect(await storage.getOpenQuestion(question.id)).toMatchObject({
+          status: "answered",
+          answerMessageId: persistedAnswers[0].id,
+        });
+        expect(answerQuestionSpy).toHaveBeenCalledTimes(2);
+        expect(mockProcessMessageTurnBased).toHaveBeenCalledTimes(1);
+        expect(mockProcessMessageTurnBased).toHaveBeenCalledWith(
+          expect.any(Number),
+          conversation.id,
+          expect.objectContaining({ id: persistedAnswers[0].id, answersQuestionId: question.id }),
+          expect.any(Function),
+        );
+      } finally {
+        answerQuestionSpy.mockRestore();
+      }
+    });
+
+    it("prevents a concurrent answer race from storing an unprocessed message", async () => {
+      const agent = request.agent(app);
+      await registerAndLogin(agent, "questionAnswerRace", "pass123");
+      const conversation = await createConversation(agent, "Concurrent answer");
+      const question = await createOpenQuestion(conversation.id);
+      const answerPath = `/api/protected/conversations/${conversation.id}/open-questions/${question.id}/answer`;
+
+      const responses = await Promise.all([
+        agent.post(answerPath).send({ content: "The pH measured 6.4." }),
+        agent.post(answerPath).send({ content: "The pH measured 6.4." }),
+      ]);
+
+      expect(responses.map(response => response.status).sort()).toEqual(expect.arrayContaining([201]));
+      expect(responses.every(response => [200, 201, 409].includes(response.status))).toBe(true);
+      expect(responses.filter(response => response.status === 200 || response.status === 409)).toHaveLength(1);
+      const linkedAnswers = (await storage.getConversationMessages(conversation.id)).filter(message =>
+        message.role === "user" && message.answersQuestionId === question.id,
+      );
+      expect(linkedAnswers).toHaveLength(1);
+      expect(await storage.getOpenQuestion(question.id)).toMatchObject({
+        status: "answered",
+        answerMessageId: linkedAnswers[0].id,
+      });
+      expect(mockProcessMessageTurnBased).toHaveBeenCalledTimes(1);
+    });
+
+    it("starts one turn when concurrent retries recover a persisted answer", async () => {
+      const agent = request.agent(app);
+      await registerAndLogin(agent, "questionRecoveryRace", "pass123");
+      const conversation = await createConversation(agent, "Concurrent retry recovery");
+      const question = await createOpenQuestion(conversation.id);
+      const answerText = "The last soil test showed pH 6.4.";
+      const answerOwner = await storage.getUserByUsername("questionRecoveryRace");
+      const persistedAnswer = await storage.createMessage({
+        conversationId: conversation.id,
+        userId: answerOwner!.id,
+        expertId: null,
+        content: answerText,
+        role: "user",
+        answersQuestionId: question.id,
+      });
+      const answerPath = `/api/protected/conversations/${conversation.id}/open-questions/${question.id}/answer`;
+
+      const responses = await Promise.all([
+        agent.post(answerPath).send({ content: answerText }),
+        agent.post(answerPath).send({ content: answerText }),
+      ]);
+
+      expect(responses.map(response => response.status)).toEqual([200, 200]);
+      expect((await storage.getConversationMessages(conversation.id)).filter(message =>
+        message.role === "user" && message.answersQuestionId === question.id,
+      )).toEqual([expect.objectContaining({ id: persistedAnswer.id, content: answerText })]);
+      expect(await storage.getOpenQuestion(question.id)).toMatchObject({
+        status: "answered",
+        answerMessageId: persistedAnswer.id,
+      });
+      expect(mockProcessMessageTurnBased).toHaveBeenCalledTimes(1);
+    });
+
+    it("restarts dispatch for a committed answer whose original request missed the turn start", async () => {
+      const agent = request.agent(app);
+      await registerAndLogin(agent, "questionCommitRecovery", "pass123");
+      const conversation = await createConversation(agent, "Committed answer retry");
+      const question = await createOpenQuestion(conversation.id);
+      const answerOwner = await storage.getUserByUsername("questionCommitRecovery");
+      const answerText = "The soil test showed pH 6.4.";
+      const persistedAnswer = await storage.createMessage({
+        conversationId: conversation.id,
+        userId: answerOwner!.id,
+        expertId: null,
+        content: answerText,
+        role: "user",
+        answersQuestionId: question.id,
+      });
+      await storage.answerOpenQuestion(question.id, persistedAnswer.id);
+
+      const retry = await agent
+        .post(`/api/protected/conversations/${conversation.id}/open-questions/${question.id}/answer`)
+        .send({ content: answerText });
+
+      expect(retry.status).toBe(200);
+      expect(retry.body.id).toBe(persistedAnswer.id);
+      expect(mockProcessMessageTurnBased).toHaveBeenCalledTimes(1);
+      expect(mockProcessMessageTurnBased).toHaveBeenCalledWith(
+        expect.any(Number),
+        conversation.id,
+        expect.objectContaining({ id: persistedAnswer.id, answersQuestionId: question.id }),
+        expect.any(Function),
+      );
+
+      await storage.createMessage({
+        conversationId: conversation.id,
+        userId: null,
+        expertId: null,
+        content: "The answer fits this soil plan.",
+        role: "assistant",
+        expertRole: "Agronomist",
+      });
+      const completedRetry = await agent
+        .post(`/api/protected/conversations/${conversation.id}/open-questions/${question.id}/answer`)
+        .send({ content: answerText });
+      expect(completedRetry.status).toBe(200);
+      expect(completedRetry.body.id).toBe(persistedAnswer.id);
+      expect(mockProcessMessageTurnBased).toHaveBeenCalledTimes(1);
+    });
+
+    it("auto-links exactly one open question but leaves multiple questions open", async () => {
+      const agent = request.agent(app);
+      await registerAndLogin(agent, "questionAutoLink", "pass123");
+
+      const singleConversation = await createConversation(agent, "One question");
+      const onlyQuestion = await createOpenQuestion(singleConversation.id);
+      const linked = await agent
+        .post(`/api/protected/conversations/${singleConversation.id}/messages`)
+        .send({ content: "The north field goes first." });
+      expect(linked.status).toBe(201);
+      expect(linked.body.answersQuestionId).toBe(onlyQuestion.id);
+      expect(await storage.getOpenQuestion(onlyQuestion.id)).toMatchObject({ status: "answered" });
+
+      const multipleConversation = await createConversation(agent, "Two questions");
+      const first = await createOpenQuestion(multipleConversation.id, "What is the first field?", "North is first.");
+      const second = await createOpenQuestion(multipleConversation.id, "What is the first crop?", "Corn is first.");
+      const unlinked = await agent
+        .post(`/api/protected/conversations/${multipleConversation.id}/messages`)
+        .send({ content: "I will confirm both later." });
+      expect(unlinked.status).toBe(201);
+      expect(unlinked.body.answersQuestionId).toBeNull();
+      expect(await storage.getOpenQuestion(first.id)).toMatchObject({ status: "open" });
+      expect(await storage.getOpenQuestion(second.id)).toMatchObject({ status: "open" });
+    });
+
+    it("rejects cross-conversation, cross-owner, and closed question IDs", async () => {
+      const owner = request.agent(app);
+      await registerAndLogin(owner, "questionScopeOwner", "pass123");
+      const targetConversation = await createConversation(owner, "Target");
+      const otherConversation = await createConversation(owner, "Other");
+      const question = await createOpenQuestion(otherConversation.id);
+
+      const unauthenticated = await request(app)
+        .post(`/api/protected/conversations/${otherConversation.id}/open-questions/${question.id}/answer`)
+        .send({ content: "Unauthenticated answer." });
+      expect(unauthenticated.status).toBe(401);
+
+      const crossConversation = await owner
+        .post(`/api/protected/conversations/${targetConversation.id}/open-questions/${question.id}/answer`)
+        .send({ content: "This is the wrong conversation." });
+      expect(crossConversation.status).toBe(404);
+
+      const answer = await owner
+        .post(`/api/protected/conversations/${otherConversation.id}/open-questions/${question.id}/answer`)
+        .send({ content: "This is the correct conversation." });
+      expect(answer.status).toBe(201);
+      const closed = await owner
+        .post(`/api/protected/conversations/${otherConversation.id}/open-questions/${question.id}/answer`)
+        .send({ content: "Trying to answer twice." });
+      expect(closed.status).toBe(409);
+
+      const otherUser = request.agent(app);
+      await registerAndLogin(otherUser, "questionScopeOther", "pass456");
+      const crossOwner = await otherUser
+        .post(`/api/protected/conversations/${otherConversation.id}/open-questions/${question.id}/answer`)
+        .send({ content: "Not the owner." });
+      expect(crossOwner.status).toBe(404);
     });
   });
 

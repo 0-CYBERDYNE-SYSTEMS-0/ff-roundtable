@@ -23,6 +23,7 @@ const mockGetConversationMessages = vi.hoisted(() => vi.fn());
 const mockGetConversationExperts = vi.hoisted(() => vi.fn());
 const mockGetConversationFiles = vi.hoisted(() => vi.fn());
 const mockCreateMessage = vi.hoisted(() => vi.fn());
+const mockCreateOpenQuestion = vi.hoisted(() => vi.fn());
 // G7: the orchestrator persists snapshots through these; default no-ops here,
 // with dedicated coverage in tests/orchestrator-recovery.test.ts.
 const mockGetConversation = vi.hoisted(() => vi.fn());
@@ -41,6 +42,7 @@ vi.mock("../server/storage", () => ({
     getConversationExperts: mockGetConversationExperts,
     getConversationFiles: mockGetConversationFiles,
     createMessage: mockCreateMessage,
+    createOpenQuestion: mockCreateOpenQuestion,
   },
 }));
 
@@ -882,6 +884,14 @@ describe("Orchestrator", () => {
       expect(isUsableConversationState(partial as any)).toBe(false);
     });
 
+    it.each(["User", "Farmer"])("rejects %s from speaker and round-robin lists", (reservedRole) => {
+      const partial = usableState();
+      const reservedExpert = createMockExpert(98, `Reserved ${reservedRole}`, reservedRole);
+      partial.activeExperts = [...experts, reservedExpert];
+      partial.roundExperts = [...experts, reservedExpert];
+      expect(isUsableConversationState(partial as any)).toBe(false);
+    });
+
     it("rejects a state missing the scheduled failure counter", () => {
       const partial = usableState();
       delete partial.scheduledFailureAttempts;
@@ -1450,7 +1460,7 @@ describe("Orchestrator", () => {
   // G4 — Mention mechanics: routing, selective wake, ping-pong guard
   // ─────────────────────────────────────────────────────────────────
 
-  describe("G4 mention mechanics", () => {
+describe("G4 mention mechanics", () => {
     // Gated conversation whose expert messages carry G4 mentions: the
     // resolver decides which roles each speaker tags. Everything else
     // mirrors setupGatedConversation above (unique content per turn keeps
@@ -1484,7 +1494,10 @@ describe("Orchestrator", () => {
         }
         startedNames.push(expert.name);
         return new Promise((resolve) => {
-          const content = `Distinct answer ${++contentCounter} from ${expert.name}`;
+          const expertMentions = mentionsFor(expert);
+          const content = expertMentions.includes("User")
+            ? "@[User] What was the soil pH at your last test?\nAssuming it was near neutral."
+            : `Distinct answer ${++contentCounter} from ${expert.name}`;
           gates.push(() =>
             resolve({
               conversationId: expert.conversationId,
@@ -1495,7 +1508,7 @@ describe("Orchestrator", () => {
               expertName: expert.name,
               expertRole: expert.role,
               artifacts: [],
-              mentions: mentionsFor(expert),
+              mentions: expertMentions,
             }),
           );
         });
@@ -1634,6 +1647,107 @@ describe("Orchestrator", () => {
       expect(getConversationState(conversationId)!.mode).toBe("idle");
     });
 
+    it("logs an @[User] question and continues the council without routing User", async () => {
+      const conversationId = nextConvId();
+      const roster = [
+        createMockExpert(1, "Alice", "Agronomist"),
+        createMockExpert(2, "Bob", "Soil Scientist"),
+        createMockExpert(3, "Carol", "Weather Expert"),
+      ];
+      mockGetModeratorNextSpeakerSuggestion.mockResolvedValue("RoundRobin");
+      mockCreateOpenQuestion.mockImplementation(async (draft) => ({
+        ...draft,
+        id: 500,
+        status: "open",
+        answerMessageId: null,
+        createdAt: new Date(),
+      }));
+      const { waitForTurns, releaseNextTurn, drainToIdle, turnNames, addUserMessageToHistory } =
+        setupGatedMentionConversation(conversationId, roster, (expert) =>
+          expert.role === "Agronomist" ? ["User"] : [],
+        );
+
+      const farmerMessage = createMockMessage(1, "Help plan a soil test");
+      addUserMessageToHistory(farmerMessage);
+      await processMessageTurnBased(userId, conversationId, farmerMessage, broadcastFn);
+
+      await waitForTurns(1);
+      expect(turnNames()).toEqual(["Alice"]);
+      await releaseNextTurn();
+      await waitForTurns(2);
+
+      expect(turnNames()).toEqual(["Alice", "Bob"]);
+      expect(mockCreateOpenQuestion).toHaveBeenCalledWith(expect.objectContaining({
+        conversationId,
+        expertRole: "Agronomist",
+        question: "What was the soil pH at your last test?",
+        assumption: "it was near neutral.",
+      }));
+      expect(broadcastFn).toHaveBeenCalledWith(conversationId, expect.objectContaining({
+        type: "open_questions_updated",
+      }));
+      expect(getConversationState(conversationId)!.pendingMentionRoutes).toEqual([]);
+
+      new InteractionOrchestrator(conversationId).disableAutonomous();
+      await releaseNextTurn();
+      await drainToIdle();
+      expect(turnNames()).toEqual(["Alice", "Bob"]);
+      expect(getConversationState(conversationId)!.mode).toBe("idle");
+    });
+
+    it("continues the turn chain while an open-question write is still pending", async () => {
+      const conversationId = nextConvId();
+      const roster = [
+        createMockExpert(1, "Alice", "Agronomist"),
+        createMockExpert(2, "Bob", "Soil Scientist"),
+      ];
+      mockGetModeratorNextSpeakerSuggestion.mockResolvedValue("RoundRobin");
+      mockCreateOpenQuestion.mockReturnValue(new Promise(() => {}));
+      const { waitForTurns, releaseNextTurn, drainToIdle, turnNames, addUserMessageToHistory } =
+        setupGatedMentionConversation(conversationId, roster, (expert) =>
+          expert.role === "Agronomist" ? ["User"] : [],
+        );
+
+      const farmerMessage = createMockMessage(1, "Help me check my soil plan");
+      addUserMessageToHistory(farmerMessage);
+      await processMessageTurnBased(userId, conversationId, farmerMessage, broadcastFn);
+      await waitForTurns(1);
+      await releaseNextTurn();
+      await waitForTurns(2);
+
+      expect(turnNames()).toEqual(["Alice", "Bob"]);
+      expect(mockCreateOpenQuestion).toHaveBeenCalledTimes(1);
+      expect(getConversationState(conversationId)!.mode).toBe("autonomous");
+      new InteractionOrchestrator(conversationId).disableAutonomous();
+      await releaseNextTurn();
+      await drainToIdle();
+      expect(getConversationState(conversationId)!.mode).toBe("idle");
+    });
+
+    it.each(["User", "Farmer", "RoundRobin"])("never lets reserved roster roles speak when the Moderator picks %s", async (suggestedRole) => {
+      const conversationId = nextConvId();
+      const roster = [
+        createMockExpert(1, "Reserved user", "User"),
+        createMockExpert(2, "Reserved farmer", "Farmer"),
+        createMockExpert(3, "Alice", "Agronomist"),
+      ];
+      mockGetModeratorNextSpeakerSuggestion.mockResolvedValue(suggestedRole);
+      const { waitForTurns, releaseNextTurn, drainToIdle, turnNames, addUserMessageToHistory } =
+        setupGatedMentionConversation(conversationId, roster, () => []);
+
+      const farmerMessage = createMockMessage(1, "Review this field plan");
+      addUserMessageToHistory(farmerMessage);
+      await processMessageTurnBased(userId, conversationId, farmerMessage, broadcastFn);
+
+      await waitForTurns(1);
+      expect(turnNames()).toEqual(["Alice"]);
+      expect(getConversationState(conversationId)!.activeExperts.map(expert => expert.role)).toEqual(["Agronomist"]);
+      new InteractionOrchestrator(conversationId).disableAutonomous();
+      await releaseNextTurn();
+      await drainToIdle();
+      expect(turnNames()).toEqual(["Alice"]);
+    });
+
     it("routes multiple farmer mentions in message text order without a forced roll-call", async () => {
       const conversationId = nextConvId();
       const roster = [
@@ -1666,6 +1780,54 @@ describe("Orchestrator", () => {
       await releaseNextTurn();
       await drainToIdle();
       expect(turnNames()).toEqual(["Carol", "Bob"]);
+      expect(getConversationState(conversationId)!.mode).toBe("idle");
+    });
+
+    it("keeps an @[User] question non-blocking and never routes it as a speaker", async () => {
+      const conversationId = nextConvId();
+      const roster = [
+        createMockExpert(1, "Alice", "Agronomist"),
+        createMockExpert(2, "Bob", "Soil Scientist"),
+        createMockExpert(3, "Carol", "Weather Expert"),
+      ];
+      mockGetModeratorNextSpeakerSuggestion.mockResolvedValue("RoundRobin");
+      mockCreateOpenQuestion.mockImplementation(async (draft) => ({
+        ...draft,
+        id: 500,
+        status: "open",
+        answerMessageId: null,
+        createdAt: new Date(),
+      }));
+      const { waitForTurns, releaseNextTurn, drainToIdle, turnNames, addUserMessageToHistory } =
+        setupGatedMentionConversation(conversationId, roster, (expert) =>
+          expert.role === "Agronomist" ? ["User"] : [],
+        );
+
+      const farmerMessage = createMockMessage(1, "Help plan a soil test");
+      addUserMessageToHistory(farmerMessage);
+      await processMessageTurnBased(userId, conversationId, farmerMessage, broadcastFn);
+
+      await waitForTurns(1);
+      expect(turnNames()).toEqual(["Alice"]);
+      await releaseNextTurn();
+      await waitForTurns(2);
+
+      expect(turnNames()).toEqual(["Alice", "Bob"]);
+      expect(mockCreateOpenQuestion).toHaveBeenCalledWith(expect.objectContaining({
+        conversationId,
+        expertRole: "Agronomist",
+        question: "What was the soil pH at your last test?",
+        assumption: "it was near neutral.",
+      }));
+      expect(broadcastFn).toHaveBeenCalledWith(conversationId, expect.objectContaining({
+        type: "open_questions_updated",
+      }));
+      expect(getConversationState(conversationId)!.pendingMentionRoutes).toEqual([]);
+
+      new InteractionOrchestrator(conversationId).disableAutonomous();
+      await releaseNextTurn();
+      await drainToIdle();
+      expect(turnNames()).toEqual(["Alice", "Bob"]);
       expect(getConversationState(conversationId)!.mode).toBe("idle");
     });
 

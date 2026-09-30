@@ -3,6 +3,7 @@ import { getExpertResponse, getExpertResponseStream, generateInsights, getModera
 import type { ModeratorContext } from "./ai";
 import { shouldStopForRedundancy, REDUNDANCY_STOP_SIMILARITY_THRESHOLD } from "./text-similarity";
 import type { InsertMessage, Expert, Message, File, OrchestratorSnapshot } from "@shared/schema";
+import { extractFarmerQuestions } from "@shared/mentions";
 
 // Verbose per-turn tracing is opt-in (ORCH_DEBUG=1). The default flood slows
 // test teardown and leaks conversation content into production logs.
@@ -163,7 +164,7 @@ export function isUsableConversationState(state: ConversationState | undefined):
         typeof state.broadcastFn === "function" &&
         Array.isArray(state.activeExperts) &&
         state.activeExperts.length > 0 &&
-        state.activeExperts.every(e => e.role !== "Moderator") &&
+        state.activeExperts.every(e => isSpeakableExpertRole(e.role)) &&
         state.moderatorExpert &&
         state.moderatorExpert.conversationId === state.conversationId &&
         state.moderatorExpert.role === "Moderator" &&
@@ -186,7 +187,7 @@ export function isUsableConversationState(state: ConversationState | undefined):
         Number.isInteger(state.scheduledFailureAttempts) && state.scheduledFailureAttempts >= 0 &&
         Array.isArray(state.sequenceExpertContents) &&
         Array.isArray(state.roundExperts) &&
-        state.roundExperts.every(e => e.role !== "Moderator") &&
+        state.roundExperts.every(e => isSpeakableExpertRole(e.role)) &&
         // G8/G10: fields initializeConversationState always sets must be asserted
         // here (established invariant) — a partial/stale state object missing
         // one is re-initialized instead of limping through the sequence.
@@ -194,17 +195,22 @@ export function isUsableConversationState(state: ConversationState | undefined):
     );
 }
 
+function isSpeakableExpertRole(role: string): boolean {
+    return role !== "Moderator" && role !== "User" && role !== "Farmer";
+}
+
 // Legacy G4 helper retained for compatibility with older sequential code.
 // G11 routes recognized mentions one at a time through pendingMentionRoutes.
 function selectRoundExperts(activeExperts: Expert[], mentions?: string[] | null): Expert[] {
     // Be defensive at the round boundary too: the Moderator is a chair, not
     // an expert that a user mention can wake into the speaking round.
-    const speakableExperts = activeExperts.filter(e => e.role !== "Moderator");
+    const speakableExperts = activeExperts.filter(e => isSpeakableExpertRole(e.role));
     if (!mentions || mentions.length === 0) return speakableExperts;
     const expertByRole = new Map(speakableExperts.map(expert => [expert.role, expert]));
     const narrowed: Expert[] = [];
     const seen = new Set<string>();
     for (const role of mentions) {
+        if (!isSpeakableExpertRole(role)) continue;
         const expert = expertByRole.get(role);
         if (expert && !seen.has(role)) {
             narrowed.push(expert);
@@ -222,7 +228,7 @@ function mentionRoutesForMessage(
     if (!Array.isArray(mentions) || mentions.length === 0) return [];
     const speakableRoles = new Set(activeExperts.map(expert => expert.role));
     return Array.from(new Set(mentions))
-        .filter(role => role !== "Moderator" && speakableRoles.has(role))
+        .filter(role => isSpeakableExpertRole(role) && speakableRoles.has(role))
         .map(role => ({ role, sourceRole }));
 }
 
@@ -244,7 +250,7 @@ function partitionExpertRoster(conversationId: number, roster: Expert[]): {
     activeExperts: Expert[];
     moderatorExpert: ModeratorContext;
 } {
-    const activeExperts = roster.filter(expert => expert.role !== "Moderator");
+    const activeExperts = roster.filter(expert => isSpeakableExpertRole(expert.role));
     const configuredModerator = roster.find(expert => expert.role === "Moderator");
     const moderatorExpert: ModeratorContext = configuredModerator
         ? {
@@ -1032,6 +1038,45 @@ export class InteractionOrchestrator {
                 
                 // Store and broadcast completed message
                 const storedExpertMessage = await storage.createMessage(expertResponse);
+                if (storedExpertMessage.role === "assistant" && storedExpertMessage.mentions?.includes("User")) {
+                    const farmerQuestions = extractFarmerQuestions(storedExpertMessage.content);
+                    if (farmerQuestions.length > 0) {
+                        const broadcastQuestionStatus = state.broadcastFn;
+                        const saves = Promise.allSettled(farmerQuestions.map(draft => Promise.resolve().then(() =>
+                            storage.createOpenQuestion({
+                                conversationId: this.conversationId,
+                                messageId: storedExpertMessage.id,
+                                expertRole: currentExpert.role,
+                                question: draft.question,
+                                assumption: draft.assumption,
+                            })
+                        )));
+                        // Ledger I/O runs in the background so even a slow or
+                        // unavailable question store cannot stall this turn
+                        // chain. The expert message is already durable and
+                        // the room continues from its stated assumption.
+                        void saves.then(results => {
+                            const savedAny = results.some(result => result.status === "fulfilled");
+                            const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+                            for (const failure of failures) {
+                                console.error(`Orchestrator: Could not save farmer question for conversation ${this.conversationId}:`, failure.reason);
+                            }
+                            if (savedAny) {
+                                broadcastQuestionStatus(this.conversationId, {
+                                    type: "open_questions_updated",
+                                    conversationId: this.conversationId,
+                                });
+                            }
+                            if (failures.length > 0) {
+                                broadcastQuestionStatus(this.conversationId, {
+                                    type: "notice",
+                                    conversationId: this.conversationId,
+                                    message: "A question for you could not be saved, but the council will continue.",
+                                });
+                            }
+                        });
+                    }
+                }
                 const latestAfterStore = getConversationState(this.conversationId);
                 if (latestAfterStore) {
                     updateConversationState(this.conversationId, storedExpertMessage.role === "assistant" ? {

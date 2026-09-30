@@ -10,7 +10,7 @@ import { useQuery, useMutation } from "@tanstack/react-query";
 import { queryClient } from "@/lib/queryClient";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
-import { Expert, Message, Insight, File as FileType, Conversation, FarmProfile } from "@shared/schema";
+import { Expert, Message, Insight, File as FileType, Conversation, FarmProfile, OpenQuestion } from "@shared/schema";
 import FarmProfileModal from "@/components/farm/FarmProfileModal";
 import { useWebSocket, sendWebSocketSubscription, sendWebSocketUnsubscription } from "@/lib/websocket-utils";
 import { Button } from "@/components/ui/button";
@@ -189,6 +189,13 @@ export default function HomePage() {
     queryKey: [`/api/protected/conversations/${activeConversation}/messages`],
     enabled: !!activeConversation,
   });
+
+  // Open questions are stored separately from the transcript so they remain
+  // actionable when a farmer comes back to a discussion hours later.
+  const { data: openQuestions = [] } = useQuery<OpenQuestion[]>({
+    queryKey: [`/api/protected/conversations/${activeConversation}/open-questions`],
+    enabled: !!activeConversation,
+  });
   
   // Fetch insights for active conversation
   const {
@@ -214,17 +221,17 @@ export default function HomePage() {
   const sendMessageMutation = useMutation<
     Message,
     Error,
-    string,
+    { content: string; answersQuestionId?: number },
     { previousMessages?: Message[]; tempId?: number; conversationId?: number }
   >({
-    mutationFn: async (content: string) => {
+    mutationFn: async ({ content, answersQuestionId }) => {
       if (!activeConversation) throw new Error("No active conversation");
       if (!user) throw new Error("User not authenticated");
 
-      const res = await apiRequest("POST", `/api/protected/conversations/${activeConversation}/messages`, {
-        content,
-        userId: user.id
-      });
+      const path = answersQuestionId
+        ? `/api/protected/conversations/${activeConversation}/open-questions/${answersQuestionId}/answer`
+        : `/api/protected/conversations/${activeConversation}/messages`;
+      const res = await apiRequest("POST", path, { content, userId: user.id });
 
       if (!res.ok) {
         const errorData = await res.json();
@@ -233,7 +240,7 @@ export default function HomePage() {
 
       return await res.json();
     },
-    onMutate: async (newMessageContent: string) => {
+    onMutate: async ({ content: newMessageContent, answersQuestionId }) => {
       if (!activeConversation || !user) return {};
 
       const conversationId = activeConversation;
@@ -255,6 +262,7 @@ export default function HomePage() {
           role: "user",
           expertName: null,
           expertRole: null,
+          answersQuestionId: answersQuestionId ?? (openQuestions.length === 1 ? openQuestions[0].id : null),
           timestamp: new Date(),
         },
       ]);
@@ -274,6 +282,7 @@ export default function HomePage() {
         if (withoutTemp.some(m => m.id === storedMessage.id)) return withoutTemp;
         return [...withoutTemp, storedMessage];
       });
+      queryClient.invalidateQueries({ queryKey: [`/api/protected/conversations/${context.conversationId}/open-questions`] });
     },
     onError: (err, _newMessageContent, context) => {
       if (!context?.conversationId) return;
@@ -286,6 +295,7 @@ export default function HomePage() {
           old.filter(m => m.id !== context.tempId)
         );
       }
+      queryClient.invalidateQueries({ queryKey: [`/api/protected/conversations/${context.conversationId}/open-questions`] });
       toast({
         title: "Failed to send message",
         description: err.message,
@@ -333,7 +343,7 @@ export default function HomePage() {
   // Normal messages are sent immediately and the server decides whether busy
   // input should wait for the next Moderator route. `/new` is the explicit
   // same-conversation restart command.
-  const handleSendMessage = (content: string) => {
+  const handleSendMessage = (content: string, answersQuestionId?: number) => {
     const topic = parseNewCommand(content);
     if (topic !== null) {
       if (!activeConversation) return;
@@ -343,7 +353,7 @@ export default function HomePage() {
       });
       return;
     }
-    sendMessageMutation.mutate(content);
+    sendMessageMutation.mutate({ content, answersQuestionId });
   };
 
   // Upload file mutation
@@ -631,6 +641,7 @@ export default function HomePage() {
       queryClient.invalidateQueries({ queryKey: [`/api/protected/conversations/${activeConversation}/experts`] });
       queryClient.invalidateQueries({ queryKey: [`/api/protected/conversations/${activeConversation}/insights`] });
       queryClient.invalidateQueries({ queryKey: [`/api/protected/conversations/${activeConversation}/files`] });
+      queryClient.invalidateQueries({ queryKey: [`/api/protected/conversations/${activeConversation}/open-questions`] });
       return;
     }
 
@@ -765,6 +776,10 @@ export default function HomePage() {
           case "message_picked_up":
             debugLog("WebSocket: Queued farmer message picked up");
             setHasQueuedMessage(false);
+            break;
+
+          case "open_questions_updated":
+            queryClient.invalidateQueries({ queryKey: [`/api/protected/conversations/${activeConversation}/open-questions`] });
             break;
 
           case "concluding":
@@ -1134,6 +1149,7 @@ export default function HomePage() {
                     <ChatInterface
                         messages={messages || []}
                         experts={experts || []}
+                        openQuestions={openQuestions}
                         onSendMessage={handleSendMessage}
                         onUploadFile={handleFileUpload}
                         isUploading={uploadFileMutation.isPending}

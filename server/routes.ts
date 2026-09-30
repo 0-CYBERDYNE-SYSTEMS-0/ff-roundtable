@@ -23,6 +23,20 @@ import { isDuplicateUserSubmission } from './text-similarity';
 import { format } from 'date-fns';
 import { TIERS, getTierLimits, isPaidModel } from './tiers';
 
+class OpenQuestionAnswerConflictError extends Error {}
+const rememberedAnswerTurnStarts = new Map<number, number>();
+const ANSWER_TURN_RETRY_DEDUPE_MS = 60_000;
+
+function answerTurnWasRecentlyDispatched(messageId: number): boolean {
+  const dispatchedAt = rememberedAnswerTurnStarts.get(messageId);
+  if (dispatchedAt === undefined) return false;
+  if (Date.now() - dispatchedAt > ANSWER_TURN_RETRY_DEDUPE_MS) {
+    rememberedAnswerTurnStarts.delete(messageId);
+    return false;
+  }
+  return true;
+}
+
 // Load dev config
 let devConfig: any = null;
 try {
@@ -475,6 +489,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
               messageId: data.messageId,
             }));
           }
+          // The question panel refetches its conversation-scoped ledger when
+          // an open question is created or answered.
+          else if (data.type === "open_questions_updated") {
+            client.send(JSON.stringify({
+              type: "open_questions_updated",
+              conversationId,
+            }));
+          }
           // Handle G5 conclusion: the Moderator ended the round; the closing
           // synthesis turn streams next.
           else if (data.type === "concluding") {
@@ -554,7 +576,144 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
     });
   };
-  
+
+  async function resolveAnswerQuestion(
+    conversationId: number,
+    requestedId: unknown,
+  ): Promise<{ questionId: number | null } | { status: number; message: string }> {
+    if (requestedId === undefined || requestedId === null) {
+      const openQuestions = await storage.listOpenQuestions(conversationId);
+      return { questionId: openQuestions.length === 1 ? openQuestions[0].id : null };
+    }
+
+    if (typeof requestedId !== "number" || !Number.isSafeInteger(requestedId) || requestedId <= 0) {
+      return { status: 400, message: "answersQuestionId must be a positive integer." };
+    }
+
+    const question = await storage.getOpenQuestion(requestedId);
+    if (!question || question.conversationId !== conversationId) {
+      return { status: 404, message: "Open question not found." };
+    }
+    return { questionId: question.id };
+  }
+
+  async function storeAndProcessUserMessage(
+    userId: number,
+    conversationId: number,
+    content: string,
+    answersQuestionId: number | null,
+  ): Promise<{ message: Message; created: boolean }> {
+    const startProcessing = (message: Message, questionId?: number) => {
+      if (questionId !== undefined && answerTurnWasRecentlyDispatched(message.id)) return;
+      if (questionId !== undefined) {
+        rememberedAnswerTurnStarts.set(message.id, Date.now());
+        if (rememberedAnswerTurnStarts.size > 1024) {
+          const oldest = rememberedAnswerTurnStarts.keys().next().value;
+          if (oldest !== undefined) rememberedAnswerTurnStarts.delete(oldest);
+        }
+      }
+      const processing = processMessageTurnBased(userId, conversationId, message, broadcastToConversation);
+      void processing.catch(error => {
+        if (questionId !== undefined) rememberedAnswerTurnStarts.delete(message.id);
+        console.error("Error during turn-based processing initiation:", error);
+        broadcastToConversation(conversationId, {
+          type: "error",
+          message: "Failed to start expert processing.",
+        });
+      });
+    };
+
+    const existingMessages = await storage.getConversationMessages(conversationId);
+    const answerAlreadyInFlightOrHandled = (message: Message): boolean => {
+      if (answerTurnWasRecentlyDispatched(message.id)) return true;
+      const currentState = getConversationState(conversationId);
+      const liveSequence = currentState && ["processing_sequential", "autonomous", "paused"].includes(currentState.mode);
+      if (liveSequence && (
+        (currentState.lastUserMessage?.id ?? -1) >= message.id ||
+        (currentState.pendingUserMessage?.id ?? -1) >= message.id
+      )) return true;
+      // G7 deliberately recovers dead turn chains to idle. If a real expert
+      // response is already stored after this answer, do not replay a finished
+      // (or already-partially-finished) discussion on an exact HTTP retry.
+      return existingMessages.some(existing => existing.role === "assistant" && existing.id > message.id);
+    };
+    const lastExistingMessage = existingMessages[existingMessages.length - 1] ?? null;
+    const priorLinkedAnswer = answersQuestionId === null
+      ? undefined
+      : [...existingMessages].reverse().find(message =>
+          message.role === "user" && message.answersQuestionId === answersQuestionId,
+        );
+    const isExactLinkedAnswerRetry = priorLinkedAnswer !== undefined &&
+      content.trim() === priorLinkedAnswer.content.trim();
+
+    if (isExactLinkedAnswerRetry) {
+      const questionBeforeRetry = await storage.getOpenQuestion(answersQuestionId!);
+      if (!questionBeforeRetry) {
+        throw new OpenQuestionAnswerConflictError("The selected open question is no longer available to answer.");
+      }
+      if (questionBeforeRetry.status === "answered" && questionBeforeRetry.answerMessageId !== priorLinkedAnswer!.id) {
+        throw new OpenQuestionAnswerConflictError("The selected open question was answered by a different message.");
+      }
+
+      if (questionBeforeRetry.status === "open") {
+        const answerClaim = await storage.claimOpenQuestionAnswer(answersQuestionId!, priorLinkedAnswer!.id);
+        if (!answerClaim) {
+          throw new OpenQuestionAnswerConflictError("The selected open question is no longer available to answer.");
+        }
+        if (answerClaim.claimed) {
+          broadcastToConversation(conversationId, priorLinkedAnswer!);
+          broadcastToConversation(conversationId, { type: "open_questions_updated" });
+          if (!answerAlreadyInFlightOrHandled(priorLinkedAnswer!)) {
+            startProcessing(priorLinkedAnswer!, answersQuestionId!);
+          }
+        }
+      } else if (!answerAlreadyInFlightOrHandled(priorLinkedAnswer!)) {
+        // Covers a commit whose acknowledgement failed before its route
+        // could dispatch G11. A retry starts it if no live or completed turn
+        // is visible; completed/dead chains follow the G7 recovery rules.
+        startProcessing(priorLinkedAnswer!, answersQuestionId!);
+      }
+      return { message: priorLinkedAnswer!, created: false };
+    }
+
+    if (answersQuestionId === null && isDuplicateUserSubmission(content, lastExistingMessage, false)) {
+      console.log(`Duplicate user submission detected in conversation ${conversationId} — skipping processing.`);
+      return { message: lastExistingMessage!, created: false };
+    }
+
+    const conversationExperts = await storage.getConversationExperts(conversationId);
+    const userMessage: InsertMessage = {
+      conversationId,
+      userId,
+      expertId: null,
+      content,
+      role: "user",
+      mentions: extractMentions(content, conversationExperts.map(expert => expert.role)),
+      answersQuestionId,
+    };
+    let storedMessage: Message;
+    if (answersQuestionId !== null) {
+      const result = await storage.createAnswerMessage(userMessage, answersQuestionId);
+      if (!result) {
+        throw new OpenQuestionAnswerConflictError("The selected open question is no longer available to answer.");
+      }
+      storedMessage = result.message;
+    } else {
+      storedMessage = await storage.createMessage(userMessage);
+    }
+
+    // Broadcast the saved answer itself for transcript compatibility, then
+    // signal subscribers to refresh the question list after its status change.
+    broadcastToConversation(conversationId, storedMessage);
+    if (answersQuestionId !== null) {
+      broadcastToConversation(conversationId, { type: "open_questions_updated" });
+    }
+
+    startProcessing(storedMessage, answersQuestionId ?? undefined);
+
+    return { message: storedMessage, created: true };
+  }
+
   // Check Subscription Status
   app.get("/api/subscription-status", async (req, res) => {
     if (!req.isAuthenticated()) {
@@ -1003,6 +1162,21 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Message endpoints
+  app.get("/api/protected/conversations/:id/open-questions", async (req, res) => {
+    try {
+      const conversationId = parseInt(req.params.id);
+      const conversation = await storage.getConversation(conversationId);
+      if (!conversation || conversation.userId !== req.user!.id) {
+        return res.status(404).json({ message: "Conversation not found" });
+      }
+
+      const questions = await storage.listOpenQuestions(conversationId);
+      return res.json(questions);
+    } catch (error: any) {
+      return res.status(500).json({ message: error.message || "Internal server error" });
+    }
+  });
+
   app.post("/api/protected/conversations/:id/messages", async (req, res) => {
     try {
       const conversationId = parseInt(req.params.id);
@@ -1013,57 +1187,67 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
       
       const userId = req.user!.id;
-      const { content } = req.body;
-
-      // F2 duplicate-submission gate: an identical resend with nothing new
-      // (last message is this same user text, no new files) must not store a
-      // second copy or re-trigger the full expert fan-out. Everything else —
-      // including a repeat asked after expert replies — processes normally.
-      const existingMessages = await storage.getConversationMessages(conversationId);
-      const lastExistingMessage = existingMessages[existingMessages.length - 1] ?? null;
-      if (isDuplicateUserSubmission(content, lastExistingMessage, false)) {
-        console.log(`Duplicate user submission detected in conversation ${conversationId} — skipping processing.`);
-        return res.status(200).json(lastExistingMessage);
+      const { content, answersQuestionId } = req.body ?? {};
+      const resolution = await resolveAnswerQuestion(conversationId, answersQuestionId);
+      if ("status" in resolution) {
+        return res.status(resolution.status).json({ message: resolution.message });
       }
 
-      // Parse @-mentions once against this conversation's expert roles and
-      // persist them on the message. The orchestrator queues recognized roles
-      // as first responders; the field rides broadcasts so the client never
-      // re-parses it.
-      const conversationExperts = await storage.getConversationExperts(conversationId);
-      const knownRoles = conversationExperts.map(e => e.role);
-      const userMessage: InsertMessage = {
-        conversationId,
+      // An explicit answer to a different question is a different submission
+      // even if its prose repeats the previous message. Ordinary duplicate
+      // messages retain the existing F2 duplicate gate.
+      const result = await storeAndProcessUserMessage(
         userId,
-        expertId: null,
+        conversationId,
         content,
-        role: "user",
-        mentions: extractMentions(content, knownRoles)
-      };
-      const storedMessage: Message = await storage.createMessage(userMessage);
+        resolution.questionId,
+      );
 
-      // Broadcast the user message immediately via WebSocket
-      broadcastToConversation(conversationId, storedMessage);
-
-      // Start *turn-based* asynchronous processing of expert responses
-      processMessageTurnBased(
-        userId, 
-        conversationId, 
-        storedMessage,
-        broadcastToConversation
-      ).catch(error => {
-        console.error("Error during turn-based processing initiation:", error);
-        broadcastToConversation(conversationId, {
-            type: "error",
-            message: "Failed to start expert processing."
-        });
-      });
-      
-      // Return the stored user message immediately
-      res.status(201).json(storedMessage);
+      return res.status(result.created ? 201 : 200).json(result.message);
     } catch (error: any) {
       console.error("Error in POST /messages:", error);
-      res.status(500).json({ message: error.message || "Internal server error" });
+      if (error instanceof OpenQuestionAnswerConflictError) {
+        return res.status(409).json({ message: error.message });
+      }
+      return res.status(500).json({ message: error.message || "Internal server error" });
+    }
+  });
+
+  app.post("/api/protected/conversations/:id/open-questions/:questionId/answer", async (req, res) => {
+    try {
+      const conversationId = parseInt(req.params.id);
+      const conversation = await storage.getConversation(conversationId);
+      if (!conversation || conversation.userId !== req.user!.id) {
+        return res.status(404).json({ message: "Conversation not found" });
+      }
+
+      const questionId = Number(req.params.questionId);
+      if (!Number.isSafeInteger(questionId) || questionId <= 0) {
+        return res.status(400).json({ message: "Invalid question id." });
+      }
+      const { content } = req.body ?? {};
+      if (typeof content !== "string" || content.trim().length === 0) {
+        return res.status(400).json({ message: "An answer is required." });
+      }
+
+      const resolution = await resolveAnswerQuestion(conversationId, questionId);
+      if ("status" in resolution) {
+        return res.status(resolution.status).json({ message: resolution.message });
+      }
+
+      const result = await storeAndProcessUserMessage(
+        req.user!.id,
+        conversationId,
+        content,
+        resolution.questionId,
+      );
+      return res.status(result.created ? 201 : 200).json(result.message);
+    } catch (error: any) {
+      console.error("Error answering an open question:", error);
+      if (error instanceof OpenQuestionAnswerConflictError) {
+        return res.status(409).json({ message: error.message });
+      }
+      return res.status(500).json({ message: error.message || "Internal server error" });
     }
   });
 

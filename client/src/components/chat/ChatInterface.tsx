@@ -5,7 +5,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { AtSign, Paperclip, Send, Loader2, Users, ScrollText } from "lucide-react";
-import { Message, Expert, User } from "@shared/schema";
+import { Message, Expert, User, OpenQuestion } from "@shared/schema";
 import { format } from "date-fns";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -21,7 +21,8 @@ import { useToast } from "@/hooks/use-toast";
 interface ChatInterfaceProps {
   messages: Message[];
   experts: Expert[];
-  onSendMessage: (content: string) => void;
+  onSendMessage: (content: string, answersQuestionId?: number) => void;
+  openQuestions: OpenQuestion[];
   onUploadFile: (file: File) => void;
   isLoading: boolean;
   isUploading?: boolean;
@@ -170,6 +171,7 @@ export default function ChatInterface({
   messages,
   experts,
   onSendMessage,
+  openQuestions,
   onUploadFile,
   isLoading,
   isUploading = false,
@@ -195,6 +197,15 @@ export default function ChatInterface({
   const isNearBottomRef = useRef(true);
   const isMobile = useIsMobile();
   const [showMobileExpertPanel, setShowMobileExpertPanel] = useState(false);
+  const [showOpenQuestions, setShowOpenQuestions] = useState(false);
+  const [selectedQuestionId, setSelectedQuestionId] = useState<number | null>(null);
+  const selectedQuestion = openQuestions.find(question => question.id === selectedQuestionId) ?? null;
+
+  useEffect(() => {
+    if (selectedQuestionId !== null && !openQuestions.some(question => question.id === selectedQuestionId)) {
+      setSelectedQuestionId(null);
+    }
+  }, [openQuestions, selectedQuestionId]);
 
   // G4 composer @-autocomplete: the live "@token" before the caret, the query
   // text at the moment of an Escape dismissal, the highlighted match, and the
@@ -306,7 +317,7 @@ export default function ChatInterface({
   const handleSendMessage = () => {
     if (messageContent.trim() === "") return;
 
-    onSendMessage(messageContent);
+    onSendMessage(messageContent, selectedQuestionId ?? undefined);
     setMessageContent("");
   };
 
@@ -608,6 +619,57 @@ export default function ChatInterface({
         />
       )}
 
+      {showOpenQuestions && (
+        <aside
+          role="complementary"
+          aria-label="Open questions for you"
+          className="absolute right-0 top-0 bottom-0 z-40 w-full max-w-sm border-l border-farm-tan/40 bg-white shadow-2xl flex flex-col"
+        >
+          <div className="flex items-center justify-between gap-3 border-b border-farm-tan/30 px-4 py-3">
+            <div>
+              <h3 className="font-semibold text-farm-blue">Questions for you</h3>
+              <p className="text-xs text-neutral-500">Your council kept going while these were open.</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowOpenQuestions(false)}
+              aria-label="Close open questions"
+              className="rounded p-1.5 text-neutral-500 hover:bg-farm-powder/30"
+            >
+              ×
+            </button>
+          </div>
+          <ScrollArea className="flex-1 p-3">
+            <div className="space-y-3">
+              {openQuestions.map(question => (
+                <article key={question.id} className="rounded-lg border border-farm-tan/40 bg-farm-powder/10 p-3">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-farm-green">{question.expertRole}</p>
+                  <p className="mt-1 text-sm font-medium text-farm-blue">{question.question}</p>
+                  <p className="mt-2 text-xs text-neutral-600">
+                    <span className="font-semibold">Assumption:</span> {question.assumption || "The council is proceeding with an informed assumption."}
+                  </p>
+                  <Button
+                    type="button"
+                    size="sm"
+                    className="mt-3 bg-farm-green text-white hover:bg-farm-dark-green"
+                    onClick={() => {
+                      setSelectedQuestionId(question.id);
+                      setShowOpenQuestions(false);
+                      requestAnimationFrame(() => textareaRef.current?.focus());
+                    }}
+                  >
+                    Answer in composer
+                  </Button>
+                </article>
+              ))}
+              {openQuestions.length === 0 && (
+                <p className="p-3 text-sm text-neutral-500">No open questions right now.</p>
+              )}
+            </div>
+          </ScrollArea>
+        </aside>
+      )}
+
       {/* Main Chat Area */}
       <div className="flex-1 flex flex-col h-full bg-white border-r border-neutral-200 min-w-0">
         {/* Chat Messages */}
@@ -769,6 +831,33 @@ export default function ChatInterface({
         
         {/* Input Area */}
         <div className="border-t border-farm-tan/30 bg-gradient-to-r from-white to-farm-powder/10 p-4">
+          {(openQuestions.length > 0 || selectedQuestion) && (
+            <div className="mb-3 flex items-center justify-between gap-2">
+              {openQuestions.length > 0 ? (
+                <button
+                  type="button"
+                  onClick={() => setShowOpenQuestions(value => !value)}
+                  className="inline-flex items-center rounded-full border border-farm-blue/20 bg-farm-powder/30 px-3 py-1 text-xs font-semibold text-farm-blue hover:bg-farm-powder/50"
+                  aria-expanded={showOpenQuestions}
+                >
+                  {openQuestions.length} {openQuestions.length === 1 ? "question" : "questions"} for you
+                </button>
+              ) : <span />}
+              {selectedQuestion && (
+                <div className="flex min-w-0 items-center gap-2 text-xs text-farm-blue" role="status">
+                  <span className="truncate">Answering: {selectedQuestion.question}</span>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedQuestionId(null)}
+                    className="flex-shrink-0 rounded px-1.5 py-0.5 text-neutral-500 hover:bg-farm-powder/40"
+                    aria-label="Cancel answer selection"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
           <div className="flex items-center gap-3">
             <input
               type="file"
@@ -839,7 +928,7 @@ export default function ChatInterface({
               className="bg-gradient-to-br from-farm-green to-farm-dark-green hover:from-farm-dark-green hover:to-farm-green text-white rounded-full p-2 ml-2 h-11 w-11 flex items-center justify-center shadow-md hover:shadow-lg transition-all duration-200 disabled:opacity-50"
               onClick={handleSendMessage}
               disabled={messageContent.trim() === ""}
-              aria-label="Send message"
+              aria-label={selectedQuestion ? "Send answer" : "Send message"}
             >
               <Send className="h-5 w-5" />
             </Button>

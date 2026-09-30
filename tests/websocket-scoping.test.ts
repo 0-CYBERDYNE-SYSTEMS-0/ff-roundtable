@@ -161,6 +161,24 @@ async function addExpert(baseUrl: string, cookie: string, conversationId: number
   return res.json();
 }
 
+async function createOpenQuestion(conversationId: number, question: string) {
+  const sourceMessage = await storage.createMessage({
+    conversationId,
+    userId: null,
+    expertId: null,
+    content: `@[User] ${question} Assuming the north field is first.`,
+    role: "assistant",
+    expertRole: "Agronomist",
+  });
+  return storage.createOpenQuestion({
+    conversationId,
+    messageId: sourceMessage.id,
+    expertRole: "Agronomist",
+    question,
+    assumption: "Assuming the north field is first.",
+  });
+}
+
 function waitForConversationMode(conversationId: number, mode: string, timeoutMs = 5000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   return new Promise((resolve, reject) => {
@@ -324,6 +342,35 @@ describe("WebSocket scoping (G3)", () => {
     } finally {
       clientB.ws.close(1000, "test done");
     }
+  });
+
+  it("forwards open-question status updates only to sockets subscribed to that conversation", async () => {
+    const subscribedQuestion = await createOpenQuestion(convoA1.id, "Which field should be planted first?");
+    const subscribedAnswer = await api(
+      baseUrl,
+      "POST",
+      `/api/protected/conversations/${convoA1.id}/open-questions/${subscribedQuestion.id}/answer`,
+      { cookie: cookieA, body: { content: "Plant the north field first." } },
+    );
+    expect(subscribedAnswer.status).toBe(201);
+    const delivered = await nextMessage(
+      clientA,
+      (m) => m.type === "open_questions_updated" && m.conversationId === convoA1.id,
+    );
+    expect(delivered).toEqual({ type: "open_questions_updated", conversationId: convoA1.id });
+
+    const unsubscribedQuestion = await createOpenQuestion(convoA2.id, "Which crop should be planted first?");
+    const unsubscribedAnswer = await api(
+      baseUrl,
+      "POST",
+      `/api/protected/conversations/${convoA2.id}/open-questions/${unsubscribedQuestion.id}/answer`,
+      { cookie: cookieA, body: { content: "Plant corn first." } },
+    );
+    expect(unsubscribedAnswer.status).toBe(201);
+    await waitFor(150);
+    expect(clientA.received.some(
+      (m) => m.type === "open_questions_updated" && m.conversationId === convoA2.id,
+    )).toBe(false);
   });
 
   it("replays orchestrator state on resubscribe (reconnect path)", async () => {

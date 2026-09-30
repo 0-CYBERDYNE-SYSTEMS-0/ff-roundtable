@@ -109,6 +109,7 @@ You are part of a team of experts: [${availableRoles?.join(', ') || 'various rol
 
   const interactionPrompt = `During discussion, actively engage with other experts. Reference their points and ask clarifying questions.
 You can direct the discussion: if you write @[Role Name], that expert will be asked to speak next. Tag only when their expertise is genuinely needed; otherwise speak to the whole table.
+If you need a fact only the farmer can know, put one concise question on its own line exactly as @[User] <question>?, then put a separate next line beginning Assuming <reasonable assumption>. Continue the discussion from that assumption without waiting for the farmer to answer.
 Be concise and clear in your responses.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -950,6 +951,15 @@ export async function getModeratorNextSpeakerSuggestion(
         }
         if (farmerJustSpoke) {
             queryPrompt += ` The farmer just spoke. Treat the farmer's latest message as new input to the discussion and choose the expert best positioned to respond to it or advance the room.`;
+        }
+        const linkedAnswer = [...history].reverse().find(
+            message => message.role === "user" && Number.isInteger(message.answersQuestionId),
+        );
+        if (linkedAnswer?.answersQuestionId !== null && linkedAnswer?.answersQuestionId !== undefined) {
+            const question = await storage.getOpenQuestion(linkedAnswer.answersQuestionId);
+            if (question?.status === "answered" && question.answerMessageId === linkedAnswer.id) {
+                queryPrompt += ` The farmer answered the open question "${question.question}": "${linkedAnswer.content}". Revisit any assumptions that conflict with this answer.`;
+            }
         }
 
         const messages: AIMessage[] = [

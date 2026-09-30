@@ -10,7 +10,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { extractMentions } from "../shared/mentions";
+import { extractFarmerQuestions, extractMentions } from "../shared/mentions";
 
 const ROSTER = ["Soil Scientist", "Crop Specialist", "Meteorologist", "Irrigation Engineer"];
 
@@ -34,6 +34,11 @@ describe("extractMentions", () => {
     expect(extractMentions("@[  Soil   Scientist ] please advise", ROSTER)).toEqual([
       "Soil Scientist",
     ]);
+  });
+
+  it("recognizes case- and spacing-insensitive reserved farmer tags outside the roster", () => {
+    expect(extractMentions("@[ user ] and @[ fArMeR ]", ROSTER)).toEqual(["User"]);
+    expect(extractMentions("@[Farmer]", [])).toEqual(["User"]);
   });
 
   it("filters out unknown bracketed roles", () => {
@@ -133,5 +138,60 @@ describe("extractMentions", () => {
 
   it("ignores bare text that no role starts with", () => {
     expect(extractMentions("@everyone please look at this", ROSTER)).toEqual([]);
+  });
+});
+
+describe("extractFarmerQuestions", () => {
+  it("extracts User questions and their immediately following assumptions", () => {
+    expect(extractFarmerQuestions(
+      "@[User] When did you last test the soil?\nAssuming the test was within the past year.\n" +
+      "@[Farmer] Which field is affected?\nAssuming the north field is wettest.",
+    )).toEqual([
+      {
+        question: "When did you last test the soil?",
+        assumption: "the test was within the past year.",
+      },
+      {
+        question: "Which field is affected?",
+        assumption: "the north field is wettest.",
+      },
+    ]);
+  });
+
+  it("accepts optional markdown bullets and whitespace around a pair", () => {
+    expect(extractFarmerQuestions(
+      "  - @[ user ] What crop is already planted?  \n  * Assuming corn is already in the south field.  ",
+    )).toEqual([{
+      question: "What crop is already planted?",
+      assumption: "corn is already in the south field.",
+    }]);
+  });
+
+  it("skips a pair when either line is malformed", () => {
+    expect(extractFarmerQuestions([
+      "@[User] Which field should we sample?",
+      "Because the north field is wetter.", // not an Assuming line
+      "@[User] This line has no question mark",
+      "Assuming the north field needs testing.",
+      "@[User] When was the last test?",
+      "Assuming",
+    ].join("\n"))).toEqual([]);
+  });
+
+  it("preserves pair order and removes exact duplicate pairs", () => {
+    expect(extractFarmerQuestions([
+      "@[User] How often should we irrigate?",
+      "Assuming the soil is dry.",
+      "@[Farmer] Is the slope steep?",
+      "Assuming runoff may be a concern.",
+      "- @[User] How often should we irrigate?",
+      "- Assuming the soil is dry.",
+      "@[User] How often should we irrigate?",
+      "Assuming evaporation is high.",
+    ].join("\n"))).toEqual([
+      { question: "How often should we irrigate?", assumption: "the soil is dry." },
+      { question: "Is the slope steep?", assumption: "runoff may be a concern." },
+      { question: "How often should we irrigate?", assumption: "evaporation is high." },
+    ]);
   });
 });

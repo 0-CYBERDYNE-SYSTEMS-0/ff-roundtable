@@ -140,6 +140,13 @@ describe("generateSystemPrompt charter injection", () => {
     expect(prompt).toContain(`\n${CHARTER}\n`);
     expect(prompt).not.toContain(`  ${CHARTER}  `);
   });
+
+  it("asks experts to log farmer-only questions and proceed on an assumption", () => {
+    const prompt = generateSystemPrompt(expert, roles);
+    expect(prompt).toContain("@[User] <question>?");
+    expect(prompt).toContain("beginning Assuming <reasonable assumption>");
+    expect(prompt).toContain("without waiting for the farmer to answer");
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════
@@ -202,6 +209,48 @@ describe("getModeratorNextSpeakerSuggestion charter awareness", () => {
     expect(systemMessage.content).not.toContain("COUNCIL CHARTER");
     const userQuery = messages.filter((m: any) => m.role === "user").pop();
     expect(userQuery.content).not.toContain("council charter");
+  });
+
+  it("tells the Moderator what the farmer answered and to revisit conflicting assumptions", async () => {
+    const convo = await storage.createConversation({ userId: 1, title: "Answered question" });
+    const expertQuestion = await storage.createMessage({
+      conversationId: convo.id,
+      expertId: null,
+      userId: null,
+      content: "@[User] What was the soil pH?\nAssuming it was near neutral.",
+      role: "assistant",
+      expertRole: "Soil Scientist",
+      mentions: ["User"],
+    });
+    const question = await storage.createOpenQuestion({
+      conversationId: convo.id,
+      messageId: expertQuestion.id,
+      expertRole: "Soil Scientist",
+      question: "What was the soil pH?",
+      assumption: "it was near neutral.",
+    });
+    const answer = await storage.createMessage({
+      conversationId: convo.id,
+      expertId: null,
+      userId: 1,
+      content: "The test last month measured 5.8.",
+      role: "user",
+      answersQuestionId: question.id,
+    });
+    await storage.answerOpenQuestion(question.id, answer.id);
+
+    await getModeratorNextSpeakerSuggestion(
+      createMockModerator(null, convo.id),
+      [expertQuestion, answer],
+      ["Soil Scientist"],
+      true,
+    );
+
+    const messages = mockProviderChat.mock.calls[0][0];
+    const userQuery = messages.filter((m: any) => m.role === "user").pop();
+    expect(userQuery.content).toContain("The farmer answered the open question \"What was the soil pH?\"");
+    expect(userQuery.content).toContain("The test last month measured 5.8.");
+    expect(userQuery.content).toContain("Revisit any assumptions that conflict with this answer.");
   });
 });
 

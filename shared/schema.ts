@@ -1,4 +1,4 @@
-import { pgTable, text, serial, integer, boolean, timestamp, json, jsonb } from "drizzle-orm/pg-core";
+import { pgTable, pgEnum, text, serial, integer, boolean, timestamp, json, jsonb, uniqueIndex, type AnyPgColumn } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -25,6 +25,8 @@ export interface OrchestratorSnapshot {
   wasInterrupted: boolean;
   pausedFromMode: string | null;
 }
+
+export const openQuestionStatus = pgEnum("open_question_status", ["open", "answered"]);
 
 export const conversations = pgTable("conversations", {
   id: serial("id").primaryKey(),
@@ -68,8 +70,27 @@ export const messages = pgTable("messages", {
   // G5: true for the Moderator's closing synthesis message that ends a
   // roundtable ('Conclude'). Nullable: legacy rows have no value.
   isSynthesis: boolean("is_synthesis"),
+  // G12: links a farmer answer to the open question it resolves.
+  answersQuestionId: integer("answers_question_id").references((): AnyPgColumn => openQuestions.id),
   timestamp: timestamp("timestamp").defaultNow(),
 });
+
+// G12: durable ledger of explicit questions raised by experts. The message
+// and answer links preserve provenance while the unique key makes repeated
+// parsing of the same message idempotent.
+export const openQuestions = pgTable("open_questions", {
+  id: serial("id").primaryKey(),
+  conversationId: integer("conversation_id").notNull().references(() => conversations.id),
+  messageId: integer("message_id").notNull().references(() => messages.id),
+  expertRole: text("expert_role").notNull(),
+  question: text("question").notNull(),
+  assumption: text("assumption"),
+  status: openQuestionStatus("status").notNull().default("open"),
+  answerMessageId: integer("answer_message_id").references(() => messages.id),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({
+  messageQuestionUnique: uniqueIndex("open_questions_message_question_unique").on(table.messageId, table.question),
+}));
 
 export const files = pgTable("files", {
   id: serial("id").primaryKey(),
@@ -162,6 +183,13 @@ export const insertInsightSchema = createInsertSchema(insights).omit({
   createdAt: true,
 });
 
+export const insertOpenQuestionSchema = createInsertSchema(openQuestions, {
+  status: z.enum(["open", "answered"]).optional(),
+}).omit({
+  id: true,
+  createdAt: true,
+});
+
 export const insertFarmProfileSchema = createInsertSchema(farmProfiles).omit({
   id: true,
   createdAt: true,
@@ -187,10 +215,11 @@ export type InsertMessage = Omit<z.infer<typeof insertMessageSchema>, 'mentions'
 };
 // Extend Message type to properly type artifacts as Artifact[]
 // (and keep the nullable G4/G5 columns optional for object literals)
-export type Message = Omit<typeof messages.$inferSelect, 'artifacts' | 'mentions' | 'isSynthesis'> & {
+export type Message = Omit<typeof messages.$inferSelect, 'artifacts' | 'mentions' | 'isSynthesis' | 'answersQuestionId'> & {
   artifacts?: Artifact[];
   mentions?: string[] | null;
   isSynthesis?: boolean | null;
+  answersQuestionId?: number | null;
 };
 
 export type InsertFile = z.infer<typeof insertFileSchema>;
@@ -198,6 +227,9 @@ export type File = typeof files.$inferSelect;
 
 export type InsertInsight = z.infer<typeof insertInsightSchema>;
 export type Insight = typeof insights.$inferSelect;
+
+export type InsertOpenQuestion = z.infer<typeof insertOpenQuestionSchema>;
+export type OpenQuestion = typeof openQuestions.$inferSelect;
 
 export type InsertFarmProfile = z.infer<typeof insertFarmProfileSchema>;
 export type FarmProfile = typeof farmProfiles.$inferSelect;
