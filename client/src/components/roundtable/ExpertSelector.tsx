@@ -116,14 +116,6 @@ const availableExperts = [
     category: EXPERT_CATEGORIES.RESEARCH,
     recommended: true
   },
-  {
-    role: "Moderator",
-    description: "Manages conversation summaries and context, providing key insights and bullet points.",
-    defaultModel: "anthropic/claude-3.5-sonnet",
-    avatarUrl: "https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?ixlib=rb-1.2.1&auto=format&fit=crop&w=48&h=48&q=80",
-    category: EXPERT_CATEGORIES.SUPPORT,
-    recommended: true
-  }
 ];
 
 // Preset expert combinations for quick selection
@@ -141,7 +133,7 @@ const EXPERT_PRESETS = [
   {
     name: "Research & Planning Team",
     description: "Best for long-term planning and strategy development",
-    experts: ["Meteorologist", "Research Analyst", "Crop Specialist", "Moderator"],
+    experts: ["Meteorologist", "Research Analyst", "Crop Specialist"],
   }
 ];
 
@@ -356,9 +348,6 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
         case "Imagery Specialist":
           name = "Vision Artist";
           break;
-        case "Moderator":
-          name = "Moderator";
-          break;
         default:
           name = `${expert.role.split(' ')[0]} Expert`;
       }
@@ -375,12 +364,6 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
   };
 
   const selectedCount = localSelectedExperts.length;
-
-  // G8: a council without a Moderator can't route turns or conclude on its
-  // own. Non-blocking hint only — adding one stays the farmer's choice.
-  const pendingHasModerator = localSelectedExperts.some(
-    (item) => availableExperts[item.expertIndex]?.role === "Moderator"
-  );
 
   // Check if an expert is selected
   const isExpertSelected = (index: number) => {
@@ -534,13 +517,6 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
             <p className="text-sm text-red-600">Maximum {maxExperts} experts allowed on your plan</p>
           ) : (
             <p className="text-sm text-green-600">Your team is ready to join the conversation</p>
-          )}
-          {/* G8: subtle Moderator suggestion — clears once one is among the pending selection */}
-          {!pendingHasModerator && (
-            <p className="mt-1 flex items-center justify-center gap-1.5 text-xs text-yellow-700/80 sm:justify-start">
-              <Info className="h-3 w-3 flex-shrink-0" />
-              Add a Moderator so the council can route itself and conclude on its own.
-            </p>
           )}
         </div>
         <Button

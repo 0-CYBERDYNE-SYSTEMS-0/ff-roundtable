@@ -16,20 +16,68 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 const mockFetch = vi.fn();
 global.fetch = mockFetch;
 
+const { mockGetConversation, mockGetConversationExperts } = vi.hoisted(() => ({
+  mockGetConversation: vi.fn(),
+  mockGetConversationExperts: vi.fn(),
+}));
+
+vi.mock("../server/storage", () => ({
+  storage: {
+    getConversation: mockGetConversation,
+    getConversationExperts: mockGetConversationExperts,
+  },
+}));
+
 import {
   getProvider,
   OpenRouterProvider,
   LocalOpenAIProvider,
 } from "../server/ai-providers";
 import type { AIMessage } from "../server/ai";
+import { getModeratorNextSpeakerSuggestion } from "../server/ai";
+import type { ModeratorContext } from "../server/ai";
 import { isFreeModel } from "../server/tiers";
 
 describe("AI Providers", () => {
   beforeEach(() => {
     mockFetch.mockClear();
+    mockGetConversation.mockReset();
+    mockGetConversationExperts.mockReset();
     delete process.env.LOCAL_AI_BASE_URL;
     delete process.env.LOCAL_AI_API_KEY;
     delete process.env.OPENROUTER_API_KEY;
+  });
+
+  describe("Moderator suggestion storage failures", () => {
+    const moderator: ModeratorContext = {
+      id: null,
+      conversationId: 42,
+      name: "Moderator",
+      role: "Moderator",
+      model: "test/model",
+      systemPrompt: "Route the discussion.",
+    };
+
+    it("returns null when loading the conversation charter rejects", async () => {
+      mockGetConversation.mockRejectedValue(new Error("conversation read failed"));
+
+      await expect(
+        getModeratorNextSpeakerSuggestion(moderator, [], ["Agronomist"]),
+      ).resolves.toBeNull();
+      expect(mockGetConversationExperts).not.toHaveBeenCalled();
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it("returns null when loading the conversation roster rejects", async () => {
+      mockGetConversation.mockResolvedValue({ charter: null });
+      mockGetConversationExperts.mockRejectedValue(new Error("expert roster read failed"));
+
+      await expect(
+        getModeratorNextSpeakerSuggestion(moderator, [], ["Agronomist"]),
+      ).resolves.toBeNull();
+      expect(mockGetConversation).toHaveBeenCalledWith(42);
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
   });
 
   // ─────────────────────────────────────────────────────────────────

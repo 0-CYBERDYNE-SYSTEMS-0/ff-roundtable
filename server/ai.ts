@@ -1,6 +1,6 @@
 import { storage } from "./storage";
 // Import shared DB types
-import type { InsertMessage, Expert, InsertFile, Message, File, Artifact, FarmProfile } from "@shared/schema"; 
+import type { InsertMessage, Expert, InsertFile, Message, File, Artifact, FarmProfile, MessageStance, OpenQuestion } from "@shared/schema";
 import { extractArtifacts } from "./artifact-extractor";
 import { extractMentions } from "@shared/mentions";
 import OpenAI from "openai";
@@ -48,11 +48,136 @@ export interface AIModelResponse {
   citations?: string[];
 }
 
+// AI-facing Moderator identity. A roster Moderator carries its persisted
+// expert row ID; the system Moderator is synthetic and has no expert row.
+export interface ModeratorContext {
+  id: number | null;
+  conversationId: number;
+  name: string;
+  role: "Moderator";
+  model: string | null;
+  systemPrompt: string;
+}
+
+const STANCE_LINE_PREFIX = "STANCE:";
+const STANCE_VALUES = ["agree", "disagree", "conditional", "abstain"] as const;
+
+/** Parse and remove a final trailing STANCE line, whether valid or malformed. */
+export function parseTrailingStanceLine(content: string): {
+  content: string;
+  stance: MessageStance | null;
+} {
+  const lines = content.split("\n");
+  let finalLineIndex = lines.length - 1;
+  while (finalLineIndex >= 0 && lines[finalLineIndex].replace(/\r$/, "").trim() === "") {
+    finalLineIndex -= 1;
+  }
+  if (finalLineIndex < 0) return { content, stance: null };
+
+  const finalLine = lines[finalLineIndex].replace(/\r$/, "");
+  if (!/^[ \t]*STANCE:/.test(finalLine)) return { content, stance: null };
+
+  const lineStart = lines.slice(0, finalLineIndex).reduce(
+    (length, line) => length + line.length + 1,
+    0,
+  );
+  const match = finalLine.match(/^[ \t]*STANCE:\s*(agree|disagree|conditional|abstain)\s*\|\s*([1-5])\s*\|\s*(.+?)\s*$/i);
+  const stanceValue = match?.[1]?.toLowerCase();
+  const position = match?.[3]?.trim();
+  const stance = match && position && STANCE_VALUES.includes(stanceValue as typeof STANCE_VALUES[number])
+    ? {
+        stance: stanceValue as MessageStance["stance"],
+        confidence: Number(match[2]) as MessageStance["confidence"],
+        position,
+      }
+    : null;
+
+  return { content: content.slice(0, lineStart), stance };
+}
+
+function stripExpertStance(response: AIModelResponse, role: string): MessageStance | null {
+  if (role === "Moderator") return null;
+  const parsed = parseTrailingStanceLine(response.message.content);
+  response.message.content = parsed.content;
+  return parsed.stance;
+}
+
+/**
+ * Stream response text while withholding a possible final STANCE line. A
+ * marker is released only if later non-whitespace content proves it was not
+ * the final line, so structured metadata never flashes in the live response.
+ */
+class TrailingStanceStreamFilter {
+  private mode: "body" | "prefix" | "marker" | "after-marker" = "prefix";
+  private held = "";
+
+  constructor(private readonly emit: (text: string) => void) {}
+
+  push(chunk: string): void {
+    let output = "";
+    const marker = STANCE_LINE_PREFIX;
+    for (const char of chunk) {
+      let reprocess = true;
+      while (reprocess) {
+        reprocess = false;
+        if (this.mode === "body") {
+          if (char === "\n") {
+            output += char;
+            this.mode = "prefix";
+          } else {
+            output += char;
+          }
+        } else if (this.mode === "prefix") {
+          const indentationLength = this.held.match(/^[ \t]*/)?.[0].length ?? 0;
+          const markerProgress = this.held.length - indentationLength;
+          if (markerProgress === 0 && (char === " " || char === "\t")) {
+            this.held += char;
+          } else if (char === marker[markerProgress]) {
+            this.held += char;
+            if (markerProgress + 1 === marker.length) this.mode = "marker";
+          } else if (char === "\n") {
+            output += this.held + char;
+            this.held = "";
+            this.mode = "prefix";
+          } else {
+            output += this.held + char;
+            this.held = "";
+            this.mode = "body";
+          }
+        } else if (this.mode === "marker") {
+          this.held += char;
+          if (char === "\n") this.mode = "after-marker";
+        } else if (/\s/.test(char)) {
+          this.held += char;
+        } else {
+          // The held marker was followed by a later nonblank line, so it is
+          // ordinary body text. The current character starts that next line.
+          output += this.held;
+          this.held = "";
+          this.mode = "prefix";
+          reprocess = true;
+        }
+      }
+    }
+    if (output) this.emit(output);
+  }
+
+  finish(): void {
+    if (this.mode === "prefix" && this.held) this.emit(this.held);
+    // A complete marker and following whitespace are trailing metadata and
+    // intentionally discarded; no held text can otherwise remain here.
+    this.held = "";
+  }
+}
+
 // Generate a system prompt for an expert
 // Pass availableRoles separately, plus optional farm context, weather, and the
 // conversation's council charter (G6 — governs every expert when present).
 export function generateSystemPrompt(
-  expert: Expert,
+  expert:
+    Pick<Expert, "role">
+    & Partial<Pick<Expert, "customInstructions">>
+    & Partial<Pick<ModeratorContext, "systemPrompt">>,
   availableRoles?: string[],
   farmContext?: string,
   weatherContext?: string,
@@ -64,6 +189,23 @@ Always be respectful, helpful, and conversational while maintaining your expert 
 
 You are part of a team of experts: [${availableRoles?.join(', ') || 'various roles'}].
 `;
+
+  // G10: the Moderator context may provide system-level instructions without
+  // needing a persisted Expert row. Keep those instructions on the Moderator
+  // prompt path only; ordinary experts retain their existing prompt behavior.
+  if (expert.role === "Moderator" && expert.systemPrompt?.trim()) {
+    basePrompt += `\nMODERATOR SYSTEM INSTRUCTIONS:\n${expert.systemPrompt.trim()}\n`;
+  }
+
+  // G14: keep cross-talk guidance on ordinary expert prompts only; the
+  // Moderator/chair prompt remains unchanged.
+  if (expert.role !== "Moderator") {
+    const colleagueRoles = (availableRoles ?? []).filter(
+      role => role !== expert.role && role !== "Moderator" && role !== "User" && role !== "Farmer",
+    );
+    const colleagues = colleagueRoles.length > 0 ? ` Colleagues (not you): [${colleagueRoles.join(", ")}].` : "";
+    basePrompt += `\n💬 CROSS-TALK: Build on or challenge colleagues by name ("I agree with X because…" / "I disagree with X on…").${colleagues} Tag @[Role] only when you need that specialty or want that expert to defend a point; never tag yourself or force a tag every turn. Add new information or an objection instead of repeating settled points.\n`;
+  }
 
   // Inject farmer's custom instructions for this expert if present
   if (expert.customInstructions?.trim()) {
@@ -88,6 +230,7 @@ You are part of a team of experts: [${availableRoles?.join(', ') || 'various rol
 
   const interactionPrompt = `During discussion, actively engage with other experts. Reference their points and ask clarifying questions.
 You can direct the discussion: if you write @[Role Name], that expert will be asked to speak next. Tag only when their expertise is genuinely needed; otherwise speak to the whole table.
+If you need a fact only the farmer can know, put one concise question on its own line exactly as @[User] <question>?, then put a separate next line beginning Assuming <reasonable assumption>. Continue the discussion from that assumption without waiting for the farmer to answer.
 Be concise and clear in your responses.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -244,7 +387,11 @@ Uploaded images are delivered to you directly as native vision input — describ
       roleInstructions = `Provide insights based on your general agricultural knowledge.`;
   }
 
-  return basePrompt + interactionPrompt + roleInstructions;
+  const stanceInstruction = expert.role === "Moderator"
+    ? ""
+    : `\n\nAt the very end of every response, add exactly one machine-readable stance line in this format:\nSTANCE: <agree|disagree|conditional|abstain> | <confidence 1-5> | <one-line position>\nUse one of the four stance values exactly (case-insensitive), an integer confidence from 1 to 5, and a concise one-line position. Put no text after this line. This line will be removed from the farmer-facing response.`;
+
+  return basePrompt + interactionPrompt + roleInstructions + stanceInstruction;
 }
 
 // Function to call AI API (routes through provider abstraction)
@@ -602,22 +749,33 @@ export async function getExpertResponseStream(
 
    console.log(`[STREAM] Sending ${messages.length} messages to LLM for ${expert.role}${imageParts.length > 0 ? ` (with ${imageParts.length} image part${imageParts.length > 1 ? "s" : ""})` : ""}.`);
 
+  let streamFilter: TrailingStanceStreamFilter | null = null;
   try {
     let response: AIModelResponse;
+    let stance: MessageStance | null = null;
     
     if (expert.role === "Research Analyst") {
       // Use OpenRouter streaming for Research Analyst (Perplexity optional)
       if (process.env.PERPLEXITY_API_KEY && process.env.PERPLEXITY_API_KEY.length > 10) {
         response = await callPerplexityAPI(referenceMessageContent);
+        stance = stripExpertStance(response, expert.role);
         onToken(response.message.content);
       } else {
         console.log("[STREAM] No Perplexity key — Research Analyst using OpenRouter streaming");
-        response = await callOpenRouterAPIStream(messages, expert.model, onToken);
+        streamFilter = new TrailingStanceStreamFilter(onToken);
+        response = await callOpenRouterAPIStream(
+          messages,
+          expert.model,
+          streamFilter ? token => streamFilter!.push(token) : onToken,
+        );
+        streamFilter?.finish();
+        stance = stripExpertStance(response, expert.role);
       }
     } 
     else if (expert.role === "File Creator") {
       // File Creator needs full response to parse JSON — use non-streaming
       response = await callOpenRouterAPI(messages, expert.model);
+      stance = stripExpertStance(response, expert.role);
       onToken(response.message.content); // Send as single token
       
       try {
@@ -649,7 +807,14 @@ export async function getExpertResponseStream(
     }
     else {
       // MAIN PATH: Streaming via OpenRouter
-      response = await callOpenRouterAPIStream(messages, expert.model, onToken);
+      streamFilter = expert.role === "Moderator" ? null : new TrailingStanceStreamFilter(onToken);
+      response = await callOpenRouterAPIStream(
+        messages,
+        expert.model,
+        streamFilter ? token => streamFilter!.push(token) : onToken,
+      );
+      streamFilter?.finish();
+      stance = stripExpertStance(response, expert.role);
     }
     
     const { artifacts, cleanContent } = extractArtifacts(response.message.content);
@@ -666,11 +831,13 @@ export async function getExpertResponseStream(
       // G4: parse the @-tags the model actually wrote so the orchestrator
       // can route on them (and the client can render chips) without
       // re-parsing the stored content.
-      mentions: extractMentions(cleanContent, availableRoles)
+      mentions: extractMentions(cleanContent, availableRoles),
+      stance,
     };
 
   } catch (error) {
     console.error(`[STREAM] Error streaming from expert ${expert.name}:`, error);
+    streamFilter?.finish();
     const errorMsg = isVisionRejection(error, imageParts)
       ? visionRejectionMessage(expert.name)
       : `(Error generating response for ${expert.name}: ${error instanceof Error ? error.message : String(error)})`;
@@ -683,6 +850,7 @@ export async function getExpertResponseStream(
       role: "assistant",
       expertName: expert.name,
       expertRole: expert.role,
+      stance: null,
     };
   }
 }
@@ -744,12 +912,14 @@ export async function getExpertResponse(
 
   try {
     let response: AIModelResponse;
+    let stance: MessageStance | null = null;
     
     if (expert.role === "Research Analyst") {
       response = await callPerplexityAPI(referenceMessageContent);
     } 
     else if (expert.role === "File Creator") {
        response = await callOpenRouterAPI(messages, expert.model);
+       stance = stripExpertStance(response, expert.role);
        
        try {
          const fileData = JSON.parse(response.message.content);
@@ -787,6 +957,10 @@ export async function getExpertResponse(
     else {
       response = await callOpenRouterAPI(messages, expert.model);
     }
+
+    if (expert.role !== "File Creator") {
+      stance = stripExpertStance(response, expert.role);
+    }
     
     const { artifacts, cleanContent } = extractArtifacts(response.message.content);
 
@@ -802,7 +976,8 @@ export async function getExpertResponse(
       // G4: parse the @-tags the model actually wrote so the orchestrator
       // can route on them (and the client can render chips) without
       // re-parsing the stored content.
-      mentions: extractMentions(cleanContent, availableRoles)
+      mentions: extractMentions(cleanContent, availableRoles),
+      stance,
     };
 
   } catch (error) {
@@ -818,6 +993,7 @@ export async function getExpertResponse(
       role: "assistant",
       expertName: expert.name,
       expertRole: expert.role,
+      stance: null,
     };
   }
 }
@@ -840,6 +1016,56 @@ export function resolveAuxModel(
   if (envModel && envModel.trim()) return envModel.trim();
   if (firstExpertModel?.trim()) return firstExpertModel.trim();
   return null;
+}
+
+/** Build the closing prompt from the latest expert stance ledger and G12 questions. */
+export function buildClosingSynthesisPrompt(
+  stanceLedger: Record<string, MessageStance | null> = {},
+  openQuestions: OpenQuestion[] = [],
+  charter?: string | null,
+): string {
+  const stanceEntries = Object.entries(stanceLedger).map(([expertRole, stance]) => ({
+    expertRole,
+    stance: stance?.stance ?? null,
+    confidence: stance?.confidence ?? null,
+    position: stance?.position ?? null,
+  }));
+  const hasNonAbstainingStance = Object.values(stanceLedger).some(
+    stance => stance !== null && stance.stance !== "abstain",
+  );
+  const openQuestionEntries = openQuestions.map(question => ({
+    expertRole: question.expertRole,
+    question: question.question,
+    assumption: question.assumption,
+    status: question.status,
+    createdAt: question.createdAt instanceof Date ? question.createdAt.toISOString() : question.createdAt,
+  }));
+
+  return `The discussion has run its course. Write a concise closing synthesis that helps the farmer act on the outcome.
+
+Use exactly these five section headings, in this order, and do not add any other headings:
+## Verdict
+## Consensus
+## Dissent
+## Open questions for you
+## Assumptions awaiting confirmation
+
+Base the synthesis on the discussion, the latest structured stance ledger, and every currently open question listed below. State concrete decisions and next actions where the discussion supports them. In Dissent, name each expert role from the ledger and state that expert's recorded position when positions disagree or qualify the outcome. Do not claim consensus unless the discussion supports it; describe disagreement honestly.
+
+Latest expert stance ledger (null means no valid structured stance was recorded):
+${JSON.stringify(stanceEntries, null, 2)}
+
+Current open G12 questions (include every item under the matching headings; do not silently drop any):
+${JSON.stringify(openQuestionEntries, null, 2)}
+
+${hasNonAbstainingStance
+    ? "Use the stances as evidence, while reflecting any uncertainty or dissent."
+    : "No expert has a non-abstaining structured stance. The Verdict must be conditional or unresolved and explicitly state that there is no expert consensus. Do not invent consensus."}
+${charter?.trim()
+    ? `Measure the outcome against the council charter, including its goal and stop criteria:\n${charter.trim()}`
+    : ""}
+
+Under “Open questions for you,” list the open questions for the farmer. Under “Assumptions awaiting confirmation,” list their paired assumptions. If a list is empty, say that none remain.`;
 }
 
 // Function to generate insights
@@ -872,7 +1098,8 @@ export async function generateInsights(conversationId: number, broadcastFn?: (co
     // insights: log and return instead of calling a dead legacy slug.
     const experts = await storage.getConversationExperts(conversationId);
     const moderatorExpert = experts.find(e => e.role === 'Moderator') ?? null;
-    const auxModel = resolveAuxModel(moderatorExpert?.model ?? null, experts[0]?.model ?? null);
+    const firstExpertModel = experts.find(e => e.role !== 'Moderator')?.model ?? null;
+    const auxModel = resolveAuxModel(moderatorExpert?.model ?? null, firstExpertModel);
     if (!auxModel) {
       console.error(`generateInsights: no aux model could be resolved for conversation ${conversationId} (no Moderator model, DEFAULT_AUX_MODEL unset, roster empty) — skipping insights.`);
       return;
@@ -909,59 +1136,113 @@ export async function generateInsights(conversationId: number, broadcastFn?: (co
 
 // New function to ask the Moderator who should speak next
 export async function getModeratorNextSpeakerSuggestion(
-  moderatorExpert: Expert,
-  history: Message[],
-  availableRoles: string[]
+    moderatorExpert: ModeratorContext,
+    history: Message[],
+    availableRoles: string[],
+    farmerJustSpoke = false,
+    options: {
+      turnNumber?: number;
+      turnBudget?: number;
+      stanceLedger?: Record<string, MessageStance | null>;
+    } = {}
 ): Promise<string | null> {
-    if (moderatorExpert.role !== 'Moderator') {
-        console.warn("Attempted to get speaker suggestion from non-moderator expert.");
-        return null;
-    }
     console.log("Asking Moderator for next speaker suggestion...");
-    // G6: the speak-next / conclude judgment is charter-aware — the Moderator
-    // weighs the charter's goal and stop criteria.
-    const conversation = await storage.getConversation(moderatorExpert.conversationId);
-    const charter = conversation?.charter ?? null;
-    const moderatorSystemPrompt = generateSystemPrompt(moderatorExpert, availableRoles, undefined, undefined, charter);
-    let queryPrompt = `Based on the recent conversation history, which expert should speak next to best advance the discussion towards resolution or new insights? The available expert roles are: [${availableRoles.join(', ')}]. If the discussion has already run its course — the question is resolved and another turn would only repeat the table — answer 'Conclude' instead. Respond only with the role name, 'Conclude', or 'RoundRobin'.`;
-    if (charter?.trim()) {
-      queryPrompt += ` The council charter in your instructions states this roundtable's goal and stop criteria — factor them into the decision.`;
-    }
-
-    const messages: AIMessage[] = [
-        { role: "system", content: moderatorSystemPrompt },
-        ...history.slice(-6).map(msg => ({
-             role: mapDbRoleToApiRole(msg.role),
-             content: truncateForModel(msg.content)
-        })),
-        { role: "user", content: queryPrompt }
-    ];
-
-    // G8: resolve this aux call's model dynamically (Moderator's model →
-    // DEFAULT_AUX_MODEL → first expert's model, via the conversation's
-    // expert roster in order — experts[0] is the first active expert).
-    // Nothing resolvable behaves exactly like a failed call: return null so
-    // the orchestrator falls back to round-robin.
-    const experts = await storage.getConversationExperts(moderatorExpert.conversationId);
-    const auxModel = resolveAuxModel(moderatorExpert.model, experts[0]?.model ?? null);
-    if (!auxModel) {
-        console.error("getModeratorNextSpeakerSuggestion: no aux model could be resolved (Moderator has no model, DEFAULT_AUX_MODEL unset, roster empty) — falling back to round-robin.");
-        return null;
-    }
-
     try {
-        const response = await callOpenRouterAPI(messages, auxModel);
-        const suggestedRole = response.message.content.trim().replace(/\.$/, '');
-        
-        if (availableRoles.includes(suggestedRole) || suggestedRole === 'RoundRobin' || suggestedRole === 'Conclude') {
-             console.log(`Moderator suggested next speaker: ${suggestedRole}`);
-            return suggestedRole;
-        } else {
-            console.warn(`Moderator suggested an invalid role: '${suggestedRole}'. Falling back.`);
+        // G6: the speak-next / conclude judgment is charter-aware — the Moderator
+        // weighs the charter's goal and stop criteria.
+        const conversation = await storage.getConversation(moderatorExpert.conversationId);
+        const charter = conversation?.charter ?? null;
+        const openQuestions = await storage.listOpenQuestions(moderatorExpert.conversationId);
+        const expertRoles = availableRoles.filter(role => role !== "Moderator");
+        const moderatorSystemPrompt = generateSystemPrompt(moderatorExpert, expertRoles, undefined, undefined, charter);
+        const turnBudget = Number.isInteger(options.turnBudget) && (options.turnBudget ?? 0) > 0
+            ? options.turnBudget!
+            : 25;
+        const turnNumber = Number.isInteger(options.turnNumber) && (options.turnNumber ?? 0) > 0
+            ? Math.min(options.turnNumber!, turnBudget)
+            : 1;
+        let queryPrompt = `This is turn ${turnNumber} of ${turnBudget}. Based on the recent conversation history, choose how the council should proceed. Available expert roles: [${expertRoles.join(', ')}]. Respond with exactly one of these choices: 'Continue' to keep the discussion moving and let the next speaker be chosen by round-robin; 'Go deeper: <available role>' to direct the next contribution to one of those roles; or 'Conclude' if the discussion has run its course, the question is resolved, decisions are made, and further turns would only repeat the table. When continuing, prefer the role that best advances resolution or useful new insights. If deeper analysis is useful, name that role after 'Go deeper:'.`;
+        const currentStances = Object.entries(options.stanceLedger ?? {}).map(([expertRole, stance]) => ({
+            expertRole,
+            stance: stance?.stance ?? null,
+            confidence: stance?.confidence ?? null,
+            position: stance?.position ?? null,
+        }));
+        queryPrompt += ` Latest expert stances by role (null means no valid stance was recorded): ${JSON.stringify(currentStances)}.`;
+        queryPrompt += ` Current unanswered farmer questions: ${JSON.stringify(openQuestions.map(question => ({
+            expertRole: question.expertRole,
+            question: question.question,
+            assumption: question.assumption,
+        })))}. Prefer a role that can address an unresolved question or substantive disagreement. Suggest Conclude only when the discussion and charter provide evidence that the goal and stop criteria are satisfied; do not infer consensus from missing or abstaining stances.`;
+        if (charter?.trim()) {
+            queryPrompt += ` The council charter in your instructions states this roundtable's goal and stop criteria — factor them into the decision.`;
+        }
+        if (farmerJustSpoke) {
+            queryPrompt += ` The farmer just spoke. Treat the farmer's latest message as new input to the discussion and choose the expert best positioned to respond to it or advance the room.`;
+        }
+        const linkedAnswer = [...history].reverse().find(
+            message => message.role === "user" && Number.isInteger(message.answersQuestionId),
+        );
+        if (linkedAnswer?.answersQuestionId !== null && linkedAnswer?.answersQuestionId !== undefined) {
+            const question = await storage.getOpenQuestion(linkedAnswer.answersQuestionId);
+            if (question?.status === "answered" && question.answerMessageId === linkedAnswer.id) {
+                queryPrompt += ` The farmer answered the open question "${question.question}": "${linkedAnswer.content}". Revisit any assumptions that conflict with this answer.`;
+            }
+        }
+
+        const messages: AIMessage[] = [
+            { role: "system", content: moderatorSystemPrompt },
+            ...history.slice(-6).map(msg => ({
+                role: mapDbRoleToApiRole(msg.role),
+                content: truncateForModel(msg.content)
+            })),
+            { role: "user", content: queryPrompt }
+        ];
+
+        // G8: resolve this aux call's model dynamically (Moderator's model →
+        // DEFAULT_AUX_MODEL → first expert's model, via the conversation's
+        // expert roster in order — experts[0] is the first active expert).
+        // Nothing resolvable behaves exactly like a failed call: return null so
+        // the orchestrator falls back to round-robin.
+        const experts = await storage.getConversationExperts(moderatorExpert.conversationId);
+        const firstExpertModel = experts.find(expert => expert.role !== "Moderator")?.model ?? null;
+        const auxModel = resolveAuxModel(moderatorExpert.model, firstExpertModel);
+        if (!auxModel) {
+            console.error("getModeratorNextSpeakerSuggestion: no aux model could be resolved (Moderator has no model, DEFAULT_AUX_MODEL unset, roster empty) — falling back to round-robin.");
             return null;
         }
+
+        const response = await callOpenRouterAPI(messages, auxModel);
+        const rawSuggestion = response.message.content.trim().replace(/\.$/, '').trim();
+        let suggestedRole: string | null = null;
+
+        if (rawSuggestion.toLowerCase() === 'continue') {
+            suggestedRole = 'RoundRobin';
+        } else if (rawSuggestion.toLowerCase() === 'conclude') {
+            suggestedRole = 'Conclude';
+        } else if (rawSuggestion === 'RoundRobin') {
+            // Keep accepting the legacy response while newer prompts ask for
+            // the clearer "Continue" choice.
+            suggestedRole = 'RoundRobin';
+        } else {
+            const goDeeperMatch = rawSuggestion.match(/^Go deeper:\s*(.+)$/i);
+            const requestedRole = goDeeperMatch?.[1]?.trim();
+            if (requestedRole && expertRoles.includes(requestedRole)) {
+                suggestedRole = requestedRole;
+            } else if (!goDeeperMatch && expertRoles.includes(rawSuggestion)) {
+                // Existing providers may still return a plain role name.
+                suggestedRole = rawSuggestion;
+            }
+        }
+
+        if (suggestedRole) {
+            console.log(`Moderator suggested next speaker: ${suggestedRole}`);
+            return suggestedRole;
+        }
+        console.warn(`Moderator suggested an invalid role: '${rawSuggestion}'. Falling back.`);
+        return null;
     } catch (error) {
-        console.error("Error querying Moderator for next speaker:", error);
+        console.error("Error preparing or querying Moderator for next speaker:", error);
         return null;
     }
 }
@@ -981,24 +1262,23 @@ export async function getModeratorNextSpeakerSuggestion(
  */
 export async function generateClosingSynthesis(
   conversationId: number,
-  moderatorExpert: Expert,
-  broadcastFn: (convId: number, data: any) => void
+  moderatorExpert: ModeratorContext,
+  broadcastFn: (convId: number, data: any) => void,
+  stanceLedger: Record<string, MessageStance | null> = {},
 ): Promise<void> {
   console.log(`[SYNTHESIS] Generating closing synthesis for conversation ${conversationId}`);
   try {
     const history = await storage.getConversationMessages(conversationId);
     const experts = await storage.getConversationExperts(conversationId);
-    const availableRoles = experts.map(e => e.role);
+    const openQuestions = await storage.listOpenQuestions(conversationId);
+    const availableRoles = experts.map(e => e.role).filter(role => role !== "Moderator");
     const conversation = await storage.getConversation(conversationId);
     const charter = conversation?.charter ?? null;
     const systemPrompt = generateSystemPrompt(moderatorExpert, availableRoles, undefined, undefined, charter);
+    const firstExpertModel = experts.find(expert => expert.role !== "Moderator")?.model ?? null;
+    const closingModel = resolveAuxModel(moderatorExpert.model, firstExpertModel);
 
-    const closingPrompt = `The discussion has run its course and the council is closing. Write the council's closing synthesis for the farmer:
-- Summarize the consensus the council reached and the concrete decisions made.
-- Name the open disagreements or unanswered questions, if any remain.
-- List the concrete next actions for the farmer, in order.
-- Name the experts who contributed key points.
-Be brief — a farmer should be able to act on this in one read.` + (charter?.trim() ? `\nMeasure the summary against the council charter: state how the outcome fulfills its goal and stop criteria.` : ``);
+    const closingPrompt = buildClosingSynthesisPrompt(stanceLedger, openQuestions, charter);
 
     const messages: AIMessage[] = [
       { role: "system", content: systemPrompt },
@@ -1016,9 +1296,13 @@ Be brief — a farmer should be able to act on this in one read.` + (charter?.tr
       expertRole: "Moderator",
     });
 
-    // G8 amendment: no hardcoded fallback slug. The model column is NOT NULL;
-    // an (unexpected) empty value surfaces through the honest-error path below.
-    const response = await callOpenRouterAPIStream(messages, moderatorExpert.model, (token) => {
+    // G8/G10: resolve the Moderator's model, configured aux fallback, then
+    // first council expert. If none is available, the honest-error path below
+    // persists and broadcasts a closing failure instead of using a dead slug.
+    if (!closingModel) {
+      throw new Error("No auxiliary model could be resolved for the Moderator closing synthesis.");
+    }
+    const response = await callOpenRouterAPIStream(messages, closingModel, (token) => {
       broadcastFn(conversationId, {
         type: "expert_stream_token",
         expertId: moderatorExpert.id,
@@ -1034,7 +1318,7 @@ Be brief — a farmer should be able to act on this in one read.` + (charter?.tr
       content,
       role: "assistant",
       expertName: moderatorExpert.name,
-      expertRole: "Moderator",
+      expertRole: moderatorExpert.role,
       isSynthesis: true,
       mentions: extractMentions(content, availableRoles),
     });
@@ -1065,7 +1349,7 @@ Be brief — a farmer should be able to act on this in one read.` + (charter?.tr
         content: errorMsg,
         role: "assistant",
         expertName: moderatorExpert.name,
-        expertRole: "Moderator",
+        expertRole: moderatorExpert.role,
         isSynthesis: true,
       });
     } catch (storeError) {
