@@ -18,6 +18,16 @@ The fictional Iowa profile and uploaded fixture are for QA only. The fixture lab
 
 The UI confirmed the saved expert-turn limit was four. The selected roster was Soil Scientist — GLM 5.3 Flash; Crop Specialist — DeepSeek V4.1 Flash; File Creator — GPT-6 Luna; Research Analyst — MiMo V2.6 Flash. Screenshots: [limit](screenshots/preflight-charter-limit.png), [Soil Scientist](screenshots/preflight-soil-model.png), [Crop Specialist](screenshots/preflight-crop-model.png), [File Creator](screenshots/preflight-file-creator-model.png), and [Research Analyst](screenshots/preflight-research-model.png).
 
+## Farmer text used
+
+Initial request:
+
+> I am planning corn after soybeans near Ames on my fictional 120-acre rain-fed farm, aiming for 180 bu/ac. Use the attached CSV prices only as fictional scenario assumptions, not current quotes. Compare the cost per pound of actual nitrogen for urea and UAN32, and how much each product a 85 USD/ac nitrogen-input ceiling buys. Do not turn a spreadsheet target into an agronomic recommendation; use retrieved Iowa sources and state what they support or what remains unverified. Create exactly one Markdown SOP under 2,000 characters with exactly four actionable 2027 dates starting April 5, plus a matching calendar plan. Do not invent application costs, current prices, or a weather forecast. Ask any consequential missing-fact question in ordinary language. End with a concise council handoff.
+
+Mid-run budget correction:
+
+> My nitrogen-input ceiling is now 65 USD/ac, not 85. Recheck pending calculations and outputs. I have no application quote, so exclude that cost and say so. Keep one current SOP; do not duplicate it.
+
 ## Live run
 
 One plain-language request was accepted in the existing session, followed by the single budget correction while Research Analyst was processing. The UI showed one expert turn used at that point. It later went idle at **3 used / 1 remaining** on the saved four-turn limit. No second normal request or run retry was sent.
@@ -28,7 +38,7 @@ The visible source discussion was cut off before citations could be reviewed. No
 
 ## Deliverables and retrieval
 
-The Files pane showed only the uploaded `fictional-farm-inputs.csv`; no SOP appeared, so there was no SOP to inspect or download. The retrieval-only request was accepted after the run, but no assistant reply or link appeared. The UI remained idle at 3/4 turns and showed no File Creator response or new file. Because no SOP existed, retrieval of an existing link is **BLOCKED**; the UI does not expose provider-attempt logs, so the absence of a File Creator attempt cannot be independently proven. Screenshots: [Files pane](screenshots/files-pane-after-run.png) and [retrieval-only result](screenshots/retrieval-only-result.png).
+The Files pane showed only the uploaded `fictional-farm-inputs.csv`; no SOP appeared, so there was no SOP to inspect or download. Read-only database verification confirms retrieval request 27 received assistant message 28 with the static reply: “I could not find a saved deliverable in this conversation yet; you can open Files or ask the council to create one.” The row confirms no provider attempt. Retrieval-only behavior is a **PARTIAL PASS** for returning the no-file reply without provider generation. Link retrieval is **BLOCKED** because no SOP exists. The refreshed browser transcript screenshot does not display the database-confirmed reply. Screenshots: [Files pane](screenshots/files-pane-after-run.png), [retrieval-only result](screenshots/retrieval-only-result.png), and [refreshed transcript](screenshots/retrieval-transcript-refreshed.png).
 
 The calendar preview reported that it was unavailable and would recheck the schedule on export. The date controls remained at 2026-10-12. One Export .ics action produced no visible download; no ICS file was available to preview or inspect. Screenshots: [sidebar with no plan](screenshots/sidebar-no-plan.png) and [export result](screenshots/ics-export-result.png). **Download paths:** none; no SOP or ICS was downloaded.
 
@@ -36,12 +46,12 @@ The calendar preview reported that it was unavailable and would recheck the sche
 
 | Requirement | Status | Evidence |
 |---|---|---|
-| BETA-01 Routing and bounded work | FAIL — correction was accepted but not reflected; no handoff. Retrieval-only produced no link because no SOP existed. UI turn count stayed within 4. Provider-attempt logs unavailable. | [run](screenshots/run-after-correction.png), [retrieval](screenshots/retrieval-only-result.png) |
+| BETA-01 Routing and bounded work | FAIL — correction was accepted but not reflected; no handoff. Retrieval-only was a PARTIAL PASS: the static no-file reply returned without a provider attempt; link retrieval is BLOCKED because no SOP exists. UI turn count stayed within 4. | [run](screenshots/run-after-correction.png), [retrieval](screenshots/retrieval-only-result.png) |
 | BETA-02 Canonical deliverables | FAIL — requested SOP was not produced. Version identity, size/date validation, ownership, and actual download checks are BLOCKED because no file exists. | [Files pane](screenshots/files-pane-after-run.png) |
-| BETA-03 Evidence and calculation consistency | BLOCKED — partial $85 table only; correction and source claims were not completed or verified. | [partial response](screenshots/first-research-response.png), [error](screenshots/research-output-limit.png) |
+| BETA-03 Evidence and calculation consistency | FAIL — only the partial $85 calculation appeared; it did not reflect the $65 correction, and the source response was incomplete. Broader calculation and source scenarios remain BLOCKED. | [partial response](screenshots/first-research-response.png), [error](screenshots/research-output-limit.png) |
 | BETA-04 Questions and final handoff | FAIL — a budget clarification appeared in ordinary language but was not acted on; no closing council handoff appeared before idle. | [partial response](screenshots/first-research-response.png), [idle state](screenshots/run-idle-after-error.png) |
 | BETA-05 Calendar dates and plan consistency | BLOCKED — no plan preview or ICS download; export had no visible result. | [sidebar](screenshots/sidebar-no-plan.png), [export](screenshots/ics-export-result.png) |
-| BETA-06 Failure recovery and capability status | BLOCKED — broader failure, recovery, and capability scenarios not tested. | — |
+| BETA-06 Failure recovery and capability status | FAIL — the observed output-limit path ended with an empty Research Analyst message and no handoff. Broader failure, recovery, and capability scenarios remain BLOCKED. | [error](screenshots/research-output-limit.png), [idle state](screenshots/run-idle-after-error.png) |
 | BETA-07 Continuity and deliverable breadth | BLOCKED — reload/restart, account isolation, and other deliverable journeys not tested. | — |
 
 No application server restart, database change, or app-source edit was performed. Only QA screenshots and this report are intended for the validation-worktree commit.
