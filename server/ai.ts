@@ -13,6 +13,7 @@ import { collectImageParts, isImageFile, MAX_IMAGE_PARTS, analyzedImageNote, mak
 
 const AI_REQUEST_TIMEOUT_MS = 120_000;
 const MAX_MODEL_MESSAGE_CHARS = 12_000;
+const MAX_PERPLEXITY_DISCUSSION_CHARS = MAX_MODEL_MESSAGE_CHARS * 2;
 const MAX_FILE_CONTEXT_FILES = 10;
 // G9: cap on the carried-forward PRIOR DECISIONS system block.
 const PRIOR_DECISIONS_MAX_CHARS = 1200;
@@ -726,8 +727,82 @@ export async function callOpenRouterAPIStream(
   return provider.chatStream(messages, model, onToken, userId, webSearch);
 }
 
+const PERPLEXITY_RESEARCH_SYSTEM_PROMPT = "You are a Research Analyst specializing in agriculture. Provide concise, accurate information with relevant citations.";
+
+function getMessageText(content: AIMessage["content"]): string {
+  if (typeof content === "string") return content;
+  return content
+    .filter((part): part is Extract<ContentPart, { type: "text" }> => part.type === "text")
+    .map((part) => part.text)
+    .join("\n");
+}
+
+function buildPerplexityMessages(query: string, contextMessages: AIMessage[] = []): AIMessage[] {
+  const researchPrompt = contextMessages[0]?.role === "system"
+    ? getMessageText(contextMessages[0].content)
+    : "";
+  let lastUserIndex = -1;
+  for (let index = contextMessages.length - 1; index >= 0; index -= 1) {
+    if (contextMessages[index].role === "user") {
+      lastUserIndex = index;
+      break;
+    }
+  }
+  const precedingMessages = contextMessages.slice(
+    researchPrompt ? 1 : 0,
+    lastUserIndex >= 0 ? lastUserIndex : undefined,
+  );
+  const precedingContext = precedingMessages
+    .map((message) => {
+      const content = getMessageText(message.content);
+      return content ? `${message.role.toUpperCase()}:\n${content}` : "";
+    })
+    .filter(Boolean)
+    .join("\n\n");
+  const currentQuestion = `Current question:\n${truncateForModel(query)}`;
+  const contextHeader = "Recent discussion context:\n";
+  const availableContextChars = Math.max(
+    0,
+    MAX_PERPLEXITY_DISCUSSION_CHARS - currentQuestion.length - contextHeader.length - 2,
+  );
+  const wasTruncated = precedingContext.length > availableContextChars;
+  const omissionMarker = wasTruncated ? "[Earlier discussion omitted]\n" : "";
+  const boundedContextChars = Math.max(0, availableContextChars - omissionMarker.length);
+  const boundedContext = boundedContextChars > 0
+    ? precedingContext.slice(-boundedContextChars)
+    : "";
+  const userContext = [
+    precedingContext
+      ? `${contextHeader}${omissionMarker}${boundedContext}`
+      : "",
+    currentQuestion,
+  ].filter(Boolean).join("\n\n");
+
+  return [{
+    role: "system",
+    content: [PERPLEXITY_RESEARCH_SYSTEM_PROMPT, researchPrompt].filter(Boolean).join("\n\n"),
+  }, { role: "user", content: userContext }];
+}
+
+function appendRetrievedCitationUrls(content: string, citations?: string[]): { content: string; addition: string } {
+  const urls = (citations ?? []).filter((url, index, allUrls) =>
+    typeof url === "string" && url.length > 0 && allUrls.indexOf(url) === index && !content.includes(url),
+  );
+  if (urls.length === 0) return { content, addition: "" };
+
+  const separator = content.length === 0
+    ? ""
+    : content.endsWith("\n\n")
+      ? ""
+      : content.endsWith("\n")
+        ? "\n"
+        : "\n\n";
+  const addition = `${separator}URLs returned by retrieval:\n${urls.map((url) => `- ${url}`).join("\n")}`;
+  return { content: `${content}${addition}`, addition };
+}
+
 // Function to call Perplexity API for web search
-export async function callPerplexityAPI(query: string): Promise<AIModelResponse> {
+export async function callPerplexityAPI(query: string, contextMessages: AIMessage[] = []): Promise<AIModelResponse> {
   try {
     const perplexityKey = process.env.PERPLEXITY_API_KEY;
     if (!perplexityKey) {
@@ -744,16 +819,7 @@ export async function callPerplexityAPI(query: string): Promise<AIModelResponse>
       },
       body: JSON.stringify({
         model: "sonar",
-        messages: [
-          {
-            role: "system",
-            content: "You are a Research Analyst specializing in agriculture. Provide concise, accurate information with relevant citations."
-          },
-          {
-            role: "user",
-            content: query
-          }
-        ],
+        messages: buildPerplexityMessages(query, contextMessages),
         temperature: 0.2,
         max_tokens: 1024,
         stream: false
@@ -778,9 +844,12 @@ export async function callPerplexityAPI(query: string): Promise<AIModelResponse>
       throw new Error("Missing message in Perplexity API response");
     }
     
+    const citations = Array.isArray(data.citations)
+      ? data.citations.filter((url: unknown): url is string => typeof url === "string" && url.length > 0)
+      : undefined;
     return {
       message: data.choices[0].message,
-      citations: data.citations || []
+      ...(citations ? { citations } : {}),
     };
   } catch (error: unknown) {
     console.error("Error calling Perplexity API:", error);
@@ -1075,7 +1144,7 @@ export async function getExpertResponseStream(
     if (expert.role === "Research Analyst") {
       // Use OpenRouter streaming for Research Analyst (Perplexity optional)
       if (process.env.PERPLEXITY_API_KEY && process.env.PERPLEXITY_API_KEY.length > 10) {
-        response = await callPerplexityAPI(referenceMessageContent);
+        response = await callPerplexityAPI(referenceMessageContent, messages);
         stance = stripExpertStance(response, expert.role);
         onToken(response.message.content);
       } else {
@@ -1115,12 +1184,16 @@ export async function getExpertResponseStream(
     }
     
     const { artifacts, cleanContent } = extractArtifacts(response.message.content);
+    const researchAnswer = expert.role === "Research Analyst"
+      ? appendRetrievedCitationUrls(cleanContent, response.citations)
+      : { content: cleanContent, addition: "" };
+    if (researchAnswer.addition) onToken(researchAnswer.addition);
 
     return {
       conversationId: expert.conversationId,
       expertId: expert.id,
       userId: null,
-      content: cleanContent,
+      content: researchAnswer.content,
       role: "assistant",
       expertName: expert.name,
       expertRole: expert.role,
@@ -1214,7 +1287,7 @@ export async function getExpertResponse(
     
     if (expert.role === "Research Analyst") {
       if (process.env.PERPLEXITY_API_KEY) {
-        response = await callPerplexityAPI(referenceMessageContent);
+        response = await callPerplexityAPI(referenceMessageContent, messages);
       } else {
         response = await callOpenRouterAPI(messages, expert.model, conversation?.userId, true);
       }
@@ -1235,12 +1308,15 @@ export async function getExpertResponse(
     }
     
     const { artifacts, cleanContent } = extractArtifacts(response.message.content);
+    const researchAnswer = expert.role === "Research Analyst"
+      ? appendRetrievedCitationUrls(cleanContent, response.citations)
+      : { content: cleanContent, addition: "" };
 
     return {
       conversationId: expert.conversationId,
       expertId: expert.id,
       userId: null,
-      content: cleanContent,
+      content: researchAnswer.content,
       role: "assistant",
       expertName: expert.name,
       expertRole: expert.role,

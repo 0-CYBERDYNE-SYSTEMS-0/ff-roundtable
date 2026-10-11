@@ -20,7 +20,7 @@
  * exercised and their prompt payloads inspected.
  */
 
-import { describe, it, expect, beforeAll, beforeEach, vi } from "vitest";
+import { afterEach, describe, it, expect, beforeAll, beforeEach, vi } from "vitest";
 import request from "supertest";
 import express from "express";
 import type { Express } from "express";
@@ -279,6 +279,128 @@ describe("Research Analyst OpenRouter web search", () => {
       expect(chatCall[2]).toBe(convo.userId);
       expect(chatCall[3]).toBe(true);
     } finally {
+      if (previousPerplexityKey === undefined) {
+        delete process.env.PERPLEXITY_API_KEY;
+      } else {
+        process.env.PERPLEXITY_API_KEY = previousPerplexityKey;
+      }
+    }
+  });
+});
+
+describe("Research Analyst retrieved source URLs", () => {
+  let previousPerplexityKey: string | undefined;
+
+  beforeEach(() => {
+    previousPerplexityKey = process.env.PERPLEXITY_API_KEY;
+    delete process.env.PERPLEXITY_API_KEY;
+    mockProviderChat.mockReset();
+    mockProviderChatStream.mockReset();
+  });
+
+  afterEach(() => {
+    if (previousPerplexityKey === undefined) {
+      delete process.env.PERPLEXITY_API_KEY;
+    } else {
+      process.env.PERPLEXITY_API_KEY = previousPerplexityKey;
+    }
+  });
+
+  it("persists exact OpenRouter citation URLs on non-stream answers and leaves absent citations absent", async () => {
+    const convo = await storage.createConversation({ userId: 1, title: "Research citations" });
+    const expert = createMockExpert(15, convo.id, "Researcher", "Research Analyst");
+    const existingUrl = "https://extension.example.edu/nitrogen-guide";
+    const returnedUrl = "https://usda.example.gov/nutrient-data";
+    const answer = `The extension guide recommends testing first: [guide](${existingUrl})`;
+    mockProviderChat.mockResolvedValue({
+      message: { role: "assistant", content: answer },
+      citations: [existingUrl, returnedUrl],
+    });
+
+    const result = await getExpertResponse(expert, [], "How should I assess nitrogen?", [], [expert.role]);
+    const stored = await storage.createMessage(result);
+
+    expect(result.content).toBe(`${answer}\n\nURLs returned by retrieval:\n- ${returnedUrl}`);
+    expect(result.content.split(existingUrl)).toHaveLength(2);
+    expect(stored.content).toBe(result.content);
+
+    mockProviderChat.mockResolvedValue({
+      message: { role: "assistant", content: "Supporting evidence is unavailable." },
+    });
+    const noSources = await getExpertResponse(expert, [], "How should I assess nitrogen?", [], [expert.role]);
+    expect(noSources.content).toBe("Supporting evidence is unavailable.");
+    expect(noSources.content).not.toContain("URLs returned by retrieval:");
+  });
+
+  it("streams returned OpenRouter citation URLs into the persisted answer", async () => {
+    const convo = await storage.createConversation({ userId: 1, title: "Streaming research citations" });
+    const expert = createMockExpert(16, convo.id, "Researcher", "Research Analyst");
+    const answer = "Check the applicable extension guidance.";
+    const exactUrl = "https://extension.example.edu/crop-guide?year=2026";
+    mockProviderChatStream.mockImplementation(async (_messages: any, _model: string, onToken: (token: string) => void) => {
+      onToken(answer);
+      return {
+        message: { role: "assistant", content: answer },
+        citations: [exactUrl],
+      };
+    });
+    const emitted: string[] = [];
+
+    const result = await getExpertResponseStream(expert, [], "What does the guidance say?", [], [expert.role], token => emitted.push(token));
+    const stored = await storage.createMessage(result);
+
+    expect(emitted.join("")).toBe(result.content);
+    expect(result.content).toBe(`${answer}\n\nURLs returned by retrieval:\n- ${exactUrl}`);
+    expect(stored.content).toBe(result.content);
+  });
+
+  it("sends Perplexity the existing research prompt and bounded recent discussion context", async () => {
+    const previousPerplexityKey = process.env.PERPLEXITY_API_KEY;
+    process.env.PERPLEXITY_API_KEY = "test-perplexity-key";
+    const exactUrl = "https://extension.example.edu/research-source";
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        choices: [{ message: { role: "assistant", content: "The retrieved guidance addresses the question." } }],
+        citations: [exactUrl],
+      }),
+    } as unknown as Response);
+
+    try {
+      const convo = await storage.createConversation({ userId: 1, title: "Perplexity context" });
+      const expert = createMockExpert(17, convo.id, "Researcher", "Research Analyst");
+      const history = [
+        { role: "user", content: `OLDER-CONTEXT-START ${"o".repeat(12_000)}` },
+        { role: "assistant", content: `MIDDLE-CONTEXT ${"m".repeat(12_000)}` },
+        { role: "user", content: `RECENT-CONTEXT ${"r".repeat(12_000)}` },
+      ] as any;
+      const emitted: string[] = [];
+
+      const result = await getExpertResponseStream(
+        expert,
+        history,
+        "Current farmer question?",
+        [],
+        [expert.role],
+        token => emitted.push(token),
+      );
+
+      const request = JSON.parse(String(fetchSpy.mock.calls[0][1]?.body));
+      const systemPrompt = request.messages[0].content as string;
+      const userContext = request.messages[1].content as string;
+      const stored = await storage.createMessage(result);
+
+      expect(systemPrompt).toContain("You are a Research Analyst specializing in agriculture.");
+      expect(systemPrompt).toContain("Never invent or guess source titles, publication dates, quotations, or URLs");
+      expect(userContext).toContain("RECENT-CONTEXT");
+      expect(userContext).toContain("Current question:\nCurrent farmer question?");
+      expect(userContext.length).toBeLessThanOrEqual(24_000);
+      expect(userContext).not.toContain("OLDER-CONTEXT-START");
+      expect(result.content).toContain(exactUrl);
+      expect(emitted.join("")).toBe(result.content);
+      expect(stored.content).toBe(result.content);
+    } finally {
+      fetchSpy.mockRestore();
       if (previousPerplexityKey === undefined) {
         delete process.env.PERPLEXITY_API_KEY;
       } else {
