@@ -204,6 +204,22 @@ describe("AI deliverable generation", () => {
     expect(mockSaveDeliverableVersion).not.toHaveBeenCalled();
   });
 
+  it("requires every requested dated task to contain a valid ISO date", async () => {
+    const request = makeRequest({
+      constraints: { format: "markdown", taskCount: 2, requiredSections: ["Tasks"], datedTasks: true },
+    });
+    mockProviderChat.mockResolvedValue(modelResponse({
+      filename: "nitrogen-sop.md",
+      filetype: "text/markdown",
+      content: "## Tasks\n- 2027-02-29 Sample the field.\n- Review the result.",
+    }));
+
+    const result = await getExpertResponse(makeExpert(), [], "Create an SOP with two dated tasks", [], ["File Creator"], request);
+
+    expect(result.content).toContain("Every task must include a valid ISO date");
+    expect(mockSaveDeliverableVersion).not.toHaveBeenCalled();
+  });
+
   it("does not call the model for a stale revision target", async () => {
     const request = makeRequest({ mode: "revise", expectedCurrentFileId: 92 });
     mockGetCurrentDeliverableFile.mockResolvedValue(storedVersion({

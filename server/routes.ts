@@ -4,7 +4,7 @@ import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { setupAuth } from "./auth";
 import { callOpenRouterAPI, callPerplexityAPI, generateSystemPrompt, getExpertResponse, generateInsights } from "./ai";
-import { processMessageTurnBased, InteractionOrchestrator, getConversationState, restorePausedFromSnapshot } from "./orchestrator";
+import { processMessageTurnBased, InteractionOrchestrator, getConversationState, getFarmerFileIntent, persistAutonomySettings, restorePausedFromSnapshot } from "./orchestrator";
 import { encryptApiKey, decryptApiKey, maskApiKey } from "./crypto";
 import multer from "multer";
 import path from "path";
@@ -12,7 +12,7 @@ import fs from "fs";
 import { createHmac, randomBytes, timingSafeEqual } from "crypto";
 import Stripe from "stripe";
 import { WebSocketServer, type RawData } from "ws";
-import { InsertConversation, InsertExpert, InsertMessage, Message, insertFarmProfileSchema } from "@shared/schema";
+import { InsertConversation, InsertExpert, InsertMessage, Message, type File, insertFarmProfileSchema } from "@shared/schema";
 import { z } from "zod";
 import { extractMentions } from "@shared/mentions";
 import { buildVCalendar } from "@shared/ics";
@@ -26,6 +26,56 @@ import { TIERS, getTierLimits, isPaidModel } from './tiers';
 class OpenQuestionAnswerConflictError extends Error {}
 const rememberedAnswerTurnStarts = new Map<number, number>();
 const ANSWER_TURN_RETRY_DEDUPE_MS = 60_000;
+
+function authorizedFileDownloadUrl(file: Pick<File, "conversationId" | "id">): string {
+  return `/api/protected/conversations/${file.conversationId}/files/${file.id}/download`;
+}
+
+function clientFileRecord(file: File) {
+  return { ...file, fileUrl: authorizedFileDownloadUrl(file) };
+}
+
+function getStoredUploadPath(file: File): string | undefined {
+  if (!file.fileUrl.startsWith("/uploads/")) return undefined;
+  const filename = file.fileUrl.slice("/uploads/".length);
+  if (!filename || path.basename(filename) !== filename) return undefined;
+  return path.join(process.cwd(), "uploads", filename);
+}
+
+function isRetrievalOnlyRequest(content: string): boolean {
+  const intent = getFarmerFileIntent(content);
+  return intent === "retrieve" || (intent === "no_file" && /\b(?:link|download)\b/i.test(content));
+}
+
+function buildStoredDeliverableReply(content: string, files: File[]): string {
+  if (files.length === 0) {
+    return "I couldn't find a saved deliverable in this conversation yet. You can open the Files pane to check, or ask the council to create one.";
+  }
+
+  const lowerContent = content.toLowerCase();
+  const requestedKind = ["sop", "calendar", "spreadsheet", "csv", "chart", "plan", "budget", "script"]
+    .find(kind => lowerContent.includes(kind));
+  const kindMatches = requestedKind
+    ? files.filter(file => file.filename.toLowerCase().includes(requestedKind))
+    : files;
+  const ordered = [...kindMatches].sort(
+    (a, b) => (b.uploadedAt?.getTime() ?? 0) - (a.uploadedAt?.getTime() ?? 0),
+  );
+  if (ordered.length === 0) {
+    const available = [...files].sort((a, b) => (b.uploadedAt?.getTime() ?? 0) - (a.uploadedAt?.getTime() ?? 0));
+    return `I couldn't find a saved ${requestedKind} to link. Here are the current saved deliverables instead:\n\n${available.map(file => `- [${file.filename}](${authorizedFileDownloadUrl(file)})`).join("\n")}`;
+  }
+  const latestRequested = /\b(?:latest|most recent|current)\b/.test(lowerContent);
+  const selected = ordered.length === 1 || latestRequested ? [ordered[0]] : ordered;
+  const intro = selected.length === 1
+    ? "Here is the saved deliverable:"
+    : "I found these saved deliverables. Choose the one you meant: ";
+  const links = selected.map(file => {
+    const version = file.version == null ? "" : ` (v${file.version}${file.supersededAt ? ", superseded" : ", current"})`;
+    return `- [${file.filename}](${authorizedFileDownloadUrl(file)})${version}`;
+  });
+  return `${intro}\n\n${links.join("\n")}`;
+}
 
 function answerTurnWasRecentlyDispatched(messageId: number): boolean {
   const dispatchedAt = rememberedAnswerTurnStarts.get(messageId);
@@ -152,18 +202,26 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Setup authentication routes
   setupAuth(app);
 
-  // Serve uploaded conversation files. Must be registered before the SPA
-  // catch-all so download links resolve to real files (auth-gated).
-  app.use(
-    "/uploads",
-    (req, res, next) => {
-      if (!req.isAuthenticated()) {
-        return res.status(401).json({ message: "Authentication required" });
-      }
-      next();
-    },
-    express.static(path.join(process.cwd(), "uploads"))
-  );
+  // Keep historical /uploads links working, but resolve them through their
+  // file record so an authenticated user must own the parent conversation.
+  app.get("/uploads/:filename", async (req, res) => {
+    try {
+      if (!req.isAuthenticated()) return res.status(401).json({ message: "Authentication required" });
+      const filename = path.basename(req.params.filename);
+      const file = await storage.getFileByUrl(`/uploads/${filename}`);
+      if (!file) return res.status(404).json({ message: "File not found" });
+      const conversation = await storage.getConversation(file.conversationId);
+      if (!conversation || conversation.userId !== req.user!.id) return res.status(404).json({ message: "File not found" });
+      const filePath = getStoredUploadPath(file);
+      if (!filePath) return res.status(404).json({ message: "File not found" });
+      res.setHeader("Content-Type", file.fileType);
+      res.download(filePath, file.filename, error => {
+        if (error && !res.headersSent) res.status(404).json({ message: "File not found" });
+      });
+    } catch {
+      if (!res.headersSent) res.status(404).json({ message: "File not found" });
+    }
+  });
 
   // Special development login endpoint
   if (DEVELOPMENT_MODE) {
@@ -369,7 +427,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
                     conversationId,
                     mode: state.mode,
                     isAutonomousEnabled: state.isAutonomousEnabled,
-                    maxAutonomousTurns: state.maxAutonomousTurns
+                    maxAutonomousTurns: state.maxAutonomousTurns,
+                    ...(state.mode !== "idle" ? {
+                      expertTurnsConsumed: state.totalAutonomousTurnsTaken,
+                      expertTurnsRemaining: Math.max(0, state.maxAutonomousTurns - state.totalAutonomousTurnsTaken),
+                    } : {})
                   }));
                 } else {
                   // G7: no live in-memory state — the snapshot stored on the
@@ -439,7 +501,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
               conversationId,
               mode: data.mode,
               isAutonomousEnabled: data.isAutonomousEnabled,
-              maxAutonomousTurns: data.maxAutonomousTurns
+              maxAutonomousTurns: data.maxAutonomousTurns,
+              expertTurnsConsumed: data.expertTurnsConsumed,
+              expertTurnsRemaining: data.expertTurnsRemaining,
             }));
           }
           // Handle streaming events
@@ -711,7 +775,37 @@ export async function registerRoutes(app: Express): Promise<Server> {
       broadcastToConversation(conversationId, { type: "open_questions_updated" });
     }
 
-    startProcessing(storedMessage, answersQuestionId ?? undefined);
+    if (isRetrievalOnlyRequest(content)) {
+      const currentDeliverables = await storage.getCurrentDeliverableFiles(conversationId);
+      const legacyGeneratedFiles = currentDeliverables.length > 0
+        ? []
+        : (await storage.getConversationFiles(conversationId))
+            .filter(file => file.uploadedBy.toLowerCase() !== "user")
+            .sort((a, b) => (b.uploadedAt?.getTime() ?? 0) - (a.uploadedAt?.getTime() ?? 0));
+      const candidates = currentDeliverables.length > 0 ? currentDeliverables : legacyGeneratedFiles;
+      const experts = await storage.getConversationExperts(conversationId);
+      const moderator = experts.find(expert => expert.role.trim().toLowerCase() === "moderator");
+      const retrievalReply = await storage.createMessage({
+        conversationId,
+        userId: null,
+        expertId: moderator?.id ?? null,
+        content: buildStoredDeliverableReply(content, candidates),
+        role: "assistant",
+        expertName: moderator?.name ?? "Roundtable",
+        expertRole: moderator?.role ?? "Moderator",
+      });
+      broadcastToConversation(conversationId, retrievalReply);
+
+      // If a council chain is already active, let the orchestrator record this
+      // latest farmer instruction so queued File Creator work is suppressed.
+      // Idle retrievals are answered from storage without any provider call.
+      const state = getConversationState(conversationId);
+      if (state && ["processing_sequential", "autonomous", "paused"].includes(state.mode)) {
+        startProcessing(storedMessage, answersQuestionId ?? undefined);
+      }
+    } else {
+      startProcessing(storedMessage, answersQuestionId ?? undefined);
+    }
 
     return { message: storedMessage, created: true };
   }
@@ -1010,7 +1104,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
 
       if (updates.turnBudget !== undefined) {
-        new InteractionOrchestrator(conversationId).setTurnBudget(updates.turnBudget);
+        await persistAutonomySettings(conversationId, { maxAutonomousTurns: updates.turnBudget });
       }
 
       res.json(updatedConversation);
@@ -1371,7 +1465,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       
       await storage.createMessage(fileMessage);
       
-      res.status(201).json(file);
+      res.status(201).json(clientFileRecord(file));
     } catch (error: any) {
       res.status(500).json({ message: error.message });
     }
@@ -1413,12 +1507,39 @@ export async function registerRoutes(app: Express): Promise<Server> {
         uploadedBy: "ai"
       });
       
-      res.status(201).json(file);
+      res.status(201).json(clientFileRecord(file));
     } catch (error: any) {
       res.status(500).json({ message: error.message });
     }
   });
   
+  app.get("/api/protected/conversations/:id/files/:fileId/download", async (req, res) => {
+    try {
+      if (!req.isAuthenticated()) return res.status(401).json({ message: "Authentication required" });
+      const conversationId = Number(req.params.id);
+      const fileId = Number(req.params.fileId);
+      if (!Number.isSafeInteger(conversationId) || !Number.isSafeInteger(fileId)) {
+        return res.status(404).json({ message: "File not found" });
+      }
+      const conversation = await storage.getConversation(conversationId);
+      if (!conversation || conversation.userId !== req.user!.id) {
+        return res.status(404).json({ message: "File not found" });
+      }
+      const file = await storage.getFileById(fileId);
+      if (!file || file.conversationId !== conversationId) {
+        return res.status(404).json({ message: "File not found" });
+      }
+      const filePath = getStoredUploadPath(file);
+      if (!filePath) return res.status(404).json({ message: "File not found" });
+      res.setHeader("Content-Type", file.fileType);
+      res.download(filePath, file.filename, error => {
+        if (error && !res.headersSent) res.status(404).json({ message: "File not found" });
+      });
+    } catch {
+      if (!res.headersSent) res.status(404).json({ message: "File not found" });
+    }
+  });
+
   // Get files for conversation
   app.get("/api/protected/conversations/:id/files", async (req, res) => {
     try {
@@ -1430,7 +1551,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
       
       const files = await storage.getConversationFiles(conversationId);
-      res.json(files);
+      res.json(files.map(clientFileRecord));
     } catch (error: any) {
       res.status(500).json({ message: error.message });
     }
@@ -1579,14 +1700,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // --- Helper function to get orchestrator instance (or handle missing state) ---
   const getOrchestratorForRequest = async (req: Request, res: Response): Promise<InteractionOrchestrator | null> => {
       const conversationId = parseInt(req.params.id);
-      const state = getConversationState(conversationId);
-      if (!state) {
-          res.status(404).json({ message: "Conversation state not found or not initialized." });
-          return null;
-      }
       const conversation = await storage.getConversation(conversationId);
       if (!conversation || conversation.userId !== req.user!.id) {
           res.status(403).json({ message: "Forbidden" });
+          return null;
+      }
+      const state = getConversationState(conversationId);
+      if (!state) {
+          res.status(404).json({ message: "Conversation state not found or not initialized." });
           return null;
       }
       return new InteractionOrchestrator(conversationId);
@@ -1647,14 +1768,27 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.post("/api/protected/conversations/:id/autonomous/enable", async (req, res) => {
     try {
-      const orchestrator = await getOrchestratorForRequest(req, res);
-      if (!orchestrator) return; 
+      const conversationId = parseInt(req.params.id);
+      const conversation = await storage.getConversation(conversationId);
+      if (!conversation || conversation.userId !== req.user!.id) {
+        return res.status(404).json({ message: "Conversation not found" });
+      }
 
-      // Optional: Get maxTurns from request body
-      const { maxTurns } = req.body; // e.g., { "maxTurns": 10 }
-      const maxTurnsNum = (typeof maxTurns === 'number' && maxTurns >= 0) ? maxTurns : undefined;
+      const body = req.body && typeof req.body === "object" ? req.body : {};
+      const hasMaxTurns = Object.prototype.hasOwnProperty.call(body, "maxTurns");
+      const maxTurns = body.maxTurns;
+      if (hasMaxTurns && maxTurns !== null && maxTurns !== 0 &&
+          (typeof maxTurns !== "number" || !Number.isInteger(maxTurns) || maxTurns < 1 || maxTurns > 100)) {
+        return res.status(400).json({ message: "maxTurns must be null, 0, or an integer from 1 to 100." });
+      }
 
-      orchestrator.enableAutonomous(maxTurnsNum);
+      if (hasMaxTurns) {
+        await storage.updateConversation(conversationId, { turnBudget: maxTurns === 0 ? null : maxTurns });
+      }
+      await persistAutonomySettings(conversationId, {
+        isAutonomousEnabled: true,
+        ...(hasMaxTurns ? { maxAutonomousTurns: maxTurns === 0 ? null : maxTurns } : {}),
+      });
       res.status(200).json({ message: "Autonomous mode enabled." });
       
     } catch (error: any) {
@@ -1665,10 +1799,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.post("/api/protected/conversations/:id/autonomous/disable", async (req, res) => {
     try {
-      const orchestrator = await getOrchestratorForRequest(req, res);
-      if (!orchestrator) return; 
+      const conversationId = parseInt(req.params.id);
+      const conversation = await storage.getConversation(conversationId);
+      if (!conversation || conversation.userId !== req.user!.id) {
+        return res.status(404).json({ message: "Conversation not found" });
+      }
 
-      orchestrator.disableAutonomous();
+      await persistAutonomySettings(conversationId, { isAutonomousEnabled: false });
       res.status(200).json({ message: "Autonomous mode disabled." });
       
     } catch (error: any) {

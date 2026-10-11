@@ -38,6 +38,7 @@ export interface DeliverableGenerationRequest {
     maxCharacters?: number;
     requiredSections?: string[];
     taskCount?: number;
+    datedTasks?: boolean;
   };
 }
 
@@ -141,6 +142,9 @@ function buildDeliverableInstructions(request: DeliverableGenerationRequest): st
   if (taskCount !== undefined) {
     lines.push(`Include a “Tasks” Markdown section containing exactly ${taskCount} top-level list entries, one task per entry.`);
   }
+  if (request.constraints.datedTasks) {
+    lines.push("Every task must include an explicit valid ISO date (YYYY-MM-DD) supplied by the farmer or farm plan; do not invent dates.");
+  }
   return lines.join("\n");
 }
 
@@ -221,11 +225,22 @@ function validateGeneratedContent(
       throw new Error(`The generated content is missing the required “${section}” section. No file was saved.`);
     }
   }
-  if (request.constraints.taskCount !== undefined) {
+  if (request.constraints.taskCount !== undefined || request.constraints.datedTasks) {
     const tasks = markdownSection(content, "Tasks");
-    const taskEntries = tasks?.split(/\r?\n/).filter((line) => /^\s*(?:[-*+]\s+|\d+[.)]\s+)/.test(line)).length ?? 0;
-    if (taskEntries !== request.constraints.taskCount) {
-      throw new Error(`The generated content has ${taskEntries} task entries; ${request.constraints.taskCount} are required. No file was saved.`);
+    const taskLines = tasks?.split(/\r?\n/).filter((line) => /^\s*(?:[-*+]\s+|\d+[.)]\s+)/.test(line)) ?? [];
+    if (request.constraints.taskCount !== undefined && taskLines.length !== request.constraints.taskCount) {
+      throw new Error(`The generated content has ${taskLines.length} task entries; ${request.constraints.taskCount} are required. No file was saved.`);
+    }
+    if (request.constraints.datedTasks && taskLines.some(line => {
+      const match = line.match(/\b(\d{4})-(\d{2})-(\d{2})\b/);
+      if (!match) return true;
+      const year = Number(match[1]);
+      const month = Number(match[2]);
+      const day = Number(match[3]);
+      const date = new Date(Date.UTC(year, month - 1, day));
+      return date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day;
+    })) {
+      throw new Error("Every task must include a valid ISO date (YYYY-MM-DD). No file was saved.");
     }
   }
 

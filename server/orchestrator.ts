@@ -1,9 +1,10 @@
 import { storage } from "./storage";
 import { getExpertResponse, getExpertResponseStream, generateInsights, getModeratorNextSpeakerSuggestion, generateClosingSynthesis, resolveAuxModel } from "./ai";
-import type { ModeratorContext } from "./ai";
+import type { DeliverableGenerationRequest, ModeratorContext } from "./ai";
 import { shouldStopForRedundancy, REDUNDANCY_STOP_SIMILARITY_THRESHOLD } from "./text-similarity";
 import type { InsertMessage, Expert, Message, File, MessageStance, OrchestratorSnapshot } from "@shared/schema";
 import { extractFarmerQuestions } from "@shared/mentions";
+import { createHash } from "crypto";
 
 // Verbose per-turn tracing is opt-in (ORCH_DEBUG=1). The default flood slows
 // test teardown and leaks conversation content into production logs.
@@ -416,9 +417,20 @@ function mentionRoutesForMessage(
 
 type FarmerFileIntent = "retrieve" | "no_file" | null;
 
+function cleanFarmerFileText(content: string | null | undefined): string {
+    return (content ?? "")
+        .toLowerCase()
+        .replace(/[’‘]/g, "'")
+        .replace(/```[\s\S]*?```/g, " ")
+        .replace(/`[^`]*`/g, " ")
+        .replace(/^\s*>.*$/gm, " ")
+        .replace(/[“\"][^”\"]*[”\"]/g, " ")
+        .replace(/https?:\/\/\S+/g, " ");
+}
+
 function classifyFarmerFileIntent(content: string | null | undefined): FarmerFileIntent {
     if (!content) return null;
-    const text = content.toLowerCase().replace(/[’‘]/g, "'");
+    const text = cleanFarmerFileText(content);
     const fileNoun = "(?:files?|documents?|sops?|calendars?|spreadsheets?|exports?)";
 
     if (
@@ -428,6 +440,13 @@ function classifyFarmerFileIntent(content: string | null | undefined): FarmerFil
         /\b(?:stop|disable)\s+(?:file|document)\s+(?:creation|generation)\b/.test(text)
     ) {
         return "no_file";
+    }
+
+    // A request that creates or revises an artifact may also ask for its link.
+    // Keep that work in the generation path; only a retrieval-only message is
+    // fulfilled directly from stored files.
+    if (/\b(?:create|make|generate|draft|write|produce|prepare|revise|update|modify|export)\b.{0,80}\b(?:files?|documents?|sops?|calendars?|spreadsheets?|exports?)\b/.test(text)) {
+        return null;
     }
 
     if (
@@ -442,21 +461,164 @@ function classifyFarmerFileIntent(content: string | null | undefined): FarmerFil
     return null;
 }
 
+/** Latest-message file intent shared with routes for retrieval-only replies. */
+export function getFarmerFileIntent(content: string | null | undefined): FarmerFileIntent {
+    return classifyFarmerFileIntent(content);
+}
+
 function isFileCreatorRole(role: string): boolean {
     return role.trim().toLowerCase() === "file creator";
 }
 
 function filterFileCreatorRoutes(
     routes: PendingMentionRoute[],
-    fileIntent: FarmerFileIntent
+    farmerContent: string | null | undefined,
 ): PendingMentionRoute[] {
-    return blocksFileCreator(fileIntent)
-        ? routes.filter(route => !isFileCreatorRole(route.role))
-        : routes;
+    return isFileCreatorAllowed(farmerContent)
+        ? routes
+        : routes.filter(route => !isFileCreatorRole(route.role));
 }
 
 function blocksFileCreator(fileIntent: FarmerFileIntent): boolean {
     return fileIntent === "retrieve" || fileIntent === "no_file";
+}
+
+function isFileCreatorAllowed(content: string | null | undefined): boolean {
+    const text = cleanFarmerFileText(content);
+    if (!text || blocksFileCreator(classifyFarmerFileIntent(text))) return false;
+    const fileNoun = "(?:files?|documents?|sops?|calendars?|spreadsheets?|exports?|plans?|scripts?|code)";
+    return new RegExp(`\\b(?:create|make|generate|draft|write|produce|prepare|export|build|turn|convert|provide|give|need|want)\\b.{0,80}\\b${fileNoun}\\b`).test(text);
+}
+
+const DELIVERABLE_NUMBER_WORDS: Record<string, number> = {
+    one: 1, two: 2, three: 3, four: 4, five: 5,
+    six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
+};
+
+function inferDeliverableKind(content: string): string {
+    const matches = Array.from(content.toLowerCase().matchAll(/\b(sop|standard operating procedure|calendar|spreadsheet|csv|chart|plan|budget|script|code|document)\b/g));
+    return matches[0]?.[1] === "standard operating procedure" ? "sop" : (matches[0]?.[1] ?? "document");
+}
+
+function inferDeliverableConstraints(content: string): DeliverableGenerationRequest["constraints"] {
+    const text = content.toLowerCase();
+    const constraints: DeliverableGenerationRequest["constraints"] = {};
+    const parseLimit = (value: string): number => {
+        const normalized = value.toLowerCase().replace(/,/g, "").trim();
+        return normalized.endsWith("k") ? Number(normalized.slice(0, -1)) * 1000 : Number(normalized);
+    };
+    const lessThan = text.match(/\b(?:under|less than|below)\s+([\d,]+(?:\.\d+)?\s*k?)\s*(?:unicode\s+)?characters?\b/);
+    const atMost = text.match(/\b(?:at most|no more than|up to)\s+([\d,]+(?:\.\d+)?\s*k?)\s*(?:unicode\s+)?characters?\b/);
+    const characterLimit = lessThan ? Math.ceil(parseLimit(lessThan[1])) - 1 : atMost ? Math.floor(parseLimit(atMost[1])) : undefined;
+    if (characterLimit !== undefined && characterLimit >= 0) constraints.maxCharacters = characterLimit;
+
+    const taskCountMatch = text.match(/\b(?:exactly\s+)?(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(dated\s+)?tasks?\b/);
+    if (taskCountMatch) {
+        const count = Number(taskCountMatch[1]) || DELIVERABLE_NUMBER_WORDS[taskCountMatch[1]];
+        if (count > 0) constraints.taskCount = count;
+        if (taskCountMatch[2]) constraints.datedTasks = true;
+    }
+
+    const sectionList = text.match(/\b(?:include|with|required)\s+(?:the\s+following\s+)?sections?\s*:?\s*([^.!?\n]+)/);
+    if (sectionList) {
+        const sections = sectionList[1]
+            .replace(/\s+and\s+/g, ",")
+            .split(",")
+            .map(section => section.trim().replace(/^[-*]\s*/, ""))
+            .filter(Boolean);
+        if (sections.length) constraints.requiredSections = sections;
+    }
+    if (constraints.taskCount !== undefined && !constraints.requiredSections) constraints.requiredSections = ["Tasks"];
+
+    const explicitExtension = text.match(/\.([a-z0-9]{2,5})\b/)?.[1];
+    const knownFormats: Array<[RegExp, string]> = [
+        [/\b(?:markdown|md)\b/, "Markdown"], [/\b(?:plain text|text file|txt)\b/, "Text"],
+        [/\b(?:csv|spreadsheet|excel|xlsx)\b/, "CSV"], [/\b(?:json)\b/, "JSON"],
+        [/\b(?:html|web page)\b/, "HTML"], [/\b(?:calendar|ics)\b/, "ICS"],
+        [/\b(?:pdf|docx|word document|python|javascript|typescript)\b/, text.match(/\b(?:pdf|docx|python|javascript|typescript)\b/)?.[0] ?? "Word document"],
+    ];
+    if (explicitExtension) {
+        constraints.format = explicitExtension;
+    } else {
+        constraints.format = knownFormats.find(([pattern]) => pattern.test(text))?.[1];
+    }
+    if (!constraints.format) {
+        const kind = inferDeliverableKind(content);
+        if (kind === "sop" || constraints.taskCount !== undefined || constraints.requiredSections?.length) constraints.format = "Markdown";
+        else if (kind === "calendar") constraints.format = "ICS";
+        else if (kind === "spreadsheet" || kind === "csv") constraints.format = "CSV";
+    }
+    return constraints;
+}
+
+function deliverableIdentityTokens(content: string): string[] {
+    const ignored = new Set([
+        "a", "an", "and", "are", "as", "at", "be", "by", "can", "could", "create", "dated", "document",
+        "do", "exactly", "file", "files", "for", "four", "give", "generate", "make", "me", "my", "of", "on",
+        "please", "prepare", "provide", "request", "revise", "sop", "tasks", "the", "this", "to", "under", "update",
+        "with", "write", "you", "your", "characters", "character", "less", "than", "more", "most", "at", "no",
+    ]);
+    return cleanFarmerFileText(content)
+        .replace(/\b\d{4}-\d{2}-\d{2}\b/g, " ")
+        .replace(/\b\d[\d,]*\b/g, " ")
+        .replace(/[^a-z0-9]+/g, " ")
+        .split(/\s+/)
+        .filter(token => token.length > 2 && !ignored.has(token));
+}
+
+function fileMatchesDeliverableKind(file: File, kind: string): boolean {
+    const name = file.filename.toLowerCase();
+    if (kind === "sop" || kind === "standard operating procedure") return /sop|procedure|\.md(?:$|\?)/.test(name);
+    if (kind === "calendar") return /calendar|\.ics$/.test(name);
+    if (kind === "spreadsheet" || kind === "csv") return /spreadsheet|\.csv$/.test(name);
+    if (kind === "script" || kind === "code") return /script|code|\.(?:py|js|ts)$/.test(name);
+    return name.includes(kind);
+}
+
+function selectRevisionTarget(files: File[], kind: string, content: string): File | undefined {
+    const kindMatches = files.filter(file => fileMatchesDeliverableKind(file, kind));
+    const candidates = kindMatches.length ? kindMatches : files;
+    if (candidates.length === 1) return candidates[0];
+    const requestTokens = new Set(deliverableIdentityTokens(content));
+    const scored = candidates.map(file => ({
+        file,
+        score: file.filename.toLowerCase().replace(/[^a-z0-9]+/g, " ").split(/\s+/).filter(token => requestTokens.has(token)).length,
+    })).sort((a, b) => b.score - a.score);
+    return scored.length > 0 && scored[0].score > 0 && scored[0].score > (scored[1]?.score ?? 0)
+        ? scored[0].file
+        : undefined;
+}
+
+async function buildDeliverableGenerationRequest(
+    conversationId: number,
+    userMessage: Message,
+    content: string,
+): Promise<DeliverableGenerationRequest> {
+    const kind = inferDeliverableKind(content);
+    const revisionIntent = /\b(?:revise|revision|update|edit|modify|replace|change|adjust)\b/.test(cleanFarmerFileText(content));
+    const currentFiles = await storage.getCurrentDeliverableFiles(conversationId);
+    const revisionTarget = revisionIntent ? selectRevisionTarget(currentFiles, kind, content) : undefined;
+    if (revisionIntent && !revisionTarget) {
+        throw new Error("I couldn't identify which saved deliverable to revise. Please name the file or open the Files pane.");
+    }
+
+    const tokens = deliverableIdentityTokens(content);
+    const identity = tokens.join(" ") || `message-${userMessage.id}`;
+    const deliverableId = revisionTarget?.deliverableId ?? `deliverable-${createHash("sha256")
+        .update(`${conversationId}:${kind}:${identity}`)
+        .digest("hex")
+        .slice(0, 32)}`;
+    const generationRequestId = `generation-${createHash("sha256")
+        .update(`${conversationId}:${userMessage.id}:File Creator`)
+        .digest("hex")
+        .slice(0, 32)}`;
+    return {
+        deliverableId,
+        generationRequestId,
+        mode: revisionTarget ? "revise" : "create",
+        ...(revisionTarget ? { expectedCurrentFileId: revisionTarget.id } : {}),
+        constraints: inferDeliverableConstraints(content),
+    };
 }
 
 function restoredPausedFromMode(mode: unknown): ConversationState["pausedFromMode"] {
@@ -809,7 +971,7 @@ export class InteractionOrchestrator {
             roundExperts: [],
             pendingMentionRoutes: filterFileCreatorRoutes(
                 mentionRoutesForMessage(state.lastUserMessage?.mentions, null, state.activeExperts),
-                classifyFarmerFileIntent(state.lastUserMessage?.content),
+                state.lastUserMessage?.content,
             ),
             pendingUserMessage: state.lastUserMessage,
             farmerJustSpoke: true,
@@ -878,7 +1040,7 @@ export class InteractionOrchestrator {
                 pendingUserMessage: pendingMessage,
                 pendingMentionRoutes: filterFileCreatorRoutes(
                     mentionRoutesForMessage(pendingMessage.mentions, null, state.activeExperts),
-                    classifyFarmerFileIntent(pendingMessage.content),
+                    pendingMessage.content,
                 ),
                 farmerJustSpoke: true,
                 singleTurnOnly: !state.isAutonomousEnabled,
@@ -1066,7 +1228,7 @@ export class InteractionOrchestrator {
                 if (state.mode === "paused" || state.turnChainScheduled) return;
                 const filteredRoutes = filterFileCreatorRoutes(
                     state.pendingMentionRoutes,
-                    classifyFarmerFileIntent(state.lastUserMessage?.content),
+                    state.lastUserMessage?.content,
                 );
                 if (filteredRoutes.length !== state.pendingMentionRoutes.length) {
                     state = updateConversationState(this.conversationId, { pendingMentionRoutes: filteredRoutes });
@@ -1150,7 +1312,7 @@ export class InteractionOrchestrator {
                     (latestState.lastUserMessage !== routingMessage && latestState.farmerJustSpoke)) continue;
                 state = latestState;
                 if (suggestedRole && isFileCreatorRole(suggestedRole) &&
-                    blocksFileCreator(classifyFarmerFileIntent(state.lastUserMessage?.content))) {
+                    !isFileCreatorAllowed(state.lastUserMessage?.content)) {
                     suggestedRole = "RoundRobin";
                 }
                 if (farmerJustSpoke) updateConversationState(this.conversationId, { farmerJustSpoke: false });
@@ -1245,7 +1407,7 @@ export class InteractionOrchestrator {
         if (nextExpertIndex >= 0) {
             const selectedExpert = state.activeExperts[nextExpertIndex];
             if (selectedExpert && isFileCreatorRole(selectedExpert.role) &&
-                blocksFileCreator(classifyFarmerFileIntent(beforeTurnState?.lastUserMessage?.content))) {
+                !isFileCreatorAllowed(beforeTurnState?.lastUserMessage?.content)) {
                 nextExpertIndex = -1;
             }
         }
@@ -1393,17 +1555,51 @@ export class InteractionOrchestrator {
 
                 // Mark the turn in flight before invoking the provider so a
                 // pause or join now lets this selected expert finish.
-                const expertResponse: InsertMessage = await getExpertResponseStream(
-                    currentExpert, history, referenceMessageContent, files, availableRoles,
-                    (token) => {
-                        // Stream each token to the client
-                        broadcastFn(this.conversationId, {
-                            type: "expert_stream_token",
-                            expertId: currentExpert.id,
-                            token: token,
-                        });
-                    }
-                );
+                const deliverableRequest = isFileCreatorRole(currentExpert.role) && state.lastUserMessage
+                    ? await buildDeliverableGenerationRequest(
+                        this.conversationId,
+                        state.lastUserMessage,
+                        state.lastUserMessage.content,
+                    )
+                    : undefined;
+                const existingCreate = deliverableRequest?.mode === "create"
+                    ? await storage.getCurrentDeliverableFile(this.conversationId, deliverableRequest.deliverableId)
+                    : undefined;
+                let expertResponse: InsertMessage;
+                if (existingCreate) {
+                    const downloadUrl = `/api/protected/conversations/${this.conversationId}/files/${existingCreate.id}/download`;
+                    const content = `Using existing file: ${existingCreate.filename} (version ${existingCreate.version ?? 1})\nDownload: ${downloadUrl}`;
+                    broadcastFn(this.conversationId, {
+                        type: "expert_stream_token",
+                        expertId: currentExpert.id,
+                        token: content,
+                    });
+                    expertResponse = {
+                        conversationId: this.conversationId,
+                        expertId: currentExpert.id,
+                        userId: null,
+                        content,
+                        role: "assistant",
+                        expertName: currentExpert.name,
+                        expertRole: currentExpert.role,
+                        artifacts: [],
+                        mentions: [],
+                        stance: null,
+                    };
+                } else {
+                    expertResponse = await getExpertResponseStream(
+                        currentExpert, history, referenceMessageContent, files, availableRoles,
+                        (token) => {
+                            // Stream each token to the client
+                            broadcastFn(this.conversationId, {
+                                type: "expert_stream_token",
+                                expertId: currentExpert.id,
+                                token: token,
+                            });
+                        },
+                        deliverableRequest,
+                    );
+                }
                 
                 // Store and broadcast completed message
                 const storedExpertMessage = await storage.createMessage(expertResponse);
@@ -1453,7 +1649,7 @@ export class InteractionOrchestrator {
                         pendingMentionRoutes: filterFileCreatorRoutes([
                                 ...latestAfterStore.pendingMentionRoutes,
                                 ...mentionRoutesForMessage(storedExpertMessage.mentions, currentExpert.role, latestAfterStore.activeExperts)
-                            ], classifyFarmerFileIntent(latestAfterStore.lastUserMessage?.content)),
+                            ], latestAfterStore.lastUserMessage?.content),
                         ...completedTurnStanceUpdates(
                             latestAfterStore,
                             currentExpert.role,
@@ -1919,7 +2115,7 @@ export async function processMessageTurnBased(
             const existingExpertRoutes = state.pendingMentionRoutes.filter(route => route.sourceRole !== null);
             const pendingMentionRoutes = filterFileCreatorRoutes(
                 [...existingFarmerRoutes, ...newFarmerRoutes, ...existingExpertRoutes],
-                classifyFarmerFileIntent(userMessage.content),
+                userMessage.content,
             );
             const joined = updateConversationState(conversationId, {
                 activeExperts,

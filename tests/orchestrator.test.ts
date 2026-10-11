@@ -22,6 +22,8 @@ import { describe, it, expect, vi, beforeEach, afterEach, afterAll } from "vites
 const mockGetConversationMessages = vi.hoisted(() => vi.fn());
 const mockGetConversationExperts = vi.hoisted(() => vi.fn());
 const mockGetConversationFiles = vi.hoisted(() => vi.fn());
+const mockGetCurrentDeliverableFiles = vi.hoisted(() => vi.fn());
+const mockGetCurrentDeliverableFile = vi.hoisted(() => vi.fn());
 const mockCreateMessage = vi.hoisted(() => vi.fn());
 const mockCreateOpenQuestion = vi.hoisted(() => vi.fn());
 // G7: the orchestrator persists snapshots through these; default no-ops here,
@@ -41,6 +43,8 @@ vi.mock("../server/storage", () => ({
     getConversationMessages: mockGetConversationMessages,
     getConversationExperts: mockGetConversationExperts,
     getConversationFiles: mockGetConversationFiles,
+    getCurrentDeliverableFiles: mockGetCurrentDeliverableFiles,
+    getCurrentDeliverableFile: mockGetCurrentDeliverableFile,
     createMessage: mockCreateMessage,
     createOpenQuestion: mockCreateOpenQuestion,
   },
@@ -70,6 +74,7 @@ import {
   isUsableConversationState,
   processMessageTurnBased,
   persistAutonomySettings,
+  getFarmerFileIntent,
   isStanceLedgerConverged,
   getStableStanceSplitSignature,
   canConcludeWithStanceEvidence,
@@ -170,6 +175,8 @@ describe("Orchestrator", () => {
     const myExperts = experts.map((e) => ({ ...e, conversationId }));
     mockGetConversationExperts.mockResolvedValue(myExperts);
     mockGetConversationFiles.mockResolvedValue([]);
+    mockGetCurrentDeliverableFiles.mockResolvedValue([]);
+    mockGetCurrentDeliverableFile.mockResolvedValue(undefined);
 
     const messages: Message[] = [];
     let messageId = 10_000 + conversationId * 50;
@@ -1038,6 +1045,13 @@ describe("Orchestrator", () => {
       mockGetConversation.mockResolvedValue(undefined);
     });
 
+    it("separates create-with-link requests from retrieval and no-file instructions", () => {
+      expect(getFarmerFileIntent("Please just send me the link for the saved SOP.")).toBe("retrieve");
+      expect(getFarmerFileIntent("Create an SOP and include its download link.")).toBeNull();
+      expect(getFarmerFileIntent("Stop creating files; just give me the link.")).toBe("no_file");
+      expect(getFarmerFileIntent('The old transcript said "@[File Creator] create a SOP"; explain that text.')).toBeNull();
+    });
+
     it("uses the 25-turn default and caps the let-it-run option at 100", async () => {
       const conversationId = nextConvId();
       const { waitForTurns, releaseNextTurn } = setupGatedConversation(conversationId);
@@ -1175,6 +1189,75 @@ describe("Orchestrator", () => {
       await releaseNextTurn();
       await waitForMode(conversationId, "idle");
       expect(turnNames()).not.toContain("Daisy");
+    });
+
+    it("builds bounded server-owned File Creator requests and reuses an existing current file", async () => {
+      const conversationId = nextConvId();
+      const fileCreator = { ...createMockExpert(4, "Daisy", "File Creator"), conversationId };
+      const roster = [...experts.map(expert => ({ ...expert, conversationId })), fileCreator];
+      setupGatedConversation(conversationId);
+      mockGetConversationExperts.mockResolvedValue(roster);
+      mockGetCurrentDeliverableFiles.mockResolvedValue([]);
+      mockGetCurrentDeliverableFile.mockResolvedValue(undefined);
+      mockGetModeratorNextSpeakerSuggestion.mockReset()
+        .mockResolvedValueOnce("File Creator")
+        .mockResolvedValue("Conclude");
+      mockGetExpertResponseStream.mockImplementation(async (expert: Expert) => ({
+        conversationId,
+        expertId: expert.id,
+        userId: null,
+        content: "Created nitrogen SOP.",
+        role: "assistant",
+        expertName: expert.name,
+        expertRole: expert.role,
+        artifacts: [],
+      }));
+
+      const userMessage = createMockMessage(1, "Create a nitrogen SOP under 2,000 characters with exactly four dated tasks.");
+      await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn);
+      await waitForMode(conversationId, "idle");
+
+      const firstFileCreatorCall = mockGetExpertResponseStream.mock.calls.find(([expert]) => expert.role === "File Creator");
+      const request = firstFileCreatorCall?.[6];
+      expect(request).toMatchObject({
+        mode: "create",
+        constraints: {
+          format: "Markdown",
+          maxCharacters: 1999,
+          requiredSections: ["Tasks"],
+          taskCount: 4,
+          datedTasks: true,
+        },
+      });
+      expect(request.deliverableId).toMatch(/^deliverable-[a-f0-9]{32}$/);
+      expect(request.generationRequestId).toMatch(/^generation-[a-f0-9]{32}$/);
+
+      const existing = {
+        id: 77,
+        conversationId,
+        filename: "nitrogen-sop.md",
+        fileUrl: "/uploads/nitrogen-sop.md",
+        fileType: "text/markdown",
+        uploadedBy: "Expert: File Creator",
+        deliverableId: request.deliverableId,
+        generationRequestId: request.generationRequestId,
+        version: 1,
+        supersedesFileId: null,
+        supersededAt: null,
+        uploadedAt: new Date(),
+      };
+      mockGetCurrentDeliverableFile.mockResolvedValue(existing);
+      mockGetModeratorNextSpeakerSuggestion.mockReset()
+        .mockResolvedValueOnce("File Creator")
+        .mockResolvedValue("Conclude");
+
+      await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn, { restart: true });
+      await waitForMode(conversationId, "idle");
+
+      expect(mockGetExpertResponseStream.mock.calls.filter(([expert]) => expert.role === "File Creator")).toHaveLength(1);
+      expect(mockCreateMessage.mock.calls.some(([message]) =>
+        message.expertRole === "File Creator" && message.content.includes(`/api/protected/conversations/${conversationId}/files/77/download`),
+      )).toBe(true);
     });
 
     it("finishes the current expert, routes the pending farmer message, and preserves autonomous counters", async () => {

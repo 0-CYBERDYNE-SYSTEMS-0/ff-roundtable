@@ -4,8 +4,9 @@ import createMemoryStore from "memorystore";
 import session from "express-session";
 import { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
-import { eq, desc, asc, and } from "drizzle-orm";
+import { eq, desc, asc, and, isNull, isNotNull } from "drizzle-orm";
 import ConnectPgSimple from "connect-pg-simple";
+import type { DeliverableGenerationRequest, SaveDeliverableVersionResult } from "@shared/schema";
 
 const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || "";
 
@@ -17,6 +18,8 @@ const MemoryStore = createMemoryStore(session);
 const PgSessionStore = ConnectPgSimple(session);
 
 class OpenQuestionNoLongerOpenError extends Error {}
+
+export class DeliverableConflictError extends Error {}
 
 // modify the interface with any CRUD methods
 // you might need
@@ -62,7 +65,12 @@ export interface IStorage {
   
   // File operations
   createFile(file: InsertFile): Promise<File>;
+  getFileById(fileId: number): Promise<File | undefined>;
+  getFileByUrl(fileUrl: string): Promise<File | undefined>;
   getConversationFiles(conversationId: number): Promise<File[]>;
+  getCurrentDeliverableFile(conversationId: number, deliverableId: string): Promise<File | undefined>;
+  getCurrentDeliverableFiles(conversationId: number): Promise<File[]>;
+  saveDeliverableVersion(file: InsertFile, request: DeliverableGenerationRequest): Promise<SaveDeliverableVersionResult>;
   
   // Insight operations
   createInsight(insight: InsertInsight): Promise<Insight>;
@@ -451,15 +459,87 @@ export class MemStorage implements IStorage {
   async createFile(insertFile: InsertFile): Promise<File> {
     const id = this.fileId++;
     const now = new Date();
-    const file: File = { ...insertFile, id, uploadedAt: now };
+    const file: File = {
+      ...insertFile,
+      deliverableId: insertFile.deliverableId ?? null,
+      generationRequestId: insertFile.generationRequestId ?? null,
+      version: insertFile.version ?? null,
+      supersedesFileId: insertFile.supersedesFileId ?? null,
+      supersededAt: insertFile.supersededAt ?? null,
+      id,
+      uploadedAt: now,
+    };
     this.files.set(id, file);
     return file;
+  }
+
+  async getFileById(fileId: number): Promise<File | undefined> {
+    return this.files.get(fileId);
+  }
+
+  async getFileByUrl(fileUrl: string): Promise<File | undefined> {
+    return Array.from(this.files.values()).find(file => file.fileUrl === fileUrl);
   }
   
   async getConversationFiles(conversationId: number): Promise<File[]> {
     return Array.from(this.files.values())
       .filter(file => file.conversationId === conversationId)
       .sort((a, b) => (b.uploadedAt?.getTime() ?? 0) - (a.uploadedAt?.getTime() ?? 0));
+  }
+
+  async getCurrentDeliverableFile(conversationId: number, deliverableId: string): Promise<File | undefined> {
+    return Array.from(this.files.values()).find(file =>
+      file.conversationId === conversationId &&
+      file.deliverableId === deliverableId &&
+      !file.supersededAt
+    );
+  }
+
+  async getCurrentDeliverableFiles(conversationId: number): Promise<File[]> {
+    return Array.from(this.files.values())
+      .filter(file => file.conversationId === conversationId && file.deliverableId && !file.supersededAt)
+      .sort((a, b) => (b.uploadedAt?.getTime() ?? 0) - (a.uploadedAt?.getTime() ?? 0));
+  }
+
+  async saveDeliverableVersion(
+    insertFile: InsertFile,
+    request: DeliverableGenerationRequest,
+  ): Promise<SaveDeliverableVersionResult> {
+    const priorAttempt = Array.from(this.files.values()).find(file =>
+      file.conversationId === insertFile.conversationId &&
+      file.generationRequestId === request.generationRequestId
+    );
+    if (priorAttempt) {
+      if (priorAttempt.deliverableId !== request.deliverableId) {
+        throw new DeliverableConflictError("Generation request is already linked to another deliverable.");
+      }
+      return { file: priorAttempt, created: false };
+    }
+
+    const current = Array.from(this.files.values()).find(file =>
+      file.conversationId === insertFile.conversationId &&
+      file.deliverableId === request.deliverableId &&
+      !file.supersededAt
+    );
+    if (request.mode === "create" && current) return { file: current, created: false };
+    if (request.mode === "revise" && (!current || current.id !== request.expectedCurrentFileId)) {
+      throw new DeliverableConflictError("The deliverable changed before this revision could be saved.");
+    }
+
+    const versions = Array.from(this.files.values()).filter(file =>
+      file.conversationId === insertFile.conversationId && file.deliverableId === request.deliverableId
+    );
+    const now = new Date();
+    if (current) this.files.set(current.id, { ...current, supersededAt: now });
+    const file = await this.createFile({
+      ...insertFile,
+      deliverableId: request.deliverableId,
+      generationRequestId: request.generationRequestId,
+      version: Math.max(0, ...versions.map(item => item.version ?? 0)) + 1,
+      supersedesFileId: current?.id ?? null,
+      supersededAt: null,
+    });
+    return { file, created: true };
   }
   
   // Insight operations
@@ -918,12 +998,139 @@ export class PostgresStorage implements IStorage {
     return result[0];
   }
 
+  async getFileById(fileId: number): Promise<File | undefined> {
+    const result = await this.db.select().from(files).where(eq(files.id, fileId)).limit(1);
+    return result[0];
+  }
+
+  async getFileByUrl(fileUrl: string): Promise<File | undefined> {
+    const result = await this.db.select().from(files).where(eq(files.fileUrl, fileUrl)).limit(1);
+    return result[0];
+  }
+
   async getConversationFiles(conversationId: number): Promise<File[]> {
     return this.db
       .select()
       .from(files)
       .where(eq(files.conversationId, conversationId))
       .orderBy(desc(files.uploadedAt));
+  }
+
+  async getCurrentDeliverableFile(conversationId: number, deliverableId: string): Promise<File | undefined> {
+    const result = await this.db
+      .select()
+      .from(files)
+      .where(and(
+        eq(files.conversationId, conversationId),
+        eq(files.deliverableId, deliverableId),
+        isNull(files.supersededAt),
+      ))
+      .limit(1);
+    return result[0];
+  }
+
+  async getCurrentDeliverableFiles(conversationId: number): Promise<File[]> {
+    return this.db
+      .select()
+      .from(files)
+      .where(and(
+        eq(files.conversationId, conversationId),
+        isNotNull(files.deliverableId),
+        isNull(files.supersededAt),
+      ))
+      .orderBy(desc(files.uploadedAt));
+  }
+
+  async saveDeliverableVersion(
+    insertFile: InsertFile,
+    request: DeliverableGenerationRequest,
+  ): Promise<SaveDeliverableVersionResult> {
+    if (!request.deliverableId.trim() || !request.generationRequestId.trim()) {
+      throw new Error("Deliverable and generation request IDs are required.");
+    }
+    if (request.mode === "revise" && !request.expectedCurrentFileId) {
+      throw new DeliverableConflictError("A revision must name the current file it intends to replace.");
+    }
+
+    try {
+      return await this.db.transaction(async (tx) => {
+        const priorAttempt = await tx
+          .select()
+          .from(files)
+          .where(and(
+            eq(files.conversationId, insertFile.conversationId),
+            eq(files.generationRequestId, request.generationRequestId),
+          ))
+          .limit(1)
+          .for("update");
+        if (priorAttempt[0]) {
+          if (priorAttempt[0].deliverableId !== request.deliverableId) {
+            throw new DeliverableConflictError("Generation request is already linked to another deliverable.");
+          }
+          return { file: priorAttempt[0], created: false };
+        }
+
+        const currentRows = await tx
+          .select()
+          .from(files)
+          .where(and(
+            eq(files.conversationId, insertFile.conversationId),
+            eq(files.deliverableId, request.deliverableId),
+            isNull(files.supersededAt),
+          ))
+          .limit(1)
+          .for("update");
+        const current = currentRows[0];
+        if (request.mode === "create" && current) return { file: current, created: false };
+        if (request.mode === "revise" && (!current || current.id !== request.expectedCurrentFileId)) {
+          throw new DeliverableConflictError("The deliverable changed before this revision could be saved.");
+        }
+
+        const previousVersions = await tx
+          .select({ version: files.version })
+          .from(files)
+          .where(and(
+            eq(files.conversationId, insertFile.conversationId),
+            eq(files.deliverableId, request.deliverableId),
+          ))
+          .orderBy(desc(files.version))
+          .limit(1);
+        const now = new Date();
+        if (current) {
+          await tx.update(files).set({ supersededAt: now }).where(eq(files.id, current.id));
+        }
+
+        const inserted = await tx
+          .insert(files)
+          .values({
+            ...insertFile,
+            deliverableId: request.deliverableId,
+            generationRequestId: request.generationRequestId,
+            version: (previousVersions[0]?.version ?? 0) + 1,
+            supersedesFileId: current?.id ?? null,
+            supersededAt: null,
+          })
+          .returning();
+        return { file: inserted[0], created: true };
+      });
+    } catch (error: any) {
+      if (request.mode === "create" && error?.code === "23505") {
+        const priorAttempt = await this.db
+          .select()
+          .from(files)
+          .where(and(
+            eq(files.conversationId, insertFile.conversationId),
+            eq(files.generationRequestId, request.generationRequestId),
+          ))
+          .limit(1);
+        if (priorAttempt[0] && priorAttempt[0].deliverableId === request.deliverableId) {
+          return { file: priorAttempt[0], created: false };
+        }
+        const current = await this.getCurrentDeliverableFile(insertFile.conversationId, request.deliverableId);
+        if (current) return { file: current, created: false };
+      }
+      throw error;
+    }
   }
 
   // ── Insight operations ─────────────────────────────────────────────────────

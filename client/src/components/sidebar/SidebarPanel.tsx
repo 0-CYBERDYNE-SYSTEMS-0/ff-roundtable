@@ -292,7 +292,14 @@ export default function SidebarPanel({
                         ) : (
                           <FileText className="text-farm-blue h-5 w-5" />
                         )}
-                        <span className="text-sm truncate max-w-[160px] font-medium text-neutral-700">{file.filename}</span>
+                        <div className="min-w-0">
+                          <span className="block text-sm truncate max-w-[160px] font-medium text-neutral-700">{file.filename}</span>
+                          {file.deliverableId && file.version != null && (
+                            <span className="block text-xs text-neutral-500">
+                              v{file.version} · {file.supersededAt ? "Superseded" : "Current"} · {new Date(file.uploadedAt ?? Date.now()).toLocaleString()}
+                            </span>
+                          )}
+                        </div>
                       </div>
                       <a
                         href={file.fileUrl}
