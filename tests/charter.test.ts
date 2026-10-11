@@ -32,19 +32,19 @@ process.env.NODE_ENV = "test";
 process.env.LOGIN_RATELIMIT_MAX = "1000";
 
 // ── Mock orchestrator (routes import it; never let it reach the AI layer) ──
-const { mockProcessMessageTurnBased, mockSetTurnBudget } = vi.hoisted(() => ({
+const { mockProcessMessageTurnBased, mockPersistAutonomySettings } = vi.hoisted(() => ({
   mockProcessMessageTurnBased: vi.fn(),
-  mockSetTurnBudget: vi.fn(),
+  mockPersistAutonomySettings: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("../server/orchestrator", () => ({
   processMessageTurnBased: mockProcessMessageTurnBased,
+  persistAutonomySettings: mockPersistAutonomySettings,
   InteractionOrchestrator: class {
     pause() {}
     resume() {}
     enableAutonomous(_maxTurns?: number) {}
     disableAutonomous() {}
-    setTurnBudget(turnBudget: number | null) { mockSetTurnBudget(turnBudget); }
   },
   getConversationState: vi.fn().mockReturnValue(null),
 }));
@@ -747,7 +747,7 @@ describe("PUT /api/protected/conversations/:id (charter + title)", () => {
     await registerRoutes(app);
   });
 
-  beforeEach(() => mockSetTurnBudget.mockReset());
+  beforeEach(() => mockPersistAutonomySettings.mockReset().mockResolvedValue(undefined));
 
   async function registerAndLogin(
     agent: request.SuperAgentTest,
@@ -800,28 +800,28 @@ describe("PUT /api/protected/conversations/:id (charter + title)", () => {
       .send({ turnBudget: 40 });
     expect(set.status).toBe(200);
     expect(set.body.turnBudget).toBe(40);
-    expect(mockSetTurnBudget).toHaveBeenCalledWith(40);
+    expect(mockPersistAutonomySettings).toHaveBeenCalledWith(convo.id, { maxAutonomousTurns: 40 });
 
     const omitted = await agent
       .put(`/api/protected/conversations/${convo.id}`)
       .send({ title: "Budget preserved" });
     expect(omitted.status).toBe(200);
     expect(omitted.body.turnBudget).toBe(40);
-    expect(mockSetTurnBudget).toHaveBeenCalledTimes(1);
+    expect(mockPersistAutonomySettings).toHaveBeenCalledTimes(1);
 
     const zero = await agent
       .put(`/api/protected/conversations/${convo.id}`)
       .send({ turnBudget: 0 });
     expect(zero.status).toBe(200);
     expect(zero.body.turnBudget).toBeNull();
-    expect(mockSetTurnBudget).toHaveBeenLastCalledWith(null);
+    expect(mockPersistAutonomySettings).toHaveBeenLastCalledWith(convo.id, { maxAutonomousTurns: null });
 
     const explicitNull = await agent
       .put(`/api/protected/conversations/${convo.id}`)
       .send({ turnBudget: null });
     expect(explicitNull.status).toBe(200);
     expect(explicitNull.body.turnBudget).toBeNull();
-    expect(mockSetTurnBudget).toHaveBeenCalledTimes(3);
+    expect(mockPersistAutonomySettings).toHaveBeenCalledTimes(3);
 
     const lowerBound = await agent
       .put(`/api/protected/conversations/${convo.id}`)
@@ -831,7 +831,7 @@ describe("PUT /api/protected/conversations/:id (charter + title)", () => {
       .send({ turnBudget: 100 });
     expect(lowerBound.body.turnBudget).toBe(1);
     expect(upperBound.body.turnBudget).toBe(100);
-    expect(mockSetTurnBudget).toHaveBeenLastCalledWith(100);
+    expect(mockPersistAutonomySettings).toHaveBeenLastCalledWith(convo.id, { maxAutonomousTurns: 100 });
   });
 
   it("rejects invalid turn budgets without changing the stored value", async () => {

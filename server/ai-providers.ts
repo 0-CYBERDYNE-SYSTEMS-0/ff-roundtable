@@ -52,15 +52,27 @@ function numericCost(usage: any): number | undefined {
   return typeof cost === "number" && Number.isFinite(cost) && cost >= 0 ? cost : undefined;
 }
 
-function safeOpenRouterError(status: number): Error {
-  const message = status === 401
+const UNSUPPORTED_IMAGE_ERROR = /(?:image|vision|modalit|multimodal)[\s\S]{0,100}(?:not\s+support|unsupport\w*|reject\w*|invalid|disabled|not\s+allowed|can(?:not|'t)|unable)|(?:not\s+support|unsupport\w*|reject\w*|invalid|disabled|not\s+allowed|can(?:not|'t)|unable)[\s\S]{0,100}(?:image|vision|modalit|multimodal)|support\s+(?:[\w-]+\s+){0,2}(?:image|vision|multimodal|modalit)/i;
+
+function safeOpenRouterError(status: number | undefined, providerDetail?: unknown): Error {
+  let detail = "";
+  try {
+    detail = typeof providerDetail === "string" ? providerDetail : JSON.stringify(providerDetail ?? "");
+  } catch {
+    detail = "";
+  }
+  const unsupportedImage = status === 413 ||
+    ((status === undefined || [400, 404, 422].includes(status)) && UNSUPPORTED_IMAGE_ERROR.test(detail.slice(0, 4096)));
+  const message = unsupportedImage
+    ? "This model does not support image input."
+    : status === 401
     ? "OpenRouter authentication failed. Contact the account operator."
     : status === 402
       ? "The OpenRouter account needs credits. Contact the account operator."
       : status === 429
         ? "OpenRouter is temporarily rate-limited. Try again later."
-        : `OpenRouter could not complete this request (${status}). Retry or continue with available work.`;
-  return Object.assign(new Error(message), { statusCode: status });
+        : `OpenRouter could not complete this request${status === undefined ? "" : ` (${status})`}. Retry or continue with available work.`;
+  return Object.assign(new Error(message), status === undefined ? {} : { statusCode: status });
 }
 
 // ─── Provider Interface ───────────────────────────────────────────────────────
@@ -224,7 +236,7 @@ export class OpenRouterProvider implements AIProvider {
       });
 
       if (!response.ok) {
-        throw safeOpenRouterError(response.status);
+        throw safeOpenRouterError(response.status, await response.text().catch(() => ""));
       }
 
       const data = await response.json() as any;
@@ -234,7 +246,7 @@ export class OpenRouterProvider implements AIProvider {
       responseModel = typeof data?.model === "string" ? data.model : undefined;
 
       if (data && data.error) {
-        throw safeOpenRouterError(Number.isInteger(data.error.code) ? data.error.code : 502);
+        throw safeOpenRouterError(Number.isInteger(data.error.code) ? data.error.code : undefined, data.error);
       }
 
       if (!data || !data.choices || !Array.isArray(data.choices) || data.choices.length === 0 || !data.choices[0] || !data.choices[0].message) {
@@ -310,7 +322,7 @@ export class OpenRouterProvider implements AIProvider {
       });
 
       if (!response.ok) {
-        throw safeOpenRouterError(response.status);
+        throw safeOpenRouterError(response.status, await response.text().catch(() => ""));
       }
 
       if (!response.body) {
@@ -353,7 +365,7 @@ export class OpenRouterProvider implements AIProvider {
             if (parsed?.usage) usage = parsed.usage;
 
             if (parsed?.error) {
-              throw safeOpenRouterError(Number.isInteger(parsed.error.code) ? parsed.error.code : 502);
+              throw safeOpenRouterError(Number.isInteger(parsed.error.code) ? parsed.error.code : undefined, parsed.error);
             }
 
             const choice = parsed?.choices?.[0];
