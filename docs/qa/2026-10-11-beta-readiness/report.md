@@ -36,6 +36,20 @@ Visible model/call evidence: the active Research Analyst card displayed `Xiaomi/
 
 The visible source discussion was cut off before citations could be reviewed. No current-price claim or weather forecast was visible in the partial response. The comparison appeared as code-fenced text, not a rendered table. The Visualizations pane said no visualizations were available.
 
+### Operator diagnostics
+
+The application log recorded five OpenRouter attempts for conversation 6. Each attempt returned provider usage, so the total below is the provider-reported cost rather than a cap reservation. The cap remained at 2 USD and was not reached.
+
+| Request ID | Generation ID | Model / provider | Elapsed | Result | Cost USD |
+|---|---|---|---:|---|---:|
+| `4e6d0450-706c-45fc-82b7-e662b4030fc2` | `gen-1791757969-aZpryIADMFUKl3tV1Ll6` | `openai/gpt-6-luna` / OpenAI | 1,973 ms | success | 0.0003158595 |
+| `3e91c693-1d15-4cfb-ba9b-71f22651c0da` | `gen-1791757971-ItH6ct4Ee1CfWl2xNRTs` | `xiaomi/mimo-v2.6-flash` / Venice | 34,887 ms | failed: output limit | 0.008655577 |
+| `a6647811-266d-48b8-8e21-103b74ca760a` | `gen-1791758006-jZyS4sXgAL9WPzwS5SL0` | `openai/gpt-6-luna` / OpenAI | 2,232 ms | success | 0.00014573295 |
+| `374afe62-4f13-4151-82b0-8351b7a60fe7` | `gen-1791758008-tAQNFEp4JLuo5rvVOWzu` | `xiaomi/mimo-v2.6-flash` / Venice | 25,072 ms | success, empty assistant content | 0.008128204 |
+| `e7f4f653-cc7a-45a6-b966-e5bbf0c860ca` | `gen-1791758033-DW64Jhj7ZNQMTJyNMG1x` | `openai/gpt-6-luna` / OpenAI | 2,543 ms | success | 0.00015711795 |
+
+Provider-reported total: **0.01740249 USD** of the 2.00 USD ceiling. The failed output-limit attempt had known usage and its cost was included. No further provider attempt followed the retrieval-only request; the operator log and persisted assistant message 28 confirm the static no-file reply.
+
 ## Deliverables and retrieval
 
 The Files pane showed only the uploaded `fictional-farm-inputs.csv`; no SOP appeared, so there was no SOP to inspect or download. Read-only database verification confirms retrieval request 27 received assistant message 28 with the static reply: “I could not find a saved deliverable in this conversation yet; you can open Files or ask the council to create one.” The row confirms no provider attempt. Retrieval-only behavior is a **PARTIAL PASS** for returning the no-file reply without provider generation. Link retrieval is **BLOCKED** because no SOP exists. The refreshed browser transcript screenshot does not display the database-confirmed reply. Screenshots: [Files pane](screenshots/files-pane-after-run.png), [retrieval-only result](screenshots/retrieval-only-result.png), and [refreshed transcript](screenshots/retrieval-transcript-refreshed.png).
