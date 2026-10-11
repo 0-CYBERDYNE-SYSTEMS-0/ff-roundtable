@@ -261,6 +261,7 @@ describe("Orchestrator", () => {
 
     const assistantCount = () =>
       messages.filter((m) => m.conversationId === conversationId && m.role === "assistant").length;
+    const storedMessages = () => messages.filter((m) => m.conversationId === conversationId);
     const addUserMessageToHistory = (message: Message) => { messages.push({ ...message, conversationId }); };
 
     return {
@@ -269,6 +270,7 @@ describe("Orchestrator", () => {
       rejectNextTurn,
       drainToIdle,
       assistantCount,
+      storedMessages,
       addUserMessageToHistory,
       turnNames: () => [...startedNames],
       turnsStarted: () => turnsStarted,
@@ -542,7 +544,7 @@ describe("Orchestrator", () => {
       expect(stateDuringReplacement.mode).toBe("autonomous");
       expect(stateDuringReplacement.pendingUserMessage).toBeNull();
       expect(stateDuringReplacement.turnInFlight).toBe(true);
-      expect(stateDuringReplacement.totalAutonomousTurnsTaken).toBe(turnsBeforeJoin);
+      expect(stateDuringReplacement.totalAutonomousTurnsTaken).toBe(turnsBeforeJoin + 1);
       expect(stateDuringReplacement.scheduledFailureAttempts).toBe(0);
       const recoveryCalls = broadcastFn.mock.calls.slice(callsAfterJoin);
       expect(recoveryCalls.some(([cid, event]) =>
@@ -572,8 +574,8 @@ describe("Orchestrator", () => {
 
     it("skips a blank answer in later reference history and closes once at the saved cap", async () => {
       const conversationId = nextConvId();
-      const { waitForTurns, releaseNextTurn, addUserMessageToHistory, turnNames } = setupGatedConversation(conversationId);
-      mockGetConversation.mockResolvedValue({ turnBudget: 1 });
+      const { waitForTurns, releaseNextTurn, addUserMessageToHistory, turnNames, storedMessages } = setupGatedConversation(conversationId);
+      mockGetConversation.mockResolvedValue({ turnBudget: 2 });
       mockGetModeratorNextSpeakerSuggestion.mockResolvedValue("RoundRobin");
 
       const firstMessage = createMockMessage(1, "Check the soil results");
@@ -591,7 +593,11 @@ describe("Orchestrator", () => {
       expect(bobCall?.[1].some((message: Message) =>
         message.role === "assistant" && (!message.content.trim() || message.content.startsWith("(Error")),
       )).toBe(false);
-      expect(getConversationState(conversationId)!.totalAutonomousTurnsTaken).toBe(1);
+      expect(getConversationState(conversationId)!.totalAutonomousTurnsTaken).toBe(2);
+      expect(storedMessages().some(message => message.role === "assistant" && !message.content.trim())).toBe(false);
+      expect(storedMessages().some(message =>
+        message.role === "assistant" && message.content === "(Error getting response from Alice. Please try again.)",
+      )).toBe(true);
 
       await releaseNextTurn();
       await waitForMode(conversationId, "idle");
@@ -602,7 +608,7 @@ describe("Orchestrator", () => {
     it("treats a returned provider error as failed and skips a later Moderator pick of that expert", async () => {
       const conversationId = nextConvId();
       const { waitForTurns, releaseNextTurn, addUserMessageToHistory, turnNames } = setupGatedConversation(conversationId);
-      mockGetConversation.mockResolvedValue({ turnBudget: 1 });
+      mockGetConversation.mockResolvedValue({ turnBudget: 2 });
       mockGetModeratorNextSpeakerSuggestion
         .mockResolvedValueOnce("RoundRobin")
         .mockResolvedValue("Agronomist");
@@ -628,7 +634,42 @@ describe("Orchestrator", () => {
       expect(mockGenerateClosingSynthesis.mock.calls.filter(([cid]) => cid === conversationId)).toHaveLength(1);
     });
 
-    it("counts only healthy responses toward the saved cap after a provider failure", async () => {
+    it("charges a failed dispatch at the cap and emits exactly one partial handoff", async () => {
+      const conversationId = nextConvId();
+      const { waitForTurns, releaseNextTurn, rejectNextTurn, addUserMessageToHistory, turnNames } =
+        setupGatedConversation(conversationId);
+      mockGetConversation.mockResolvedValue({ turnBudget: 4 });
+      mockGetModeratorNextSpeakerSuggestion.mockResolvedValue("RoundRobin");
+      const providerError = new Error("provider output limit exceeded");
+      const errorLog = vi.spyOn(console, "error");
+
+      try {
+        const firstMessage = createMockMessage(1, "Compare the field plans");
+        addUserMessageToHistory(firstMessage);
+        await processMessageTurnBased(userId, conversationId, firstMessage, broadcastFn);
+        for (let turn = 1; turn <= 3; turn++) {
+          await waitForTurns(turn);
+          await releaseNextTurn();
+        }
+        await waitForTurns(4);
+        await rejectNextTurn(providerError);
+        await waitForMode(conversationId, "idle");
+
+        expect(turnNames()).toEqual(["Alice", "Bob", "Carol", "Alice"]);
+        expect(getConversationState(conversationId)!.failedExpertIds).toContain(1);
+        expect(mockGenerateClosingSynthesis.mock.calls.filter(([cid]) => cid === conversationId)).toHaveLength(1);
+        expect(broadcastFn.mock.calls.filter(([cid, event]) => cid === conversationId && event?.type === "concluding")).toHaveLength(1);
+        expect(broadcastFn.mock.calls.some(([cid, event]) =>
+          cid === conversationId && event?.type === "state_update" &&
+          event.expertTurnsConsumed === 4 && event.expertTurnsRemaining === 0,
+        )).toBe(true);
+        expect(errorLog.mock.calls.flat()).not.toContain(providerError);
+      } finally {
+        errorLog.mockRestore();
+      }
+    });
+
+    it("continues with healthy experts below the saved cap after a provider failure", async () => {
       const conversationId = nextConvId();
       const { waitForTurns, releaseNextTurn, rejectNextTurn, addUserMessageToHistory, turnNames } =
         setupGatedConversation(conversationId);
@@ -642,13 +683,11 @@ describe("Orchestrator", () => {
       await rejectNextTurn(new Error("provider output limit exceeded"));
 
       await waitForTurns(2);
-      await releaseNextTurn();
-      await waitForTurns(3);
       expect(getConversationState(conversationId)!.totalAutonomousTurnsTaken).toBe(2);
       await releaseNextTurn();
       await waitForMode(conversationId, "idle");
 
-      expect(turnNames()).toEqual(["Alice", "Bob", "Carol"]);
+      expect(turnNames()).toEqual(["Alice", "Bob"]);
       expect(getConversationState(conversationId)!.failedExpertIds).toContain(1);
       expect(mockGenerateClosingSynthesis.mock.calls.filter(([cid]) => cid === conversationId)).toHaveLength(1);
     });
@@ -674,16 +713,14 @@ describe("Orchestrator", () => {
       }
       expect(getConversationState(conversationId)).toMatchObject({
         mode: "paused",
-        totalAutonomousTurnsTaken: 0,
+        totalAutonomousTurnsTaken: 1,
         handoffStatus: "not_started",
       });
       expect(mockGenerateClosingSynthesis.mock.calls.filter(([cid]) => cid === conversationId)).toHaveLength(0);
 
       new InteractionOrchestrator(conversationId).resume();
-      await waitForTurns(2);
-      expect(turnNames()).toEqual(["Alice", "Bob"]);
-      await releaseNextTurn();
       await waitForMode(conversationId, "idle");
+      expect(turnNames()).toEqual(["Alice"]);
       expect(mockGenerateClosingSynthesis.mock.calls.filter(([cid]) => cid === conversationId)).toHaveLength(1);
     });
 

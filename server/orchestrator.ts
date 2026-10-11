@@ -708,12 +708,16 @@ function partitionExpertRoster(conversationId: number, roster: Expert[]): {
 // real expert contribution. Orchestrator-stored provider errors start with
 // "(Error getting response from", cached/legacy error rows start with
 // "(Error generating response", and vision rejections start with "⚠️".
+function isUsableExpertResponse(role: Message["role"], content: string): boolean {
+    const trimmedContent = content.trim();
+    return role === "assistant" &&
+        trimmedContent.length > 0 &&
+        !trimmedContent.startsWith("(Error") &&
+        !trimmedContent.startsWith("⚠️");
+}
+
 function isRealExpertHistoryMessage(m: Message): boolean {
-    const content = m.content.trim();
-    return m.role === "assistant" &&
-        content.length > 0 &&
-        !content.startsWith("(Error") &&
-        !content.startsWith("⚠️");
+    return isUsableExpertResponse(m.role, m.content);
 }
 
 function nextHealthyExpertIndex(activeExperts: Expert[], currentIndex: number, failedExpertIds: number[]): number {
@@ -1038,14 +1042,7 @@ export class InteractionOrchestrator {
 
     private async recordExpertFailure(
         expert: Expert,
-        priorTurnCount: number,
-        countedAsAutonomousTurn: boolean,
-        error?: unknown,
-    ): Promise<void> {
-        if (error !== undefined) {
-            console.error(`Orchestrator: Error streaming expert ${expert.name}:`, error);
-        }
-
+    ): Promise<Message | undefined> {
         let errorMessage: Message | undefined;
         try {
             errorMessage = await storage.createMessage({
@@ -1061,12 +1058,11 @@ export class InteractionOrchestrator {
         }
 
         const currentState = getConversationState(this.conversationId);
-        if (!currentState) return;
+        if (!currentState) return errorMessage;
         updateConversationState(this.conversationId, {
             failedExpertIds: currentState.failedExpertIds.includes(expert.id)
                 ? currentState.failedExpertIds
                 : [...currentState.failedExpertIds, expert.id],
-            ...(countedAsAutonomousTurn ? { totalAutonomousTurnsTaken: priorTurnCount } : {}),
         });
         const latestState = getConversationState(this.conversationId);
         latestState?.broadcastFn(this.conversationId, {
@@ -1075,6 +1071,7 @@ export class InteractionOrchestrator {
             expertName: expert.name,
             message: errorMessage ?? `Error getting response from ${expert.name}.`,
         });
+        return errorMessage;
     }
 
     private async emitClosingHandoff(): Promise<void> {
@@ -1621,18 +1618,13 @@ export class InteractionOrchestrator {
             const currentUserContext = state.pendingUserMessage;
             let turnQuestionMessageId: number | null = null;
             const priorTurnIndex = state.currentExpertIndex;
-            const priorTurnCount = state.totalAutonomousTurnsTaken;
             const countedAsAutonomousTurn = state.mode === "autonomous";
             let providerCallStarted = false;
             let providerCallResolved = false;
 
             // --- Update State for the Current Turn --- 
-            const turnsTakenUpdate = state.mode === "autonomous" && state.totalAutonomousTurnsTaken < state.maxAutonomousTurns
-                ? { totalAutonomousTurnsTaken: state.totalAutonomousTurnsTaken + 1 } 
-                : {};
             state = updateConversationState(this.conversationId, { 
-                currentExpertIndex: nextExpertIndex, 
-                ...turnsTakenUpdate 
+                currentExpertIndex: nextExpertIndex,
             });
             if (!state) return;
             const broadcastFn = state.broadcastFn;
@@ -1698,7 +1690,6 @@ export class InteractionOrchestrator {
                     // the selected turn or mark its queued input as picked up.
                     updateConversationState(this.conversationId, {
                         currentExpertIndex: priorTurnIndex,
-                        totalAutonomousTurnsTaken: priorTurnCount,
                         pendingUserMessage: latestState.pendingUserMessage ?? currentUserContext
                     });
                     return;
@@ -1755,6 +1746,16 @@ export class InteractionOrchestrator {
                 const existingCreate = deliverableRequest?.mode === "create"
                     ? await storage.getCurrentDeliverableFile(this.conversationId, deliverableRequest.deliverableId)
                     : undefined;
+                if (countedAsAutonomousTurn) {
+                    const beforeDispatch = getConversationState(this.conversationId);
+                    if (!beforeDispatch) return;
+                    if (beforeDispatch.totalAutonomousTurnsTaken < beforeDispatch.maxAutonomousTurns) {
+                        state = updateConversationState(this.conversationId, {
+                            totalAutonomousTurnsTaken: beforeDispatch.totalAutonomousTurnsTaken + 1,
+                        });
+                        if (!state) return;
+                    }
+                }
                 let expertResponse: InsertMessage;
                 if (existingCreate) {
                     const downloadUrl = `/api/protected/conversations/${this.conversationId}/files/${existingCreate.id}/download`;
@@ -1794,16 +1795,17 @@ export class InteractionOrchestrator {
                 }
                 
                 // Store and broadcast completed message
-                const storedExpertMessage = await storage.createMessage(expertResponse);
-                expertResponseFailed = !isRealExpertHistoryMessage(storedExpertMessage);
-                if (expertResponseFailed) {
-                    await this.recordExpertFailure(
-                        currentExpert,
-                        priorTurnCount,
-                        countedAsAutonomousTurn,
-                    );
+                let storedExpertMessage: Message | undefined;
+                if (isUsableExpertResponse(expertResponse.role, expertResponse.content)) {
+                    storedExpertMessage = await storage.createMessage(expertResponse);
+                    expertResponseFailed = !isRealExpertHistoryMessage(storedExpertMessage);
+                } else {
+                    expertResponseFailed = true;
                 }
-                if (storedExpertMessage.role === "assistant" && !expertResponseFailed) {
+                if (expertResponseFailed) {
+                    storedExpertMessage = await this.recordExpertFailure(currentExpert);
+                }
+                if (storedExpertMessage?.role === "assistant" && !expertResponseFailed) {
                     const questionCandidates = [
                         ...extractFarmerQuestions(storedExpertMessage.content),
                         ...extractLabeledFarmerQuestions(storedExpertMessage.content),
@@ -1854,7 +1856,7 @@ export class InteractionOrchestrator {
                 }
                 const latestAfterStore = getConversationState(this.conversationId);
                 if (latestAfterStore) {
-                    updateConversationState(this.conversationId, storedExpertMessage.role === "assistant" && !expertResponseFailed ? {
+                    updateConversationState(this.conversationId, storedExpertMessage?.role === "assistant" && !expertResponseFailed ? {
                         scheduledFailureAttempts: 0,
                         pendingMentionRoutes: filterFileCreatorRoutes([
                                 ...latestAfterStore.pendingMentionRoutes,
@@ -1868,7 +1870,7 @@ export class InteractionOrchestrator {
                         ),
                     } : {});
                 }
-                if (!expertResponseFailed) {
+                if (storedExpertMessage && !expertResponseFailed) {
                     state.broadcastFn(this.conversationId, {
                         type: "expert_stream_done",
                         expertId: currentExpert.id,
@@ -1884,9 +1886,8 @@ export class InteractionOrchestrator {
                 // near-identical to a prior expert message. The stop itself is
                 // applied in "Decide Next Action" below with the same cleanup
                 // as a natural end. Interruptions/pauses take precedence.
-                const isRealExpertContent = isRealExpertHistoryMessage(storedExpertMessage);
                 const postTurnState = getConversationState(this.conversationId);
-                if (postTurnState && isRealExpertContent) {
+                if (postTurnState && storedExpertMessage && isRealExpertHistoryMessage(storedExpertMessage)) {
                     if (postTurnState.mode === "autonomous") {
                         const decision = shouldStopForRedundancy(
                             storedExpertMessage.content,
@@ -1903,12 +1904,7 @@ export class InteractionOrchestrator {
             } catch (error) {
                 if (providerCallStarted && !providerCallResolved) {
                     expertResponseFailed = true;
-                    await this.recordExpertFailure(
-                        currentExpert,
-                        priorTurnCount,
-                        countedAsAutonomousTurn,
-                        error,
-                    );
+                    await this.recordExpertFailure(currentExpert);
                 } else {
                     // Storage/preparation failures remain retryable chain
                     // failures. Do not close or discard joined farmer input.
