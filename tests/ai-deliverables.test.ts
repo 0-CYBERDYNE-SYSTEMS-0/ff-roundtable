@@ -173,6 +173,33 @@ describe("AI deliverable generation", () => {
     expect(fs.existsSync(path.join(tempRoot, "uploads"))).toBe(false);
   });
 
+  it.each(["streaming", "non-streaming"] as const)("keeps incomplete File Creator responses on the retry message (%s)", async (pathType) => {
+    mockProviderChat.mockResolvedValue({ message: { role: "assistant", content: "" } });
+
+    const result = pathType === "streaming"
+      ? await getExpertResponseStream(
+        makeExpert(), [], "Create the SOP", [], ["File Creator"], () => undefined, makeRequest(),
+      )
+      : await getExpertResponse(makeExpert(), [], "Create the SOP", [], ["File Creator"], makeRequest());
+
+    expect(result.content).toMatch(/^⚠️ No complete response was received\./);
+    expect(result.content).toContain("Try a shorter request or split it into smaller requests");
+    expect(mockSaveDeliverableVersion).not.toHaveBeenCalled();
+  });
+
+  it.each(["streaming", "non-streaming"] as const)("redacts provider errors on the retry message (%s)", async (pathType) => {
+    mockProviderChat.mockRejectedValue(new Error("private provider payload"));
+
+    const result = pathType === "streaming"
+      ? await getExpertResponseStream(
+        makeExpert(), [], "Create the SOP", [], ["File Creator"], () => undefined, makeRequest(),
+      )
+      : await getExpertResponse(makeExpert(), [], "Create the SOP", [], ["File Creator"], makeRequest());
+
+    expect(result.content).toMatch(/^⚠️ No complete response was received\./);
+    expect(result.content).not.toContain("private provider payload");
+  });
+
   it("rejects a filename or MIME type that does not match the requested format", async () => {
     const request = makeRequest({ constraints: { format: "markdown" } });
     mockProviderChat.mockResolvedValue(modelResponse({ filename: "notes.txt", filetype: "text/plain", content: "Body" }));
@@ -292,7 +319,24 @@ describe("AI deliverable generation", () => {
     const result = await getExpertResponse(makeExpert(), [], "Create the SOP", [], ["File Creator"], request);
 
     expect(mockSaveDeliverableVersion).toHaveBeenCalledOnce();
-    expect(result.content).toContain("storage failed");
+    expect(result.content).toContain("The generated file could not be saved");
+    expect(result.content).not.toContain("storage failed");
+    expect(fs.readdirSync(path.join(tempRoot, "uploads"))).toEqual([]);
+  });
+
+  it("returns a safe storage-write message from the streaming File Creator path", async () => {
+    const request = makeRequest({ constraints: { format: "markdown" } });
+    mockProviderChat.mockResolvedValue(modelResponse({ filename: "north-field.md", filetype: "text/markdown", content: validMarkdown }));
+    mockSaveDeliverableVersion.mockRejectedValue(new Error("private storage payload"));
+    const emitted: string[] = [];
+
+    const result = await getExpertResponseStream(
+      makeExpert(), [], "Create the SOP", [], ["File Creator"], (token) => emitted.push(token), request,
+    );
+
+    expect(result.content).toContain("The generated file could not be saved");
+    expect(result.content).not.toContain("private storage payload");
+    expect(emitted).toEqual([result.content]);
     expect(fs.readdirSync(path.join(tempRoot, "uploads"))).toEqual([]);
   });
 

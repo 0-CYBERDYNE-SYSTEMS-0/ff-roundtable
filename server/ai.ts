@@ -61,6 +61,13 @@ const DELIVERABLE_FORMATS: readonly DeliverableFormat[] = [
 
 type DeliverableFile = File & { version?: number | null; supersededAt?: Date | null };
 
+class SafeDeliverableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SafeDeliverableError";
+  }
+}
+
 // The shared storage contract is being added by the integration lead. Keep
 // this local until its schema-facing types land.
 interface DeliverableStorage {
@@ -100,34 +107,34 @@ function getDeliverableFormat(format?: string): DeliverableFormat | null {
   const name = aliases[normalized];
   const resolved = DELIVERABLE_FORMATS.find((candidate) => candidate.name === name);
   if (!resolved) {
-    throw new Error(`The requested file format “${format}” is not supported for generated text files.`);
+    throw new SafeDeliverableError(`The requested file format “${format}” is not supported for generated text files.`);
   }
   return resolved;
 }
 
 function validateDeliverableRequest(request: DeliverableGenerationRequest): DeliverableFormat | null {
   if (!request.deliverableId.trim() || !request.generationRequestId.trim()) {
-    throw new Error("The deliverable request is missing its server-issued identity.");
+    throw new SafeDeliverableError("The deliverable request is missing its server-issued identity.");
   }
   if (request.mode !== "create" && request.mode !== "revise") {
-    throw new Error("The deliverable request mode is invalid.");
+    throw new SafeDeliverableError("The deliverable request mode is invalid.");
   }
   if (request.mode === "revise" && (!Number.isInteger(request.expectedCurrentFileId) || request.expectedCurrentFileId! < 1)) {
-    throw new Error("A revision must identify the current file version it will replace.");
+    throw new SafeDeliverableError("A revision must identify the current file version it will replace.");
   }
   const { maxCharacters, requiredSections, taskCount } = request.constraints;
   if (maxCharacters !== undefined && (!Number.isInteger(maxCharacters) || maxCharacters < 0)) {
-    throw new Error("The requested character limit is invalid.");
+    throw new SafeDeliverableError("The requested character limit is invalid.");
   }
   if (taskCount !== undefined && (!Number.isInteger(taskCount) || taskCount < 0)) {
-    throw new Error("The requested task count is invalid.");
+    throw new SafeDeliverableError("The requested task count is invalid.");
   }
   if (requiredSections?.some((section) => !section.trim())) {
-    throw new Error("A required section name is empty.");
+    throw new SafeDeliverableError("A required section name is empty.");
   }
   const requestedFormat = getDeliverableFormat(request.constraints.format);
   if ((taskCount !== undefined || requiredSections?.length) && requestedFormat && requestedFormat.name !== "markdown") {
-    throw new Error("Section and task-count constraints currently require Markdown output.");
+    throw new SafeDeliverableError("Section and task-count constraints currently require Markdown output.");
   }
   return requestedFormat;
 }
@@ -184,12 +191,12 @@ function validateGeneratedContent(
   requestedFormat: DeliverableFormat | null,
   request: DeliverableGenerationRequest,
 ): { filename: string; filetype: string; content: string } {
-  if (!fileData || typeof fileData !== "object") throw new Error("The File Creator response was not a JSON object.");
+  if (!fileData || typeof fileData !== "object") throw new SafeDeliverableError("The File Creator response was not a JSON object.");
   const candidate = fileData as Record<string, unknown>;
   if (typeof candidate.filename !== "string" || !candidate.filename.trim()
       || typeof candidate.filetype !== "string" || !candidate.filetype.trim()
       || typeof candidate.content !== "string" || !candidate.content.trim()) {
-    throw new Error("The File Creator response must contain a filename, filetype, and non-empty string content.");
+    throw new SafeDeliverableError("The File Creator response must contain a filename, filetype, and non-empty string content.");
   }
 
   const filename = sanitizeGeneratedFilename(candidate.filename);
@@ -201,7 +208,7 @@ function validateGeneratedContent(
   ) ?? null;
   if (requestedFormat) {
     if (!requestedFormat.extensions.includes(extension) || !requestedFormat.mimeTypes.includes(filetype)) {
-      throw new Error(`The generated filename and file type do not match the requested ${requestedFormat.name} format.`);
+      throw new SafeDeliverableError(`The generated filename and file type do not match the requested ${requestedFormat.name} format.`);
     }
   }
 
@@ -209,29 +216,29 @@ function validateGeneratedContent(
     try {
       JSON.parse(content);
     } catch {
-      throw new Error("The generated content is not valid JSON.");
+      throw new SafeDeliverableError("The generated content is not valid JSON.");
     }
   }
   if ((request.constraints.requiredSections?.length || request.constraints.taskCount !== undefined)
       && actualFormat?.name !== "markdown") {
-    throw new Error("Section and task-count constraints require a Markdown file. No file was saved.");
+    throw new SafeDeliverableError("Section and task-count constraints require a Markdown file. No file was saved.");
   }
   const maxCharacters = request.constraints.maxCharacters;
   const characterCount = countUnicodeCodePoints(content);
   if (maxCharacters !== undefined && characterCount > maxCharacters) {
-    throw new Error(`The generated content is ${characterCount} Unicode code points; the limit is ${maxCharacters}. No file was saved.`);
+    throw new SafeDeliverableError(`The generated content is ${characterCount} Unicode code points; the limit is ${maxCharacters}. No file was saved.`);
   }
 
   for (const section of request.constraints.requiredSections ?? []) {
     if (!markdownSection(content, section)) {
-      throw new Error(`The generated content is missing the required “${section}” section. No file was saved.`);
+      throw new SafeDeliverableError(`The generated content is missing the required “${section}” section. No file was saved.`);
     }
   }
   if (request.constraints.taskCount !== undefined || request.constraints.datedTasks) {
     const tasks = markdownSection(content, "Tasks");
     const taskLines = tasks?.split(/\r?\n/).filter((line) => /^\s*(?:[-*+]\s+|\d+[.)]\s+)/.test(line)) ?? [];
     if (request.constraints.taskCount !== undefined && taskLines.length !== request.constraints.taskCount) {
-      throw new Error(`The generated content has ${taskLines.length} task entries; ${request.constraints.taskCount} are required. No file was saved.`);
+      throw new SafeDeliverableError(`The generated content has ${taskLines.length} task entries; ${request.constraints.taskCount} are required. No file was saved.`);
     }
     if (request.constraints.datedTasks && taskLines.some(line => {
       const match = line.match(/\b(\d{4})-(\d{2})-(\d{2})\b/);
@@ -242,7 +249,7 @@ function validateGeneratedContent(
       const date = new Date(Date.UTC(year, month - 1, day));
       return date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day;
     })) {
-      throw new Error("Every task must include a valid ISO date (YYYY-MM-DD). No file was saved.");
+      throw new SafeDeliverableError("Every task must include a valid ISO date (YYYY-MM-DD). No file was saved.");
     }
   }
 
@@ -256,11 +263,16 @@ async function verifyRevisionTarget(
   if (request.mode !== "revise") return;
   const deliverableStorage = storage as unknown as DeliverableStorage;
   if (typeof deliverableStorage.getCurrentDeliverableFile !== "function") {
-    throw new Error("Version storage is not ready; this revision was not generated.");
+    throw new SafeDeliverableError("Version storage is not ready; this revision was not generated.");
   }
-  const current = await deliverableStorage.getCurrentDeliverableFile(conversationId, request.deliverableId);
+  let current: DeliverableFile | undefined;
+  try {
+    current = await deliverableStorage.getCurrentDeliverableFile(conversationId, request.deliverableId);
+  } catch {
+    throw new SafeDeliverableError("The current file version could not be checked. Retry the revision; no file was changed.");
+  }
   if (!current || current.id !== request.expectedCurrentFileId) {
-    throw new Error("The deliverable changed before this revision began. Reload its current version and try again.");
+    throw new SafeDeliverableError("The deliverable changed before this revision began. Reload its current version and try again.");
   }
 }
 
@@ -270,12 +282,12 @@ async function prepareFileCreatorRequest(
   request?: DeliverableGenerationRequest,
 ): Promise<DeliverableGenerationRequest> {
   if (!request) {
-    throw new Error("The File Creator needs a server-issued deliverable request before it can generate a file.");
+    throw new SafeDeliverableError("The File Creator needs a server-issued deliverable request before it can generate a file.");
   }
   validateDeliverableRequest(request);
   const deliverableStorage = storage as unknown as DeliverableStorage;
   if (typeof deliverableStorage.saveDeliverableVersion !== "function") {
-    throw new Error("Version storage is not ready; no File Creator request was sent.");
+    throw new SafeDeliverableError("Version storage is not ready; no File Creator request was sent.");
   }
   await verifyRevisionTarget(expert.conversationId, request);
   const systemMessage = messages.find((message) => message.role === "system" && typeof message.content === "string");
@@ -299,11 +311,9 @@ async function saveGeneratedDeliverable(
   }
   const generated = validateGeneratedContent(fileData, requestedFormat, request);
   const uploadsDir = path.join(process.cwd(), "uploads");
-  await fs.promises.mkdir(uploadsDir, { recursive: true });
   const uniqueFilename = `${randomBytes(8).toString("hex")}-${generated.filename}`;
   const filePath = path.join(uploadsDir, uniqueFilename);
   const fileUrl = `/uploads/${uniqueFilename}`;
-  await fs.promises.writeFile(filePath, generated.content, "utf8");
 
   const newFile: InsertFile = {
     conversationId: expert.conversationId,
@@ -315,15 +325,24 @@ async function saveGeneratedDeliverable(
   try {
     const deliverableStorage = storage as unknown as DeliverableStorage;
     if (typeof deliverableStorage.saveDeliverableVersion !== "function") {
-      throw new Error("Version storage is not ready; the generated draft was not saved.");
+      throw new SafeDeliverableError("Version storage is not ready; the generated draft was not saved.");
     }
+    await fs.promises.mkdir(uploadsDir, { recursive: true });
+    await fs.promises.writeFile(filePath, generated.content, "utf8");
     const saved = await deliverableStorage.saveDeliverableVersion(newFile, request);
     if (!saved.created) await fs.promises.rm(filePath, { force: true });
     return saved;
   } catch (error) {
     await fs.promises.rm(filePath, { force: true }).catch(() => undefined);
-    throw error;
+    if (error instanceof SafeDeliverableError) throw error;
+    throw new SafeDeliverableError("The generated file could not be saved. Retry the request; no new version was stored.");
   }
+}
+
+function expertResponseErrorMessage(error: unknown, expertName: string, imageParts: ImagePart[]): string {
+  if (isVisionRejection(error, imageParts)) return visionRejectionMessage(expertName);
+  if (error instanceof SafeDeliverableError) return error.message;
+  return INCOMPLETE_EXPERT_RESPONSE_MESSAGE;
 }
 
 function deliverableSuccessMessage(
@@ -1173,6 +1192,7 @@ export async function getExpertResponseStream(
       // File Creator needs full response to parse JSON — use non-streaming
       const request = await prepareFileCreatorRequest(expert, messages, deliverableRequest);
       response = await callOpenRouterAPI(messages, expert.model, conversation?.userId);
+      requireNonEmptyAssistantContent(response);
       stance = stripExpertStance(response, expert.role);
       const saved = await saveGeneratedDeliverable(response.message.content, expert, request);
       response.message.content = deliverableSuccessMessage(saved, request);
@@ -1217,9 +1237,7 @@ export async function getExpertResponseStream(
   } catch (error) {
     console.error(`[STREAM] Response generation failed for expert ${expert.name}`);
     streamFilter?.finish();
-    const errorMsg = isVisionRejection(error, imageParts)
-      ? visionRejectionMessage(expert.name)
-      : INCOMPLETE_EXPERT_RESPONSE_MESSAGE;
+    const errorMsg = expertResponseErrorMessage(error, expert.name, imageParts);
     onToken(errorMsg); // Show error inline
     return {
       conversationId: expert.conversationId,
@@ -1304,6 +1322,7 @@ export async function getExpertResponse(
     else if (expert.role === "File Creator") {
        const request = await prepareFileCreatorRequest(expert, messages, deliverableRequest);
        response = await callOpenRouterAPI(messages, expert.model, conversation?.userId);
+       requireNonEmptyAssistantContent(response);
        stance = stripExpertStance(response, expert.role);
        const saved = await saveGeneratedDeliverable(response.message.content, expert, request);
        response.message.content = deliverableSuccessMessage(saved, request);
@@ -1340,9 +1359,7 @@ export async function getExpertResponse(
 
   } catch (error) {
     console.error(`Response generation failed for expert ${expert.name}`);
-    const errorMsg = isVisionRejection(error, imageParts)
-      ? visionRejectionMessage(expert.name)
-      : INCOMPLETE_EXPERT_RESPONSE_MESSAGE;
+    const errorMsg = expertResponseErrorMessage(error, expert.name, imageParts);
     return {
       conversationId: expert.conversationId,
       expertId: expert.id,
