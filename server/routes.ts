@@ -1679,6 +1679,21 @@ export async function registerRoutes(app: Express): Promise<Server> {
         description: row.description,
       }));
 
+      if (req.query.preview === "1") {
+        const scheduleVersions = files
+          .filter((file) => !file.supersededAt && file.uploadedBy.startsWith("Expert:") && file.filename.toLowerCase().endsWith(".md"))
+          .map((file) => file.version)
+          .filter((version): version is number => Number.isInteger(version));
+        const startDate = events.map((event) => event.startDate).sort()[0];
+        return res.json({
+          eventCount: events.length,
+          startDate,
+          year: Number(startDate.slice(0, 4)),
+          timeZone: "All-day dates (timezone-neutral)",
+          scheduleVersion: scheduleVersions.length ? `v${Math.max(...scheduleVersions)}` : "Current conversation schedule",
+        });
+      }
+
       const ics = buildVCalendar(events, conversation.title ?? "New Conversation");
 
       const safeTitle = (conversation.title ?? "New Conversation")

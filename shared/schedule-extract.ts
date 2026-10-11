@@ -318,6 +318,7 @@ export function extractScheduleRows(
   }
 
   for (const file of files ?? []) {
+    if (file.supersededAt) continue;
     if (!file.uploadedBy.startsWith("Expert:")) continue;
     if (!file.filename.toLowerCase().endsWith(".md")) continue;
     const content = readGeneratedFile(file, readFile);
