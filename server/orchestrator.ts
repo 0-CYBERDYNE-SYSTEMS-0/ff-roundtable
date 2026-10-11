@@ -1617,16 +1617,10 @@ export class InteractionOrchestrator {
 
             const currentUserContext = state.pendingUserMessage;
             let turnQuestionMessageId: number | null = null;
-            const priorTurnIndex = state.currentExpertIndex;
             const countedAsAutonomousTurn = state.mode === "autonomous";
             let providerCallStarted = false;
             let providerCallResolved = false;
 
-            // --- Update State for the Current Turn --- 
-            state = updateConversationState(this.conversationId, { 
-                currentExpertIndex: nextExpertIndex,
-            });
-            if (!state) return;
             const broadcastFn = state.broadcastFn;
 
             // --- Determine Reference Message --- 
@@ -1688,10 +1682,6 @@ export class InteractionOrchestrator {
                 if (latestState.mode === "paused" || latestState.turnChainScheduled) {
                     // No expert has started yet, so a pure pause does not bill
                     // the selected turn or mark its queued input as picked up.
-                    updateConversationState(this.conversationId, {
-                        currentExpertIndex: priorTurnIndex,
-                        pendingUserMessage: latestState.pendingUserMessage ?? currentUserContext
-                    });
                     return;
                 }
 
@@ -1746,16 +1736,15 @@ export class InteractionOrchestrator {
                 const existingCreate = deliverableRequest?.mode === "create"
                     ? await storage.getCurrentDeliverableFile(this.conversationId, deliverableRequest.deliverableId)
                     : undefined;
-                if (countedAsAutonomousTurn) {
-                    const beforeDispatch = getConversationState(this.conversationId);
-                    if (!beforeDispatch) return;
-                    if (beforeDispatch.totalAutonomousTurnsTaken < beforeDispatch.maxAutonomousTurns) {
-                        state = updateConversationState(this.conversationId, {
-                            totalAutonomousTurnsTaken: beforeDispatch.totalAutonomousTurnsTaken + 1,
-                        });
-                        if (!state) return;
-                    }
-                }
+                const beforeDispatch = getConversationState(this.conversationId);
+                if (!beforeDispatch) return;
+                state = updateConversationState(this.conversationId, {
+                    currentExpertIndex: nextExpertIndex,
+                    ...(countedAsAutonomousTurn && beforeDispatch.totalAutonomousTurnsTaken < beforeDispatch.maxAutonomousTurns
+                        ? { totalAutonomousTurnsTaken: beforeDispatch.totalAutonomousTurnsTaken + 1 }
+                        : {}),
+                });
+                if (!state) return;
                 let expertResponse: InsertMessage;
                 if (existingCreate) {
                     const downloadUrl = `/api/protected/conversations/${this.conversationId}/files/${existingCreate.id}/download`;
