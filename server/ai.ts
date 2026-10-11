@@ -28,6 +28,295 @@ function sanitizeGeneratedFilename(filename: string): string {
   return basename.replace(/[^a-zA-Z0-9_.-]/g, "_") || "generated-file";
 }
 
+export interface DeliverableGenerationRequest {
+  deliverableId: string;
+  generationRequestId: string;
+  mode: "create" | "revise";
+  expectedCurrentFileId?: number;
+  constraints: {
+    format?: string;
+    maxCharacters?: number;
+    requiredSections?: string[];
+    taskCount?: number;
+  };
+}
+
+type DeliverableFormat = {
+  name: string;
+  extensions: readonly string[];
+  mimeTypes: readonly string[];
+};
+
+const DELIVERABLE_FORMATS: readonly DeliverableFormat[] = [
+  { name: "markdown", extensions: [".md", ".markdown"], mimeTypes: ["text/markdown", "text/plain"] },
+  { name: "text", extensions: [".txt"], mimeTypes: ["text/plain"] },
+  { name: "csv", extensions: [".csv"], mimeTypes: ["text/csv"] },
+  { name: "json", extensions: [".json"], mimeTypes: ["application/json"] },
+  { name: "html", extensions: [".html", ".htm"], mimeTypes: ["text/html"] },
+  { name: "ics", extensions: [".ics"], mimeTypes: ["text/calendar"] },
+];
+
+type DeliverableFile = File & { version?: number | null; supersededAt?: Date | null };
+
+// The shared storage contract is being added by the integration lead. Keep
+// this local until its schema-facing types land.
+interface DeliverableStorage {
+  saveDeliverableVersion(
+    file: InsertFile,
+    request: DeliverableGenerationRequest,
+  ): Promise<{ file: DeliverableFile; created: boolean }>;
+  getCurrentDeliverableFile(
+    conversationId: number,
+    deliverableId: string,
+  ): Promise<DeliverableFile | undefined>;
+}
+
+function getDeliverableFormat(format?: string): DeliverableFormat | null {
+  if (!format?.trim()) return null;
+  const normalized = format.trim().toLowerCase().replace(/\s*\([^)]*\)/g, "").replace(/^\./, "");
+  const aliases: Record<string, string> = {
+    md: "markdown",
+    "text/markdown": "markdown",
+    "text/x-markdown": "markdown",
+    markdown: "markdown",
+    txt: "text",
+    text: "text",
+    "plain text": "text",
+    "text/plain": "text",
+    csv: "csv",
+    "text/csv": "csv",
+    json: "json",
+    "application/json": "json",
+    html: "html",
+    htm: "html",
+    "text/html": "html",
+    ics: "ics",
+    calendar: "ics",
+    "text/calendar": "ics",
+  };
+  const name = aliases[normalized];
+  const resolved = DELIVERABLE_FORMATS.find((candidate) => candidate.name === name);
+  if (!resolved) {
+    throw new Error(`The requested file format “${format}” is not supported for generated text files.`);
+  }
+  return resolved;
+}
+
+function validateDeliverableRequest(request: DeliverableGenerationRequest): DeliverableFormat | null {
+  if (!request.deliverableId.trim() || !request.generationRequestId.trim()) {
+    throw new Error("The deliverable request is missing its server-issued identity.");
+  }
+  if (request.mode !== "create" && request.mode !== "revise") {
+    throw new Error("The deliverable request mode is invalid.");
+  }
+  if (request.mode === "revise" && (!Number.isInteger(request.expectedCurrentFileId) || request.expectedCurrentFileId! < 1)) {
+    throw new Error("A revision must identify the current file version it will replace.");
+  }
+  const { maxCharacters, requiredSections, taskCount } = request.constraints;
+  if (maxCharacters !== undefined && (!Number.isInteger(maxCharacters) || maxCharacters < 0)) {
+    throw new Error("The requested character limit is invalid.");
+  }
+  if (taskCount !== undefined && (!Number.isInteger(taskCount) || taskCount < 0)) {
+    throw new Error("The requested task count is invalid.");
+  }
+  if (requiredSections?.some((section) => !section.trim())) {
+    throw new Error("A required section name is empty.");
+  }
+  const requestedFormat = getDeliverableFormat(request.constraints.format);
+  if ((taskCount !== undefined || requiredSections?.length) && requestedFormat && requestedFormat.name !== "markdown") {
+    throw new Error("Section and task-count constraints currently require Markdown output.");
+  }
+  return requestedFormat;
+}
+
+function buildDeliverableInstructions(request: DeliverableGenerationRequest): string {
+  const lines = [
+    "Create the requested deliverable. Return only JSON with filename, filetype, and content fields.",
+    "Do not include deliverable IDs, generation IDs, filesystem paths, or download URLs.",
+  ];
+  const { format, maxCharacters, requiredSections, taskCount } = request.constraints;
+  if (format) lines.push(`Requested file format: ${format}.`);
+  if (maxCharacters !== undefined) lines.push(`The complete saved content, including Markdown, must be at most ${maxCharacters} Unicode code points.`);
+  if (requiredSections?.length) lines.push(`Include these exact section headings: ${requiredSections.join(", ")}.`);
+  if (taskCount !== undefined) {
+    lines.push(`Include a “Tasks” Markdown section containing exactly ${taskCount} top-level list entries, one task per entry.`);
+  }
+  return lines.join("\n");
+}
+
+function getAuthorizedDownloadUrl(file: Pick<File, "conversationId" | "id">): string {
+  return `/api/protected/conversations/${file.conversationId}/files/${file.id}/download`;
+}
+
+function countUnicodeCodePoints(content: string): number {
+  let count = 0;
+  for (let index = 0; index < content.length; index += 1) {
+    const current = content.charCodeAt(index);
+    const next = content.charCodeAt(index + 1);
+    if (current >= 0xd800 && current <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) {
+      index += 1;
+    }
+    count += 1;
+  }
+  return count;
+}
+
+function markdownSection(content: string, title: string): string | null {
+  const lines = content.split(/\r?\n/);
+  const target = title.trim().replace(/^#+\s*/, "").toLocaleLowerCase();
+  const start = lines.findIndex((line) => {
+    const heading = line.match(/^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$/)?.[1];
+    return heading?.trim().toLocaleLowerCase() === target;
+  });
+  if (start < 0) return null;
+  const endOffset = lines.slice(start + 1).findIndex((line) => /^\s{0,3}#{1,6}\s+/.test(line));
+  return lines.slice(start + 1, endOffset < 0 ? undefined : start + 1 + endOffset).join("\n");
+}
+
+function validateGeneratedContent(
+  fileData: unknown,
+  requestedFormat: DeliverableFormat | null,
+  request: DeliverableGenerationRequest,
+): { filename: string; filetype: string; content: string } {
+  if (!fileData || typeof fileData !== "object") throw new Error("The File Creator response was not a JSON object.");
+  const candidate = fileData as Record<string, unknown>;
+  if (typeof candidate.filename !== "string" || !candidate.filename.trim()
+      || typeof candidate.filetype !== "string" || !candidate.filetype.trim()
+      || typeof candidate.content !== "string" || !candidate.content.trim()) {
+    throw new Error("The File Creator response must contain a filename, filetype, and non-empty string content.");
+  }
+
+  const filename = sanitizeGeneratedFilename(candidate.filename);
+  const filetype = candidate.filetype.trim().toLowerCase().split(";")[0];
+  const content = candidate.content;
+  const extension = path.extname(filename).toLowerCase();
+  const actualFormat = requestedFormat ?? DELIVERABLE_FORMATS.find(
+    (candidateFormat) => candidateFormat.extensions.includes(extension) && candidateFormat.mimeTypes.includes(filetype),
+  ) ?? null;
+  if (requestedFormat) {
+    if (!requestedFormat.extensions.includes(extension) || !requestedFormat.mimeTypes.includes(filetype)) {
+      throw new Error(`The generated filename and file type do not match the requested ${requestedFormat.name} format.`);
+    }
+  }
+
+  if (request.constraints.format && requestedFormat?.name === "json") {
+    try {
+      JSON.parse(content);
+    } catch {
+      throw new Error("The generated content is not valid JSON.");
+    }
+  }
+  if ((request.constraints.requiredSections?.length || request.constraints.taskCount !== undefined)
+      && actualFormat?.name !== "markdown") {
+    throw new Error("Section and task-count constraints require a Markdown file. No file was saved.");
+  }
+  const maxCharacters = request.constraints.maxCharacters;
+  const characterCount = countUnicodeCodePoints(content);
+  if (maxCharacters !== undefined && characterCount > maxCharacters) {
+    throw new Error(`The generated content is ${characterCount} Unicode code points; the limit is ${maxCharacters}. No file was saved.`);
+  }
+
+  for (const section of request.constraints.requiredSections ?? []) {
+    if (!markdownSection(content, section)) {
+      throw new Error(`The generated content is missing the required “${section}” section. No file was saved.`);
+    }
+  }
+  if (request.constraints.taskCount !== undefined) {
+    const tasks = markdownSection(content, "Tasks");
+    const taskEntries = tasks?.split(/\r?\n/).filter((line) => /^\s*(?:[-*+]\s+|\d+[.)]\s+)/.test(line)).length ?? 0;
+    if (taskEntries !== request.constraints.taskCount) {
+      throw new Error(`The generated content has ${taskEntries} task entries; ${request.constraints.taskCount} are required. No file was saved.`);
+    }
+  }
+
+  return { filename, filetype, content };
+}
+
+async function verifyRevisionTarget(
+  conversationId: number,
+  request: DeliverableGenerationRequest,
+): Promise<void> {
+  if (request.mode !== "revise") return;
+  const deliverableStorage = storage as unknown as DeliverableStorage;
+  if (typeof deliverableStorage.getCurrentDeliverableFile !== "function") {
+    throw new Error("Version storage is not ready; this revision was not generated.");
+  }
+  const current = await deliverableStorage.getCurrentDeliverableFile(conversationId, request.deliverableId);
+  if (!current || current.id !== request.expectedCurrentFileId) {
+    throw new Error("The deliverable changed before this revision began. Reload its current version and try again.");
+  }
+}
+
+async function prepareFileCreatorRequest(
+  expert: Expert,
+  messages: AIMessage[],
+  request?: DeliverableGenerationRequest,
+): Promise<DeliverableGenerationRequest> {
+  if (!request) {
+    throw new Error("The File Creator needs a server-issued deliverable request before it can generate a file.");
+  }
+  validateDeliverableRequest(request);
+  const deliverableStorage = storage as unknown as DeliverableStorage;
+  if (typeof deliverableStorage.saveDeliverableVersion !== "function") {
+    throw new Error("Version storage is not ready; no File Creator request was sent.");
+  }
+  await verifyRevisionTarget(expert.conversationId, request);
+  const systemMessage = messages.find((message) => message.role === "system" && typeof message.content === "string");
+  if (systemMessage && typeof systemMessage.content === "string") {
+    systemMessage.content += `\n\n${buildDeliverableInstructions(request)}`;
+  }
+  return request;
+}
+
+async function saveGeneratedDeliverable(
+  rawContent: string,
+  expert: Expert,
+  request: DeliverableGenerationRequest,
+): Promise<{ file: DeliverableFile; created: boolean }> {
+  const requestedFormat = validateDeliverableRequest(request);
+  let fileData: unknown;
+  try {
+    fileData = JSON.parse(rawContent);
+  } catch {
+    throw new Error("The File Creator response was not valid JSON. No file was saved.");
+  }
+  const generated = validateGeneratedContent(fileData, requestedFormat, request);
+  const uploadsDir = path.join(process.cwd(), "uploads");
+  await fs.promises.mkdir(uploadsDir, { recursive: true });
+  const uniqueFilename = `${randomBytes(8).toString("hex")}-${generated.filename}`;
+  const filePath = path.join(uploadsDir, uniqueFilename);
+  const fileUrl = `/uploads/${uniqueFilename}`;
+  await fs.promises.writeFile(filePath, generated.content, "utf8");
+
+  const newFile: InsertFile = {
+    conversationId: expert.conversationId,
+    filename: generated.filename,
+    fileUrl,
+    fileType: generated.filetype,
+    uploadedBy: `Expert: ${expert.name}`,
+  };
+  try {
+    const deliverableStorage = storage as unknown as DeliverableStorage;
+    if (typeof deliverableStorage.saveDeliverableVersion !== "function") {
+      throw new Error("Version storage is not ready; the generated draft was not saved.");
+    }
+    const saved = await deliverableStorage.saveDeliverableVersion(newFile, request);
+    if (!saved.created) await fs.promises.rm(filePath, { force: true });
+    return saved;
+  } catch (error) {
+    await fs.promises.rm(filePath, { force: true }).catch(() => undefined);
+    throw error;
+  }
+}
+
+function deliverableSuccessMessage(
+  saved: { file: DeliverableFile; created: boolean },
+  request: DeliverableGenerationRequest,
+): string {
+  const action = !saved.created ? "Using existing file" : request.mode === "revise" ? "Revised file" : "Created file";
+  return `${action}: ${saved.file.filename} (version ${saved.file.version ?? 1})\nDownload: ${getAuthorizedDownloadUrl(saved.file)}`;
+}
+
 // Multimodal content parts (OpenAI chat-completions format) — used to deliver
 // uploaded images to vision-capable models alongside the text part.
 export type ContentPart =
@@ -369,6 +658,7 @@ When appropriate, explain how weather conditions impact farming decisions and ri
         "content": "The full content of the file goes here as a string. Ensure proper escaping if the content itself is JSON or contains special characters."
       }
       Do NOT include any other text, explanation, or formatting outside of this JSON object in your response.
+      Do not choose deliverable IDs, generation IDs, filesystem paths, or download URLs.
       `;
       break;
     case "Research Analyst":
@@ -387,7 +677,7 @@ Uploaded images are delivered to you directly as native vision input — describ
       roleInstructions = `Provide insights based on your general agricultural knowledge.`;
   }
 
-  const stanceInstruction = expert.role === "Moderator"
+  const stanceInstruction = expert.role === "Moderator" || expert.role === "File Creator"
     ? ""
     : `\n\nAt the very end of every response, add exactly one machine-readable stance line in this format:\nSTANCE: <agree|disagree|conditional|abstain> | <confidence 1-5> | <one-line position>\nUse one of the four stance values exactly (case-insensitive), an integer confidence from 1 to 5, and a concise one-line position. Put no text after this line. This line will be removed from the farmer-facing response.`;
 
@@ -558,7 +848,7 @@ async function buildAttachedFilesContext(
     let fileContextString = "\n\n--- Attached Files Context ---\n";
     for (const file of files.slice(0, MAX_FILE_CONTEXT_FILES)) {
         fileContextString += `\nFile Name: ${file.filename} (${file.fileType})\n`;
-        fileContextString += `Download URL: ${file.fileUrl}\nUse this exact URL when linking this file; do not construct a URL from its display filename.\n`;
+        fileContextString += `Download URL: ${getAuthorizedDownloadUrl(file)}\nUse this exact authorized URL when linking this file; do not construct a URL from its display filename.\n`;
         if (isImageFile(file)) {
             if (deliveredImageNames.has(file.filename)) {
                 fileContextString += `[Image attached: ${file.filename} — delivered visually]\n`;
@@ -683,7 +973,8 @@ export async function getExpertResponseStream(
   referenceMessageContent: string, 
   files: File[],
   availableRoles: string[],
-  onToken: (token: string) => void
+  onToken: (token: string) => void,
+  deliverableRequest?: DeliverableGenerationRequest,
 ): Promise<InsertMessage> { 
   console.log(`[STREAM] Generating streaming response for expert: ${expert.name} (${expert.role})`);
   
@@ -779,36 +1070,12 @@ export async function getExpertResponseStream(
     } 
     else if (expert.role === "File Creator") {
       // File Creator needs full response to parse JSON — use non-streaming
+      const request = await prepareFileCreatorRequest(expert, messages, deliverableRequest);
       response = await callOpenRouterAPI(messages, expert.model, conversation?.userId);
       stance = stripExpertStance(response, expert.role);
-      onToken(response.message.content); // Send as single token
-      
-      try {
-        const fileData = JSON.parse(response.message.content);
-        if (!fileData.filename || !fileData.filetype || !fileData.content) {
-          throw new Error("Invalid JSON structure from File Creator");
-        }
-        const uploadsDir = path.join(process.cwd(), "uploads");
-        if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir);
-        const safeFilename = sanitizeGeneratedFilename(fileData.filename);
-        const uniqueFilename = `${randomBytes(8).toString("hex")}-${safeFilename}`;
-        const filePath = path.join(uploadsDir, uniqueFilename);
-        fs.writeFileSync(filePath, fileData.content);
-        const fileUrl = `/uploads/${uniqueFilename}`;
-
-        const newFile: InsertFile = {
-           conversationId: expert.conversationId,
-           filename: safeFilename,
-           fileUrl: fileUrl,
-           fileType: fileData.filetype,
-           uploadedBy: `Expert: ${expert.name}`,
-        };
-        await storage.createFile(newFile);
-        response.message.content = `Created file: ${fileData.filename}`;
-      } catch (jsonError) {
-        console.error("File Creator error processing JSON:", jsonError);
-        response.message.content = "(File Creator Error: Could not process request to create file.)";
-      }
+      const saved = await saveGeneratedDeliverable(response.message.content, expert, request);
+      response.message.content = deliverableSuccessMessage(saved, request);
+      onToken(response.message.content);
     }
     else {
       // MAIN PATH: Streaming via OpenRouter
@@ -867,7 +1134,8 @@ export async function getExpertResponse(
   history: Message[], 
   referenceMessageContent: string, 
   files: File[],
-  availableRoles: string[] 
+  availableRoles: string[],
+  deliverableRequest?: DeliverableGenerationRequest,
 ): Promise<InsertMessage> { 
   console.log(`Generating response for expert: ${expert.name} (${expert.role})`);
   // G6: fetch the conversation for its council charter (farm/weather context
@@ -928,41 +1196,11 @@ export async function getExpertResponse(
       }
     } 
     else if (expert.role === "File Creator") {
+       const request = await prepareFileCreatorRequest(expert, messages, deliverableRequest);
        response = await callOpenRouterAPI(messages, expert.model, conversation?.userId);
        stance = stripExpertStance(response, expert.role);
-       
-       try {
-         const fileData = JSON.parse(response.message.content);
-         
-         if (!fileData.filename || !fileData.filetype || !fileData.content) {
-           throw new Error("Invalid JSON structure from File Creator");
-         }
-         
-         const uploadsDir = path.join(process.cwd(), "uploads");
-         if (!fs.existsSync(uploadsDir)) {
-           fs.mkdirSync(uploadsDir);
-         }
-         const safeFilename = sanitizeGeneratedFilename(fileData.filename);
-        const uniqueFilename = `${randomBytes(8).toString("hex")}-${safeFilename}`;
-         const filePath = path.join(uploadsDir, uniqueFilename);
-         fs.writeFileSync(filePath, fileData.content);
-         const fileUrl = `/uploads/${uniqueFilename}`;
-
-         const newFile: InsertFile = {
-            conversationId: expert.conversationId,
-            filename: safeFilename,
-            fileUrl: fileUrl,
-            fileType: fileData.filetype,
-            uploadedBy: `Expert: ${expert.name}`,
-         };
-         await storage.createFile(newFile);
-         
-         response.message.content = `Created file: ${fileData.filename}`;
-
-       } catch (jsonError) {
-          console.error("File Creator error processing JSON:", jsonError);
-          response.message.content = "(File Creator Error: Could not process request to create file. Please ensure the request is clear and try again.)";
-       }
+       const saved = await saveGeneratedDeliverable(response.message.content, expert, request);
+       response.message.content = deliverableSuccessMessage(saved, request);
     }
     else {
       response = await callOpenRouterAPI(messages, expert.model, conversation?.userId);
