@@ -350,6 +350,15 @@ export interface AIModelResponse {
     content: string;
   };
   citations?: string[];
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+    cost?: number | string;
+  };
+  providerGenerationId?: string;
+  providerModel?: string;
+  providerName?: string;
 }
 
 // AI-facing Moderator identity. A roster Moderator carries its persisted
