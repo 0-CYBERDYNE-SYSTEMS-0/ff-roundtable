@@ -1,0 +1,98 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Farm Friend Roundtable//Schedule Export 1.0//EN
+CALSCALE:GREGORIAN
+METHOD:PUBLISH
+X-WR-CALNAME:New Conversation
+BEGIN:VEVENT
+UID:3-0@farmfriend-roundtable
+DTSTAMP:20261011T192037Z
+DTSTART;VALUE=DATE:20270405
+DTEND;VALUE=DATE:20270406
+SUMMARY:📅 Week-by-Week Plan (Anchored 2027-04-05) — Week 1
+DESCRIPTION:Apr 5–11 — Soil check\, order urea (236 lb/ac × 120 = 14.2
+  tons) — Field trafficable\, soil <field capacity — 0 lb
+END:VEVENT
+BEGIN:VEVENT
+UID:3-1@farmfriend-roundtable
+DTSTAMP:20261011T192037Z
+DTSTART;VALUE=DATE:20270412
+DTEND;VALUE=DATE:20270413
+SUMMARY:📅 Week-by-Week Plan (Anchored 2027-04-05) — Week 2
+DESCRIPTION:Apr 12–18 — Pre-plant urea application — Soil dry enough 
+ to compact\, no standing water\, 5-day rain outlook favorable — 60 lb N/
+ ac
+END:VEVENT
+BEGIN:VEVENT
+UID:3-2@farmfriend-roundtable
+DTSTAMP:20261011T192037Z
+DTSTART;VALUE=DATE:20270419
+DTEND;VALUE=DATE:20270420
+SUMMARY:📅 Week-by-Week Plan (Anchored 2027-04-05) — Week 3
+DESCRIPTION:Apr 19–25 — Planting window — Soil temp ≥50°F at 2"\, 
+ field trafficable — 0 lb
+END:VEVENT
+BEGIN:VEVENT
+UID:3-3@farmfriend-roundtable
+DTSTAMP:20261011T192037Z
+DTSTART;VALUE=DATE:20270426
+DTEND;VALUE=DATE:20270427
+SUMMARY:📅 Week-by-Week Plan (Anchored 2027-04-05) — Week 4
+DESCRIPTION:Apr 26– May 2 — Planting window (backup) — Same as W3 —
+  0 lb
+END:VEVENT
+BEGIN:VEVENT
+UID:3-4@farmfriend-roundtable
+DTSTAMP:20261011T192037Z
+DTSTART;VALUE=DATE:20270503
+DTEND;VALUE=DATE:20270504
+SUMMARY:📅 Week-by-Week Plan (Anchored 2027-04-05) — Week 5
+DESCRIPTION:May 3–9 — Scouting: stand assessment\, early growth — Cro
+ p emerged\, fields accessible — 0 lb
+END:VEVENT
+BEGIN:VEVENT
+UID:3-5@farmfriend-roundtable
+DTSTAMP:20261011T192037Z
+DTSTART;VALUE=DATE:20270510
+DTEND;VALUE=DATE:20270511
+SUMMARY:📅 Week-by-Week Plan (Anchored 2027-04-05) — Week 6
+DESCRIPTION:May 10–16 — Pre-sidedress N test / tissue check — Corn V4
+ –V6\, soil moisture adequate — 0 lb (assessment)
+END:VEVENT
+BEGIN:VEVENT
+UID:3-6@farmfriend-roundtable
+DTSTAMP:20261011T192037Z
+DTSTART;VALUE=DATE:20270517
+DTEND;VALUE=DATE:20270518
+SUMMARY:📅 Week-by-Week Plan (Anchored 2027-04-05) — Week 7
+DESCRIPTION:May 17–23 — Sidedress window opens — Corn V6–V8\, soil 
+ not saturated\, equipment trafficable — 49 lb N/ac
+END:VEVENT
+BEGIN:VEVENT
+UID:3-7@farmfriend-roundtable
+DTSTAMP:20261011T192037Z
+DTSTART;VALUE=DATE:20270524
+DTEND;VALUE=DATE:20270525
+SUMMARY:📅 Week-by-Week Plan (Anchored 2027-04-05) — Week 8
+DESCRIPTION:May 24–30 — Sidedress window (backup) — Same as W7 — 0 
+ lb
+END:VEVENT
+BEGIN:VEVENT
+UID:3-8@farmfriend-roundtable
+DTSTAMP:20261011T192037Z
+DTSTART;VALUE=DATE:20270531
+DTEND;VALUE=DATE:20270601
+SUMMARY:📅 Week-by-Week Plan (Anchored 2027-04-05) — Week 9
+DESCRIPTION:May 31– Jun 6 — Post-sidedress scouting — Corn V8+ — 0 
+ lb
+END:VEVENT
+BEGIN:VEVENT
+UID:3-9@farmfriend-roundtable
+DTSTAMP:20261011T192037Z
+DTSTART;VALUE=DATE:20270607
+DTEND;VALUE=DATE:20270608
+SUMMARY:📅 Week-by-Week Plan (Anchored 2027-04-05) — Week 10
+DESCRIPTION:Jun 7–13 — V6 tissue test if available — Corn V6–V8 rea
+ ched earlier — 0 lb (assessment)
+END:VEVENT
+END:VCALENDAR
