@@ -136,9 +136,9 @@ export default function ArtifactDisplay({ artifact }: ArtifactDisplayProps) {
                 <tbody>
                   {artifact.content
                     .split("\n")
-                    .filter((line) => line.trim())
+                    .filter((line) => line.trim() && !/^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)+\|?\s*$/.test(line))
                     .map((row, i) => (
-                      <tr key={i} className={i === 1 ? "border-b-2 border-neutral-300" : ""}>
+                      <tr key={i} className={i === 0 ? "border-b-2 border-neutral-300" : ""}>
                         {row
                           .split("|")
                           .filter((cell) => cell.trim())

@@ -1029,6 +1029,10 @@ describe("Orchestrator", () => {
   // ─────────────────────────────────────────────────────────────────
 
   describe("G11 message joins", () => {
+    afterEach(() => {
+      mockGetConversation.mockResolvedValue(undefined);
+    });
+
     it("uses the 25-turn default and caps the let-it-run option at 100", async () => {
       const conversationId = nextConvId();
       const { waitForTurns, releaseNextTurn } = setupGatedConversation(conversationId);
@@ -1117,6 +1121,7 @@ describe("Orchestrator", () => {
       const conversationId = nextConvId();
       const { waitForTurns, releaseNextTurn, assistantCount, turnNames, addUserMessageToHistory } =
         setupGatedConversation(conversationId);
+      mockGetConversation.mockResolvedValue({ turnBudget: 6 });
       mockGetModeratorNextSpeakerSuggestion
         .mockResolvedValueOnce("Soil Scientist")
         .mockResolvedValueOnce("Weather Expert");
@@ -1143,6 +1148,9 @@ describe("Orchestrator", () => {
       // the orchestrator while the old expert remains in flight.
       const newTopic = createMockMessage(2, "Switch to irrigation planning");
       addUserMessageToHistory(newTopic);
+      // The farmer changed the saved charter budget while this old chain was
+      // active; the explicit restart must use the persisted value for the new run.
+      mockGetConversation.mockResolvedValue({ turnBudget: 4 });
       await processMessageTurnBased(
         userId,
         conversationId,
@@ -1161,6 +1169,7 @@ describe("Orchestrator", () => {
       expect(restartedState.lastUserMessage?.content).toBe("Switch to irrigation planning");
       expect(restartedState.wasInterrupted).toBe(false);
       expect(restartedState.totalAutonomousTurnsTaken).toBe(1);
+      expect(restartedState.maxAutonomousTurns).toBe(4);
 
       new InteractionOrchestrator(conversationId).disableAutonomous();
       await releaseNextTurn();

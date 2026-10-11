@@ -221,6 +221,7 @@ describe("G15 expert stance parsing", () => {
     expect(emitted.join("")).not.toContain("STANCE:");
     expect(result.content).toBe("Use a cover crop.");
     expect(result.stance).toEqual({ stance: "agree", confidence: 4, position: "Reduces erosion risk" });
+    expect(mockProviderChatStream.mock.calls[0][3]).toBe(convo.userId);
     const stored = await storage.createMessage(result);
     expect(stored.content).toBe("Use a cover crop.");
     expect(stored.content).not.toContain("STANCE:");
@@ -239,6 +240,51 @@ describe("G15 expert stance parsing", () => {
     expect(result.content).toBe("Use a cover crop.");
     expect(result.content).not.toContain("STANCE:");
     expect(result.stance).toEqual({ stance: "disagree", confidence: 2, position: "Seed cost is too high" });
+  });
+});
+
+describe("Research Analyst OpenRouter web search", () => {
+  beforeEach(() => {
+    mockProviderChat.mockReset();
+    mockProviderChatStream.mockReset();
+  });
+
+  it("requests grounding on the assigned model in both fallback paths and sets source rules", async () => {
+    const previousPerplexityKey = process.env.PERPLEXITY_API_KEY;
+    delete process.env.PERPLEXITY_API_KEY;
+    try {
+      const convo = await storage.createConversation({ userId: 1, title: "Grounded research" });
+      const expert = createMockExpert(14, convo.id, "Researcher", "Research Analyst");
+      expert.model = "xiaomi/mimo-v2.6-flash";
+      const response = {
+        message: { role: "assistant", content: "Check the extension guidance.\nSTANCE: conditional | 4 | Confirm with primary evidence" },
+      };
+      mockProviderChat.mockResolvedValue(response);
+      mockProviderChatStream.mockResolvedValue(response);
+
+      await getExpertResponseStream(expert, [], "Nitrogen recommendation?", [], [expert.role], () => {});
+      const streamCall = mockProviderChatStream.mock.calls[0];
+      expect(streamCall[1]).toBe(expert.model);
+      expect(streamCall[3]).toBe(convo.userId);
+      expect(streamCall[4]).toBe(true);
+      const systemPrompt = streamCall[0].find((message: any) => message.role === "system").content;
+      expect(systemPrompt).toContain("prioritize primary sources");
+      expect(systemPrompt).toContain("exact URLs and source details returned by retrieval");
+      expect(systemPrompt).toContain("Never invent or guess source titles, publication dates, quotations, or URLs");
+      expect(systemPrompt).toContain("supporting evidence is unavailable");
+
+      await getExpertResponse(expert, [], "Nitrogen recommendation?", [], [expert.role]);
+      const chatCall = mockProviderChat.mock.calls[0];
+      expect(chatCall[1]).toBe(expert.model);
+      expect(chatCall[2]).toBe(convo.userId);
+      expect(chatCall[3]).toBe(true);
+    } finally {
+      if (previousPerplexityKey === undefined) {
+        delete process.env.PERPLEXITY_API_KEY;
+      } else {
+        process.env.PERPLEXITY_API_KEY = previousPerplexityKey;
+      }
+    }
   });
 });
 

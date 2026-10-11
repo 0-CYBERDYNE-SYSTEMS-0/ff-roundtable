@@ -16,15 +16,17 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 const mockFetch = vi.fn();
 global.fetch = mockFetch;
 
-const { mockGetConversation, mockGetConversationExperts } = vi.hoisted(() => ({
+const { mockGetConversation, mockGetConversationExperts, mockGetUserApiKey } = vi.hoisted(() => ({
   mockGetConversation: vi.fn(),
   mockGetConversationExperts: vi.fn(),
+  mockGetUserApiKey: vi.fn(),
 }));
 
 vi.mock("../server/storage", () => ({
   storage: {
     getConversation: mockGetConversation,
     getConversationExperts: mockGetConversationExperts,
+    getUserApiKey: mockGetUserApiKey,
   },
 }));
 
@@ -38,14 +40,21 @@ import { getModeratorNextSpeakerSuggestion } from "../server/ai";
 import type { ModeratorContext } from "../server/ai";
 import { isFreeModel } from "../server/tiers";
 
+function mockSseResponse(events: object[]) {
+  const body = events.map((event) => `data: ${JSON.stringify(event)}`).join("\n") + "\ndata: [DONE]\n";
+  return { ok: true, body: new Response(body).body };
+}
+
 describe("AI Providers", () => {
   beforeEach(() => {
     mockFetch.mockClear();
     mockGetConversation.mockReset();
     mockGetConversationExperts.mockReset();
+    mockGetUserApiKey.mockReset().mockResolvedValue(null);
     delete process.env.LOCAL_AI_BASE_URL;
     delete process.env.LOCAL_AI_API_KEY;
     delete process.env.OPENROUTER_API_KEY;
+    delete process.env.OPENROUTER_REASONING_EFFORT;
   });
 
   describe("Moderator suggestion storage failures", () => {
@@ -188,6 +197,113 @@ describe("AI Providers", () => {
       expect(options.headers["Authorization"]).toBe("Bearer or-key-123");
       expect(options.headers["HTTP-Referer"]).toBe("https://farm-friend-roundtable.replit.app");
       expect(options.headers["X-Title"]).toBe("Farm Friend Roundtable");
+      expect(JSON.parse(options.body)).not.toHaveProperty("reasoning");
+      expect(JSON.parse(options.body)).not.toHaveProperty("plugins");
+    });
+
+    it.each(["chat", "chatStream"] as const)("adds web search to %s without changing the selected model", async (method) => {
+      process.env.OPENROUTER_API_KEY = "mock-only-key";
+      mockFetch.mockResolvedValueOnce(method === "chat"
+        ? {
+            ok: true,
+            json: async () => ({ choices: [{ message: { role: "assistant", content: "Grounded answer." } }] }),
+          }
+        : mockSseResponse([
+            { choices: [{ delta: { content: "Grounded answer." }, finish_reason: null }] },
+            { choices: [{ delta: {}, finish_reason: "stop" }] },
+          ]));
+
+      const provider = new OpenRouterProvider();
+      if (method === "chat") {
+        await provider.chat([{ role: "user", content: "Question" }], "xiaomi/mimo-v2.6-flash", undefined, true);
+      } else {
+        await provider.chatStream([{ role: "user", content: "Question" }], "xiaomi/mimo-v2.6-flash", () => {}, undefined, true);
+      }
+
+      const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+      expect(body.model).toBe("xiaomi/mimo-v2.6-flash");
+      expect(body.plugins).toEqual([{ id: "web", max_results: 3 }]);
+    });
+
+    it("prefers the user's stored API key when a user ID is passed", async () => {
+      process.env.OPENROUTER_API_KEY = "platform-key";
+      mockGetUserApiKey.mockResolvedValue("stored-user-key");
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          choices: [{ message: { role: "assistant", content: "hi" } }],
+        }),
+      });
+
+      const provider = new OpenRouterProvider();
+      await provider.chat([{ role: "user", content: "hello" }], "deepseek/deepseek-v4.1-flash", 27);
+
+      expect(mockGetUserApiKey).toHaveBeenCalledWith(27);
+      expect(mockFetch.mock.calls[0][1].headers["Authorization"]).toBe("Bearer stored-user-key");
+    });
+
+    it.each(["chat", "chatStream"] as const)("forwards configured reasoning effort to %s requests", async (method) => {
+      process.env.OPENROUTER_API_KEY = "or-key-123";
+      process.env.OPENROUTER_REASONING_EFFORT = "low";
+      mockFetch.mockResolvedValueOnce(method === "chat"
+        ? {
+            ok: true,
+            json: async () => ({ choices: [{ message: { role: "assistant", content: "hi" } }] }),
+          }
+        : mockSseResponse([
+            { choices: [{ delta: { content: "hi" }, finish_reason: null }] },
+            { choices: [{ delta: {}, finish_reason: "stop" }] },
+          ]));
+
+      const provider = new OpenRouterProvider();
+      if (method === "chat") {
+        await provider.chat([{ role: "user", content: "hello" }], "openai/gpt-6-luna");
+      } else {
+        await provider.chatStream([{ role: "user", content: "hello" }], "openai/gpt-6-luna", () => {});
+      }
+
+      const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+      expect(body.reasoning).toEqual({ effort: "low" });
+    });
+
+    it("throws when an SSE frame contains a provider error", async () => {
+      process.env.OPENROUTER_API_KEY = "or-key-123";
+      mockFetch.mockResolvedValueOnce(mockSseResponse([
+        { error: { message: "provider credits exhausted" } },
+      ]));
+      const provider = new OpenRouterProvider();
+
+      await expect(
+        provider.chatStream([{ role: "user", content: "hello" }], "z-ai/glm-5.3-flash", () => {}),
+      ).rejects.toThrow("provider credits exhausted");
+    });
+
+    it("throws when a streamed response ends with finish_reason length", async () => {
+      process.env.OPENROUTER_API_KEY = "or-key-123";
+      mockFetch.mockResolvedValueOnce(mockSseResponse([
+        { choices: [{ delta: { content: '{"type":"chart",' }, finish_reason: null }] },
+        { choices: [{ delta: {}, finish_reason: "length" }] },
+      ]));
+      const provider = new OpenRouterProvider();
+
+      await expect(
+        provider.chatStream([{ role: "user", content: "hello" }], "z-ai/glm-5.3-flash", () => {}),
+      ).rejects.toThrow("output limit");
+    });
+
+    it("throws when a non-streamed response ends with finish_reason length", async () => {
+      process.env.OPENROUTER_API_KEY = "or-key-123";
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          choices: [{ message: { role: "assistant", content: '{"type":"chart",' }, finish_reason: "length" }],
+        }),
+      });
+      const provider = new OpenRouterProvider();
+
+      await expect(
+        provider.chat([{ role: "user", content: "hello" }], "z-ai/glm-5.3-flash"),
+      ).rejects.toThrow("shorter response or split");
     });
 
     it("throws when OPENROUTER_API_KEY is missing", async () => {

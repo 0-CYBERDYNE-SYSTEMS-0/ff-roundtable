@@ -12,6 +12,7 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { Separator } from "@/components/ui/separator";
+import { withRequestedOpenRouterModels } from "@/lib/openrouter-model-options";
 import {
   Dialog,
   DialogContent,
@@ -170,14 +171,14 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
         }
         const data = await response.json();
         if (data && Array.isArray(data.data)) {
-           setOpenRouterModels(data.data);
+           setOpenRouterModels(withRequestedOpenRouterModels(data.data));
         } else {
           throw new Error("Unexpected API response structure");
         }
       } catch (error) {
         console.error("Failed to fetch OpenRouter models:", error);
         setErrorLoadingModels(error instanceof Error ? error.message : "An unknown error occurred");
-        setOpenRouterModels(FALLBACK_MODELS);
+        setOpenRouterModels(withRequestedOpenRouterModels(FALLBACK_MODELS));
       } finally {
         setIsLoadingModels(false);
       }

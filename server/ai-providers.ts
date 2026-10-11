@@ -1,16 +1,18 @@
 import type { AIMessage, AIModelResponse } from './ai';
 
 const AI_REQUEST_TIMEOUT_MS = 120_000;
+const OUTPUT_LIMIT_ERROR = "Response reached the output limit. Please ask for a shorter response or split the request into smaller parts.";
 
 // ─── Provider Interface ───────────────────────────────────────────────────────
 
 export interface AIProvider {
-  chat(messages: AIMessage[], model: string, userId?: number): Promise<AIModelResponse>;
+  chat(messages: AIMessage[], model: string, userId?: number, webSearch?: boolean): Promise<AIModelResponse>;
   chatStream(
     messages: AIMessage[],
     model: string,
     onToken: (token: string) => void,
-    userId?: number
+    userId?: number,
+    webSearch?: boolean
   ): Promise<AIModelResponse>;
 }
 
@@ -40,7 +42,7 @@ export class OpenRouterProvider implements AIProvider {
     return platformKey;
   }
 
-  async chat(messages: AIMessage[], model: string, userId?: number): Promise<AIModelResponse> {
+  async chat(messages: AIMessage[], model: string, userId?: number, webSearch = false): Promise<AIModelResponse> {
     console.log(`[DEBUG] Entering OpenRouterProvider.chat for model: ${model}`);
     try {
       const openRouterKey = await this.getApiKey(userId);
@@ -59,6 +61,10 @@ export class OpenRouterProvider implements AIProvider {
           messages: messages,
           temperature: 0.7,
           max_tokens: 8192,
+          ...(process.env.OPENROUTER_REASONING_EFFORT
+            ? { reasoning: { effort: process.env.OPENROUTER_REASONING_EFFORT } }
+            : {}),
+          ...(webSearch ? { plugins: [{ id: "web", max_results: 3 }] } : {}),
         }),
         signal: AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS),
       });
@@ -86,6 +92,10 @@ export class OpenRouterProvider implements AIProvider {
         throw new Error("Invalid response format from OpenRouter API");
       }
 
+      if (data.choices[0].finish_reason === "length") {
+        throw new Error(OUTPUT_LIMIT_ERROR);
+      }
+
       console.log("[DEBUG] OpenRouter response structure validated. Returning message.");
       return {
         message: data.choices[0].message
@@ -104,7 +114,8 @@ export class OpenRouterProvider implements AIProvider {
     messages: AIMessage[],
     model: string,
     onToken: (token: string) => void,
-    userId?: number
+    userId?: number,
+    webSearch = false
   ): Promise<AIModelResponse> {
     console.log(`[STREAM] Starting OpenRouter stream for model: ${model}`);
     try {
@@ -123,6 +134,10 @@ export class OpenRouterProvider implements AIProvider {
           messages: messages,
           temperature: 0.7,
           max_tokens: 8192,
+          ...(process.env.OPENROUTER_REASONING_EFFORT
+            ? { reasoning: { effort: process.env.OPENROUTER_REASONING_EFFORT } }
+            : {}),
+          ...(webSearch ? { plugins: [{ id: "web", max_results: 3 }] } : {}),
           stream: true,
         }),
         signal: AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS),
@@ -141,6 +156,7 @@ export class OpenRouterProvider implements AIProvider {
       const decoder = new TextDecoder();
       let fullContent = "";
       let buffer = "";
+      let finishReason: string | null = null;
 
       try {
         while (true) {
@@ -158,15 +174,27 @@ export class OpenRouterProvider implements AIProvider {
             const data = trimmed.slice(6);
             if (data === "[DONE]") continue;
 
+            let parsed: any;
             try {
-              const parsed = JSON.parse(data);
-              const content = parsed?.choices?.[0]?.delta?.content;
-              if (content) {
-                fullContent += content;
-                onToken(content);
-              }
+              parsed = JSON.parse(data);
             } catch {
               // Skip unparseable chunks
+              continue;
+            }
+
+            if (parsed?.error) {
+              const errorMessage = parsed.error.message || JSON.stringify(parsed.error);
+              throw new Error(`OpenRouter Provider Error: ${errorMessage}`);
+            }
+
+            const choice = parsed?.choices?.[0];
+            if (typeof choice?.finish_reason === "string") {
+              finishReason = choice.finish_reason;
+            }
+            const content = choice?.delta?.content;
+            if (content) {
+              fullContent += content;
+              onToken(content);
             }
           }
         }
@@ -175,6 +203,10 @@ export class OpenRouterProvider implements AIProvider {
       }
 
       console.log(`[STREAM] OpenRouter complete for ${model}. ${fullContent.length} chars`);
+
+      if (finishReason === "length") {
+        throw new Error(OUTPUT_LIMIT_ERROR);
+      }
 
       return {
         message: { role: "assistant", content: fullContent }

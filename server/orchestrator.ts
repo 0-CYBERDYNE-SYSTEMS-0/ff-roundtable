@@ -1636,6 +1636,8 @@ export async function processMessageTurnBased(
 ): Promise<void> {
     try {
         const explicitRestart = options.restart === true;
+        let explicitRestartBudget: number | undefined;
+        let explicitRestartBudgetRead = false;
         // Get current state and experts
         let state = getConversationState(conversationId);
         const roster = await storage.getConversationExperts(conversationId);
@@ -1673,11 +1675,16 @@ export async function processMessageTurnBased(
                 try {
                     const conversationRow = await storage.getConversation(conversationId);
                     configuredBudget = conversationRow?.turnBudget;
+                    if (explicitRestart) {
+                        explicitRestartBudgetRead = true;
+                        if (conversationRow) explicitRestartBudget = effectiveTurnBudget(configuredBudget);
+                    }
                     if (!state) storedSnapshot = conversationRow?.orchestratorState ?? null;
                 } catch (error) {
                     // A settings read failure must not lose the already-stored
                     // farmer message. Continue safely with the default budget.
                     console.error(`Orchestrator: Could not read conversation settings/snapshot for ${conversationId}; using safe budget defaults:`, error);
+                    if (explicitRestart) explicitRestartBudgetRead = true;
                 }
             }
             if (!state) {
@@ -1704,7 +1711,7 @@ export async function processMessageTurnBased(
                         storedSnapshot.isAutonomousEnabled,
                         state.isAutonomousEnabled,
                     ),
-                    maxAutonomousTurns: snapshotBudgetOrFallback(
+                    maxAutonomousTurns: explicitRestartBudget ?? snapshotBudgetOrFallback(
                         storedSnapshot.maxAutonomousTurns,
                         configuredBudget,
                     ),
@@ -1726,6 +1733,20 @@ export async function processMessageTurnBased(
         }
 
         state = getConversationState(conversationId)!;
+        const restartCanStartNow = state.mode === "idle" || (state.mode === "paused" && !state.turnInFlight);
+        if (explicitRestart && restartCanStartNow && !explicitRestartBudgetRead && typeof storage.getConversation === "function") {
+            try {
+                const conversationRow = await storage.getConversation(conversationId);
+                explicitRestartBudgetRead = true;
+                if (conversationRow) explicitRestartBudget = effectiveTurnBudget(conversationRow.turnBudget);
+            } catch (error) {
+                explicitRestartBudgetRead = true;
+                console.error(`Orchestrator: Could not refresh turn budget for explicit restart of ${conversationId}; keeping the current budget:`, error);
+            }
+        }
+        if (explicitRestart && restartCanStartNow && explicitRestartBudget !== undefined) {
+            state = updateConversationState(conversationId, { maxAutonomousTurns: explicitRestartBudget });
+        }
         const isActive = state.mode === "processing_sequential" || state.mode === "autonomous";
 
         // An explicit restart discards earlier joined context and counters.

@@ -3,7 +3,7 @@ import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Plus, RefreshCw, Download, Upload, FileDown, FileText, Image, ArrowRight, CalendarDays } from "lucide-react";
 import { Insight, File as FileSchema, Conversation, Expert } from "@shared/schema";
-import { format } from "date-fns";
+import { addDays, format } from "date-fns";
 
 interface SidebarPanelProps {
   conversations: Conversation[];
@@ -11,7 +11,7 @@ interface SidebarPanelProps {
   files: FileSchema[];
   onStartNewSession: () => void;
   onExportMarkdown: () => void;
-  onExportIcs: () => void;
+  onExportIcs: (start: string) => void;
   canExportIcs?: boolean;
   onFileUpload: (file: File) => void;
   onSelectConversation: (id: number) => void;
@@ -53,6 +53,10 @@ export default function SidebarPanel({
   experts = []
 }: SidebarPanelProps) {
   const [activeTab, setActiveTab] = useState<'conversations' | 'insights' | 'files'>('insights');
+  const [calendarStart, setCalendarStart] = useState(() => {
+    const today = new Date();
+    return format(addDays(today, ((8 - today.getDay()) % 7) || 7), "yyyy-MM-dd");
+  });
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleFileUploadClick = () => {
@@ -90,11 +94,20 @@ export default function SidebarPanel({
             <Download className="mr-2 h-4 w-4" />
             Export as Markdown
           </Button>
+          <label className="block mt-2 text-sm text-farm-blue">
+            Week 1 starts
+            <input
+              type="date"
+              value={calendarStart}
+              onChange={(event) => setCalendarStart(event.target.value)}
+              className="block w-full mt-1 rounded border border-farm-tan/60 px-2 py-1 text-neutral-900"
+            />
+          </label>
           <Button
             variant="outline"
             className="w-full mt-2 border-2 border-farm-green text-farm-green hover:bg-farm-green hover:text-white rounded-lg px-4 py-2.5 flex items-center justify-center transition-all duration-200 font-medium"
-            onClick={onExportIcs}
-            disabled={!canExportIcs}
+            onClick={() => onExportIcs(calendarStart)}
+            disabled={!canExportIcs || !calendarStart}
             title={canExportIcs ? "Export the week-by-week plan to your calendar (.ics)" : "No schedulable plan yet — ask an expert for a week-by-week plan, or upload files, first"}
           >
             <CalendarDays className="mr-2 h-4 w-4" />

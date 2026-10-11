@@ -372,7 +372,7 @@ When appropriate, explain how weather conditions impact farming decisions and ri
       `;
       break;
     case "Research Analyst":
-      roleInstructions = `Focus on researching topics using external tools, summarizing findings, and providing citations.`;
+      roleInstructions = `Research the question using available search results and prioritize primary sources, such as government agencies, university extension, official datasets, and peer-reviewed research. Cite factual research claims with Markdown links using only the exact URLs and source details returned by retrieval. Never invent or guess source titles, publication dates, quotations, or URLs. If retrieved results do not support a claim or provide a reliable source, say that supporting evidence is unavailable and qualify the claim.`;
       break;
     case "Imagery Specialist":
       roleInstructions = `Focus on analyzing satellite, drone, or field imagery to provide visual insights and interpretations. If images are provided, describe what you see and its relevance.
@@ -395,19 +395,21 @@ Uploaded images are delivered to you directly as native vision input — describ
 }
 
 // Function to call AI API (routes through provider abstraction)
-export async function callOpenRouterAPI(messages: AIMessage[], model: string): Promise<AIModelResponse> {
+export async function callOpenRouterAPI(messages: AIMessage[], model: string, userId?: number, webSearch = false): Promise<AIModelResponse> {
   const provider = getProvider(model);
-  return provider.chat(messages, model);
+  return provider.chat(messages, model, userId, webSearch);
 }
 
 // Function to call AI API with streaming (SSE) — routes through provider abstraction
 export async function callOpenRouterAPIStream(
   messages: AIMessage[], 
   model: string,
-  onToken: (token: string) => void
+  onToken: (token: string) => void,
+  userId?: number,
+  webSearch = false
 ): Promise<AIModelResponse> {
   const provider = getProvider(model);
-  return provider.chatStream(messages, model, onToken);
+  return provider.chatStream(messages, model, onToken, userId, webSearch);
 }
 
 // Function to call Perplexity API for web search
@@ -556,6 +558,7 @@ async function buildAttachedFilesContext(
     let fileContextString = "\n\n--- Attached Files Context ---\n";
     for (const file of files.slice(0, MAX_FILE_CONTEXT_FILES)) {
         fileContextString += `\nFile Name: ${file.filename} (${file.fileType})\n`;
+        fileContextString += `Download URL: ${file.fileUrl}\nUse this exact URL when linking this file; do not construct a URL from its display filename.\n`;
         if (isImageFile(file)) {
             if (deliveredImageNames.has(file.filename)) {
                 fileContextString += `[Image attached: ${file.filename} — delivered visually]\n`;
@@ -767,6 +770,8 @@ export async function getExpertResponseStream(
           messages,
           expert.model,
           streamFilter ? token => streamFilter!.push(token) : onToken,
+          conversation?.userId,
+          true,
         );
         streamFilter?.finish();
         stance = stripExpertStance(response, expert.role);
@@ -774,7 +779,7 @@ export async function getExpertResponseStream(
     } 
     else if (expert.role === "File Creator") {
       // File Creator needs full response to parse JSON — use non-streaming
-      response = await callOpenRouterAPI(messages, expert.model);
+      response = await callOpenRouterAPI(messages, expert.model, conversation?.userId);
       stance = stripExpertStance(response, expert.role);
       onToken(response.message.content); // Send as single token
       
@@ -812,6 +817,7 @@ export async function getExpertResponseStream(
         messages,
         expert.model,
         streamFilter ? token => streamFilter!.push(token) : onToken,
+        conversation?.userId,
       );
       streamFilter?.finish();
       stance = stripExpertStance(response, expert.role);
@@ -915,10 +921,14 @@ export async function getExpertResponse(
     let stance: MessageStance | null = null;
     
     if (expert.role === "Research Analyst") {
-      response = await callPerplexityAPI(referenceMessageContent);
+      if (process.env.PERPLEXITY_API_KEY) {
+        response = await callPerplexityAPI(referenceMessageContent);
+      } else {
+        response = await callOpenRouterAPI(messages, expert.model, conversation?.userId, true);
+      }
     } 
     else if (expert.role === "File Creator") {
-       response = await callOpenRouterAPI(messages, expert.model);
+       response = await callOpenRouterAPI(messages, expert.model, conversation?.userId);
        stance = stripExpertStance(response, expert.role);
        
        try {
@@ -955,7 +965,7 @@ export async function getExpertResponse(
        }
     }
     else {
-      response = await callOpenRouterAPI(messages, expert.model);
+      response = await callOpenRouterAPI(messages, expert.model, conversation?.userId);
     }
 
     if (expert.role !== "File Creator") {
@@ -1105,10 +1115,11 @@ export async function generateInsights(conversationId: number, broadcastFn?: (co
       return;
     }
 
+    const conversation = await storage.getConversation(conversationId);
     const response = await callOpenRouterAPI([
       { role: "system", content: "You extract key insights from agricultural conversations. Respond only with the requested JSON format." },
       { role: "user", content: insightPrompt }
-    ], auxModel);
+    ], auxModel, conversation?.userId);
     
     try {
       const insightData = JSON.parse(response.message.content);
@@ -1212,7 +1223,7 @@ export async function getModeratorNextSpeakerSuggestion(
             return null;
         }
 
-        const response = await callOpenRouterAPI(messages, auxModel);
+        const response = await callOpenRouterAPI(messages, auxModel, conversation?.userId);
         const rawSuggestion = response.message.content.trim().replace(/\.$/, '').trim();
         let suggestedRole: string | null = null;
 
@@ -1308,7 +1319,7 @@ export async function generateClosingSynthesis(
         expertId: moderatorExpert.id,
         token,
       });
-    });
+    }, conversation?.userId);
     const content = response.message.content;
 
     const storedMessage = await storage.createMessage({

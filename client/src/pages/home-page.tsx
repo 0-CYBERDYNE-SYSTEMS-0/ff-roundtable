@@ -543,7 +543,7 @@ export default function HomePage() {
       // Persistence is best-effort; the nudge stays hidden for this session.
     }
   };
-  const exportIcs = () => {
+  const exportIcs = async (start: string) => {
     if (!activeConversation) {
       toast({
         title: "No active conversation",
@@ -553,7 +553,27 @@ export default function HomePage() {
       return;
     }
 
-    window.open(`/api/protected/conversations/${activeConversation}/export.ics`, "_blank");
+    try {
+      const response = await fetch(`/api/protected/conversations/${activeConversation}/export.ics?start=${encodeURIComponent(start)}`, {
+        credentials: "include",
+      });
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || error.message || "Could not export the calendar.");
+      }
+      const url = URL.createObjectURL(await response.blob());
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = response.headers.get("Content-Disposition")?.match(/filename="([^"]+)"/)?.[1] || "roundtable.ics";
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      toast({
+        title: "Calendar export unavailable",
+        description: error instanceof Error ? error.message : "Could not export the calendar.",
+        variant: "destructive",
+      });
+    }
   };
   
   // Create the conversation before opening the selector so experts are added
@@ -845,6 +865,7 @@ export default function HomePage() {
                 if (oldData.some(msg => msg.id === parsedData.message.id)) return oldData;
                 return [...oldData, parsedData.message];
               });
+              queryClient.invalidateQueries({ queryKey: [`/api/protected/conversations/${activeConversation}/files`] });
             }
             break;
 
@@ -1018,8 +1039,8 @@ export default function HomePage() {
             )}
             {/* === Interaction Control Bar (Positioned at the top of this column) === */}
             {activeConversation && (
-                 <div className="flex-shrink-0 flex items-center justify-between px-6 py-3 border-b border-farm-tan/30 bg-gradient-to-r from-farm-powder/20 to-white shadow-sm">
-                     <div className="flex items-center gap-3">
+                 <div className="flex-shrink-0 flex flex-wrap items-center justify-between gap-2 px-3 md:px-6 py-3 border-b border-farm-tan/30 bg-gradient-to-r from-farm-powder/20 to-white shadow-sm">
+                     <div className="flex flex-wrap items-center gap-2 md:gap-3">
                          {isMobile && (
                            <Button
                              variant="ghost" 
@@ -1038,7 +1059,7 @@ export default function HomePage() {
                                           font-medium capitalize`}>
                              {interactionMode.replace('_', ' ')}
                          </Badge>
-                          <span className="text-sm font-semibold text-farm-blue ml-4">Autonomous:</span>
+                          <span className="text-sm font-semibold text-farm-blue md:ml-4">Autonomous:</span>
                          <Badge variant={isAutonomousEnabled ? 'default' : 'secondary'}
                                 className={`${isAutonomousEnabled ? 'bg-farm-blue/20 text-farm-blue border-farm-blue' : 'bg-neutral-200 text-neutral-600'} font-medium`}>
                              {isAutonomousEnabled ? 'Enabled' : 'Disabled'}
@@ -1054,7 +1075,7 @@ export default function HomePage() {
                            </Badge>
                          )}
                      </div>
-                     <div className="flex items-center gap-3">
+                     <div className="flex flex-wrap items-center gap-2 md:gap-3">
                           {/* G6: view/edit the council charter for the active conversation */}
                           <Button
                               variant="outline"
