@@ -551,6 +551,7 @@ describe("Orchestrator", () => {
       expect(recoveryCalls.some(([cid, event]) =>
         cid === conversationId && event?.type === "state_update" && event.mode === "idle",
       )).toBe(false);
+      expect(mockGenerateClosingSynthesis.mock.calls.filter(([cid]) => cid === conversationId)).toHaveLength(0);
 
       new InteractionOrchestrator(conversationId).disableAutonomous();
       await releaseNextTurn();
@@ -558,6 +559,7 @@ describe("Orchestrator", () => {
       expect(getConversationState(conversationId)!.turnInFlight).toBe(false);
       expect(getConversationState(conversationId)!.scheduledFailureAttempts).toBe(0);
       expect(assistantCount()).toBe(2); // persisted error row plus Bob's answer
+      expect(mockGenerateClosingSynthesis.mock.calls.filter(([cid]) => cid === conversationId)).toHaveLength(1);
     });
 
     it("bounds persistent pre-turn storage failures and retains the queued farmer message", async () => {
@@ -883,6 +885,7 @@ describe("Orchestrator", () => {
         stableSplitCycleCount: 0,
         dissentersNeedingTurn: [],
         moderatorNoticeSent: false,
+        handoffStatus: "not_started",
       };
     }
 
@@ -998,6 +1001,7 @@ describe("Orchestrator", () => {
       // Same cleanup as a natural end.
       expect(state!.totalAutonomousTurnsTaken).toBe(0);
       expect(mockGenerateInsights).toHaveBeenCalledWith(conversationId, expect.any(Function));
+      expect(mockGenerateClosingSynthesis.mock.calls.filter(([cid]) => cid === conversationId)).toHaveLength(1);
     });
 
     it("lets direct autonomous routing run to its cap when contributions stay distinct", async () => {
@@ -1424,6 +1428,7 @@ describe("Orchestrator", () => {
       expect(turnNames()).toEqual(["Bob"]);
       expect(assistantCount()).toBe(1);
       expect(mockGenerateInsights).toHaveBeenCalledWith(conversationId, expect.any(Function));
+      expect(mockGenerateClosingSynthesis.mock.calls.filter(([cid]) => cid === conversationId)).toHaveLength(1);
     });
   });
 
@@ -1658,6 +1663,7 @@ describe("Orchestrator", () => {
       expect(turnNames()).toEqual(["Alice"]);
       expect(assistantCount()).toBe(1);
       expect(mockGenerateInsights).toHaveBeenCalledWith(conversationId, expect.any(Function));
+      expect(mockGenerateClosingSynthesis.mock.calls.filter(([cid]) => cid === conversationId)).toHaveLength(1);
     });
 
     it("finishes the active expert and ends idle when autonomy is disabled mid-turn", async () => {
@@ -1936,7 +1942,8 @@ describe("G4 mention mechanics", () => {
         createMockExpert(2, "Bob", "Soil Scientist"),
       ];
       mockGetModeratorNextSpeakerSuggestion.mockResolvedValue("RoundRobin");
-      mockCreateOpenQuestion.mockReturnValue(new Promise(() => {}));
+      let finishQuestionWrite: (value: unknown) => void = () => {};
+      mockCreateOpenQuestion.mockReturnValue(new Promise(resolve => { finishQuestionWrite = resolve; }));
       const { waitForTurns, releaseNextTurn, drainToIdle, turnNames, addUserMessageToHistory } =
         setupGatedMentionConversation(conversationId, roster, (expert) =>
           expert.role === "Agronomist" ? ["User"] : [],
@@ -1954,8 +1961,55 @@ describe("G4 mention mechanics", () => {
       expect(getConversationState(conversationId)!.mode).toBe("autonomous");
       new InteractionOrchestrator(conversationId).disableAutonomous();
       await releaseNextTurn();
+      const concludingDeadline = Date.now() + 5000;
+      while (!broadcastFn.mock.calls.some(([cid, event]) => cid === conversationId && event?.type === "concluding")) {
+        if (Date.now() > concludingDeadline) throw new Error("Timed out waiting for the closing handoff");
+        await waitFor(5);
+      }
+      expect(mockGenerateClosingSynthesis.mock.calls.filter(([cid]) => cid === conversationId)).toHaveLength(0);
+      finishQuestionWrite({ id: 500, status: "open" });
       await drainToIdle();
       expect(getConversationState(conversationId)!.mode).toBe("idle");
+      expect(mockGenerateClosingSynthesis.mock.calls.filter(([cid]) => cid === conversationId)).toHaveLength(1);
+    });
+
+    it("captures only a clearly labeled Farmer question without an @[User] mention", async () => {
+      const conversationId = nextConvId();
+      const roster = [
+        createMockExpert(1, "Alice", "Agronomist"),
+        createMockExpert(2, "Bob", "Soil Scientist"),
+      ];
+      mockGetModeratorNextSpeakerSuggestion.mockResolvedValue("RoundRobin");
+      const { waitForTurns, releaseNextTurn, drainToIdle, addUserMessageToHistory } =
+        setupGatedMentionConversation(conversationId, roster, () => []);
+      const ordinaryResponse = mockGetExpertResponseStream.getMockImplementation()!;
+      mockGetExpertResponseStream.mockImplementation((expert: Expert, ...args: any[]) => {
+        const response = ordinaryResponse(expert, ...args);
+        if (expert.conversationId !== conversationId || expert.role !== "Agronomist") return response;
+        return Promise.resolve(response).then((value: any) => ({
+          ...value,
+          content: "Farmer question: What was the pH on the north field test?\nAssumption: That sample reflects the whole field.\nCould the test be old?",
+          mentions: [],
+        }));
+      });
+
+      const farmerMessage = createMockMessage(1, "Help me check my soil plan");
+      addUserMessageToHistory(farmerMessage);
+      await processMessageTurnBased(userId, conversationId, farmerMessage, broadcastFn);
+      await waitForTurns(1);
+      await releaseNextTurn();
+      await waitForTurns(2);
+
+      expect(mockCreateOpenQuestion).toHaveBeenCalledTimes(1);
+      expect(mockCreateOpenQuestion).toHaveBeenCalledWith(expect.objectContaining({
+        conversationId,
+        question: "What was the pH on the north field test?",
+        assumption: "That sample reflects the whole field.",
+      }));
+      new InteractionOrchestrator(conversationId).disableAutonomous();
+      await releaseNextTurn();
+      await drainToIdle();
+      expect(mockCreateOpenQuestion).toHaveBeenCalledTimes(1); // Unlabeled rhetoric is ignored.
     });
 
     it.each(["User", "Farmer", "RoundRobin"])("never lets reserved roster roles speak when the Moderator picks %s", async (suggestedRole) => {
@@ -2764,9 +2818,36 @@ describe("G4 mention mechanics", () => {
       expect(getConversationState(conversationId)!.mode).toBe("idle");
     });
 
+    it("does not start a handoff for a pause before a natural terminal decision", async () => {
+      const conversationId = nextConvId();
+      const { waitForTurns, releaseNextTurn, addUserMessageToHistory } =
+        setupGatedModeratorConversation(conversationId);
+      mockGetModeratorNextSpeakerSuggestion.mockResolvedValue("Conclude");
+      mockSynthesisTurn(conversationId);
+
+      const userMessage = createMockMessage(1, "@[Agronomist] Plan my week", "user", undefined, ["Agronomist"]);
+      addUserMessageToHistory(userMessage);
+      await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn);
+      await waitForTurns(1);
+      new InteractionOrchestrator(conversationId).pause();
+      await releaseNextTurn();
+
+      const deadline = Date.now() + 5000;
+      while (getConversationState(conversationId)!.turnChainRunning) {
+        if (Date.now() > deadline) throw new Error("Timed out waiting for the paused turn chain to park");
+        await waitFor(5);
+      }
+      expect(getConversationState(conversationId)!.mode).toBe("paused");
+      expect(mockGenerateClosingSynthesis.mock.calls.filter(([cid]) => cid === conversationId)).toHaveLength(0);
+
+      new InteractionOrchestrator(conversationId).resume();
+      await waitForMode(conversationId, "idle");
+      expect(mockGenerateClosingSynthesis.mock.calls.filter(([cid]) => cid === conversationId)).toHaveLength(1);
+    });
+
     it("routes a message that arrives during closing synthesis after the synthesis turn finishes", async () => {
       const conversationId = nextConvId();
-      const { waitForTurns, releaseNextTurn, drainToIdle, turnNames, assistantCount, addUserMessageToHistory, synthesisMessages, waitForEvent } =
+      const { waitForTurns, releaseNextTurn, drainToIdle, turnNames, assistantCount, addUserMessageToHistory, synthesisMessages, events, waitForEvent } =
         setupGatedModeratorConversation(conversationId);
       mockGetModeratorNextSpeakerSuggestion
         .mockResolvedValueOnce("Soil Scientist")
@@ -2778,7 +2859,10 @@ describe("G4 mention mechanics", () => {
       let joinedState: ReturnType<typeof getConversationState> = undefined;
       let markJoined: () => void = () => {};
       const messageJoined = new Promise<void>((resolve) => { markJoined = resolve; });
+      let queuedForFirstHandoff = false;
       mockSynthesisTurn(conversationId, async () => {
+        if (queuedForFirstHandoff) return;
+        queuedForFirstHandoff = true;
         const joinedMessage = createMockMessage(
           2,
           "@[Soil Scientist] Wait — one more thing",
@@ -2786,6 +2870,7 @@ describe("G4 mention mechanics", () => {
           undefined,
           ["Soil Scientist"],
         );
+        joinedMessage.answersQuestionId = 702;
         addUserMessageToHistory(joinedMessage);
         await processMessageTurnBased(
           userId,
@@ -2818,23 +2903,32 @@ describe("G4 mention mechanics", () => {
       await messageJoined;
 
       expect(joinedState?.pendingUserMessage?.content).toBe("@[Soil Scientist] Wait — one more thing");
+      expect(joinedState?.pendingUserMessage?.answersQuestionId).toBe(702);
       expect(joinedState?.wasInterrupted).toBe(false);
       expect(broadcastFn).not.toHaveBeenCalledWith(conversationId, { type: "steering" });
+      expect(events().filter(event => event.type === "message_queued" && event.messageId === 2)).toHaveLength(1);
       expect(synthesisMessages()).toHaveLength(0); // still held mid-stream
 
       releaseSynthesis();
       await waitForTurns(4);
       expect(turnNames()).toEqual(["Alice", "Bob", "Carol", "Bob"]);
-      expect(synthesisMessages()).toHaveLength(1); // the existing close completes once
+      expect(synthesisMessages()).toHaveLength(1); // old run's close completes before the fresh run
+      expect(getConversationState(conversationId)!.totalAutonomousTurnsTaken).toBe(1);
       expect(mockGenerateClosingSynthesis.mock.calls.filter((call) => call[0] === conversationId)).toHaveLength(1);
+      const queuedAnswerCall = mockGetExpertResponseStream.mock.calls.filter(([expert]) => expert.conversationId === conversationId)[3];
+      expect(queuedAnswerCall[2]).toBe("@[Soil Scientist] Wait — one more thing");
+      expect(queuedAnswerCall[1]).toContainEqual(expect.objectContaining({ id: 2, answersQuestionId: 702 }));
 
-      // The mentioned responder completes, then no fresh roll-call starts.
+      // The mentioned responder finishes in the new run. Disabling autonomy
+      // makes that run terminal and requests its own single closing handoff.
       new InteractionOrchestrator(conversationId).disableAutonomous();
       await releaseNextTurn();
       await waitForMode(conversationId, "idle");
       expect(turnNames()).toEqual(["Alice", "Bob", "Carol", "Bob"]);
-      expect(assistantCount()).toBe(5); // 3 original turns + synthesis + 1 response
-      expect(synthesisMessages()).toHaveLength(1);
+      expect(assistantCount()).toBe(6); // 3 original turns + 2 handoffs + 1 fresh-run response
+      expect(synthesisMessages()).toHaveLength(2);
+      expect(mockGenerateClosingSynthesis.mock.calls.filter((call) => call[0] === conversationId)).toHaveLength(2);
+      expect(events().filter(event => event.type === "concluding")).toHaveLength(2);
 
       await drainToIdle();
       expect(getConversationState(conversationId)!.mode).toBe("idle");
@@ -2917,9 +3011,13 @@ describe("G4 mention mechanics", () => {
       // mention while the closing turn remains in flight.
       let releaseSynthesis: () => void = () => {};
       const synthesisHeld = new Promise<void>((resolve) => { releaseSynthesis = resolve; });
+      let pausedFirstHandoff = false;
       mockSynthesisTurn(conversationId, async () => {
-        new InteractionOrchestrator(conversationId).pause();
-        await synthesisHeld;
+        if (!pausedFirstHandoff) {
+          pausedFirstHandoff = true;
+          new InteractionOrchestrator(conversationId).pause();
+          await synthesisHeld;
+        }
       });
 
       const userMessage = createMockMessage(
@@ -2960,8 +3058,8 @@ describe("G4 mention mechanics", () => {
       expect(state.wasInterrupted).toBe(false);
       expect(broadcastFn).not.toHaveBeenCalledWith(conversationId, { type: "steering" });
 
-      // With autonomy disabled, exactly one pending responder is allowed
-      // after the existing close; it must not replay Alice or conclude again.
+      // The queued mention begins a fresh run after the old close. With
+      // autonomy disabled, it gets one responder and one separate handoff.
       new InteractionOrchestrator(conversationId).disableAutonomous();
       releaseSynthesis();
       await waitForTurns(2);
@@ -2975,9 +3073,9 @@ describe("G4 mention mechanics", () => {
       expect(state.lastUserMessage!.content).toBe("@[Soil Scientist] Wait — one more thing");
 
       expect(turnNames()).toEqual(["Alice", "Bob"]);
-      expect(assistantCount()).toBe(3); // Alice + synthesis + one pending response
-      expect(synthesisMessages()).toHaveLength(1); // no second conclusion
-      expect(events().filter((e) => e.type === "concluding")).toHaveLength(1);
+      expect(assistantCount()).toBe(4); // Alice + old handoff + response + fresh handoff
+      expect(synthesisMessages()).toHaveLength(2);
+      expect(events().filter((e) => e.type === "concluding")).toHaveLength(2);
 
       await drainToIdle();
       expect(getConversationState(conversationId)!.mode).toBe("idle");
