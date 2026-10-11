@@ -414,6 +414,51 @@ function mentionRoutesForMessage(
         .map(role => ({ role, sourceRole }));
 }
 
+type FarmerFileIntent = "retrieve" | "no_file" | null;
+
+function classifyFarmerFileIntent(content: string | null | undefined): FarmerFileIntent {
+    if (!content) return null;
+    const text = content.toLowerCase().replace(/[’‘]/g, "'");
+    const fileNoun = "(?:files?|documents?|sops?|calendars?|spreadsheets?|exports?)";
+
+    if (
+        new RegExp(`\\b(?:stop|don't|do not|no longer)\\b.{0,60}\\b(?:create|make|generate|draft|write|produce|attach|export|creating|making|generating|drafting|writing|producing|attaching|exporting)\\b.{0,60}\\b${fileNoun}\\b`).test(text) ||
+        new RegExp(`\\bno (?:more|new|additional) ${fileNoun}\\b`).test(text) ||
+        /\bno\s+(?:file|document)\s+(?:creation|generation|output)\b/.test(text) ||
+        /\b(?:stop|disable)\s+(?:file|document)\s+(?:creation|generation)\b/.test(text)
+    ) {
+        return "no_file";
+    }
+
+    if (
+        /\b(?:just|only)\s+(?:(?:want|need)\s+)?(?:(?:send|give|share|show|provide)\s+)?(?:me\s+)?(?:the\s+)?(?:download\s+)?link\b/.test(text) ||
+        new RegExp(`\\b(?:get|retrieve|download|open|find|share|send|give|show|provide)\\b.{0,60}\\b(?:existing|saved|current|latest)?\\s*${fileNoun}\\b`).test(text) ||
+        /\b(?:get|retrieve|download|open|find|share|send|give|show|provide)\b.{0,40}\b(?:the\s+)?(?:download\s+)?link\b/.test(text) ||
+        /\b(?:existing|saved|current|latest)\b.{0,30}\b(?:file|document|sop|calendar)\b.{0,30}\b(?:link|download)\b/.test(text)
+    ) {
+        return "retrieve";
+    }
+
+    return null;
+}
+
+function isFileCreatorRole(role: string): boolean {
+    return role.trim().toLowerCase() === "file creator";
+}
+
+function filterFileCreatorRoutes(
+    routes: PendingMentionRoute[],
+    fileIntent: FarmerFileIntent
+): PendingMentionRoute[] {
+    return blocksFileCreator(fileIntent)
+        ? routes.filter(route => !isFileCreatorRole(route.role))
+        : routes;
+}
+
+function blocksFileCreator(fileIntent: FarmerFileIntent): boolean {
+    return fileIntent === "retrieve" || fileIntent === "no_file";
+}
+
 function restoredPausedFromMode(mode: unknown): ConversationState["pausedFromMode"] {
     // A paused snapshot from the previous process does not preserve the live
     // sequential chain; resume it through autonomous continuation. A snapshot
@@ -500,17 +545,79 @@ function updateConversationState(
     // Broadcast relevant state changes
     if (newState.mode !== previousState.mode ||
         newState.isAutonomousEnabled !== previousState.isAutonomousEnabled ||
-        newState.maxAutonomousTurns !== previousState.maxAutonomousTurns) {
+        newState.maxAutonomousTurns !== previousState.maxAutonomousTurns ||
+        newState.totalAutonomousTurnsTaken !== previousState.totalAutonomousTurnsTaken) {
+        const activeRun = newState.mode !== "idle";
         existingState.broadcastFn(conversationId, { 
             type: "state_update", 
             mode: newState.mode, 
             isAutonomousEnabled: newState.isAutonomousEnabled,
-            maxAutonomousTurns: newState.maxAutonomousTurns
+            maxAutonomousTurns: newState.maxAutonomousTurns,
+            ...(activeRun ? {
+                expertTurnsConsumed: newState.totalAutonomousTurnsTaken,
+                expertTurnsRemaining: Math.max(0, newState.maxAutonomousTurns - newState.totalAutonomousTurnsTaken)
+            } : {})
         });
         debugLog(`Broadcasted state update for ${conversationId}: mode=${newState.mode}, autoEnabled=${newState.isAutonomousEnabled}`);
     }
 
     return newState;
+}
+
+/** Persist autonomy controls for route handlers, including before a run has initialized. */
+export async function persistAutonomySettings(
+    conversationId: number,
+    settings: { isAutonomousEnabled?: boolean; maxAutonomousTurns?: number | null }
+): Promise<void> {
+    if (settings.isAutonomousEnabled === undefined && settings.maxAutonomousTurns === undefined) return;
+
+    const state = getConversationState(conversationId);
+    if (state) {
+        updateConversationState(conversationId, {
+            ...(settings.isAutonomousEnabled === undefined ? {} : { isAutonomousEnabled: settings.isAutonomousEnabled }),
+            ...(settings.maxAutonomousTurns === undefined ? {} : { maxAutonomousTurns: effectiveTurnBudget(settings.maxAutonomousTurns) })
+        });
+        await snapshotWriteChains.get(conversationId);
+        return;
+    }
+
+    if (typeof storage.getConversation !== "function" || typeof storage.updateConversation !== "function") {
+        throw new Error("Conversation storage is unavailable for persisting autonomy settings.");
+    }
+
+    await snapshotWriteChains.get(conversationId)?.catch(() => {});
+    const conversationRow = await storage.getConversation(conversationId);
+    const storedValue = conversationRow?.orchestratorState;
+    const storedSnapshot = storedValue && typeof storedValue === "object" && !Array.isArray(storedValue)
+        ? storedValue as OrchestratorSnapshot
+        : null;
+    const storedMode = storedSnapshot?.mode;
+    const storedPausedFromMode = storedSnapshot?.pausedFromMode;
+    const storedCurrentExpertIndex = storedSnapshot?.currentExpertIndex;
+    const storedAutonomousTurnsTaken = storedSnapshot?.totalAutonomousTurnsTaken;
+    const nextSnapshot: OrchestratorSnapshot = {
+        ...(storedSnapshot ?? {}),
+        mode: storedMode === "idle" || storedMode === "processing_sequential" || storedMode === "autonomous" || storedMode === "paused"
+            ? storedMode
+            : "idle",
+        currentExpertIndex: typeof storedCurrentExpertIndex === "number" && Number.isInteger(storedCurrentExpertIndex)
+            ? storedCurrentExpertIndex
+            : -1,
+        totalAutonomousTurnsTaken: typeof storedAutonomousTurnsTaken === "number" && Number.isInteger(storedAutonomousTurnsTaken) && storedAutonomousTurnsTaken >= 0
+            ? storedAutonomousTurnsTaken
+            : 0,
+        wasInterrupted: typeof storedSnapshot?.wasInterrupted === "boolean" ? storedSnapshot.wasInterrupted : false,
+        pausedFromMode: storedPausedFromMode === "processing_sequential" || storedPausedFromMode === "autonomous"
+            ? storedPausedFromMode
+            : null,
+        isAutonomousEnabled: settings.isAutonomousEnabled ?? snapshotBooleanOrDefault(storedSnapshot?.isAutonomousEnabled, true),
+        maxAutonomousTurns: settings.maxAutonomousTurns === undefined
+            ? snapshotBudgetOrFallback(storedSnapshot?.maxAutonomousTurns, conversationRow?.turnBudget)
+            : effectiveTurnBudget(settings.maxAutonomousTurns)
+    };
+
+    persistSnapshot(conversationId, nextSnapshot);
+    await snapshotWriteChains.get(conversationId);
 }
 
 // Initialize state when orchestrator is first needed for a conversation
@@ -700,7 +807,10 @@ export class InteractionOrchestrator {
             // kept empty so routing never turns a mention into a forced roll
             // call.
             roundExperts: [],
-            pendingMentionRoutes: mentionRoutesForMessage(state.lastUserMessage?.mentions, null, state.activeExperts),
+            pendingMentionRoutes: filterFileCreatorRoutes(
+                mentionRoutesForMessage(state.lastUserMessage?.mentions, null, state.activeExperts),
+                classifyFarmerFileIntent(state.lastUserMessage?.content),
+            ),
             pendingUserMessage: state.lastUserMessage,
             farmerJustSpoke: true,
             singleTurnOnly,
@@ -766,7 +876,10 @@ export class InteractionOrchestrator {
                 wasInterrupted: false,
                 pausedFromMode: null,
                 pendingUserMessage: pendingMessage,
-                pendingMentionRoutes: mentionRoutesForMessage(pendingMessage.mentions, null, state.activeExperts),
+                pendingMentionRoutes: filterFileCreatorRoutes(
+                    mentionRoutesForMessage(pendingMessage.mentions, null, state.activeExperts),
+                    classifyFarmerFileIntent(pendingMessage.content),
+                ),
                 farmerJustSpoke: true,
                 singleTurnOnly: !state.isAutonomousEnabled,
                 sequenceExpertContents: [],
@@ -951,6 +1064,13 @@ export class InteractionOrchestrator {
                     return;
                 }
                 if (state.mode === "paused" || state.turnChainScheduled) return;
+                const filteredRoutes = filterFileCreatorRoutes(
+                    state.pendingMentionRoutes,
+                    classifyFarmerFileIntent(state.lastUserMessage?.content),
+                );
+                if (filteredRoutes.length !== state.pendingMentionRoutes.length) {
+                    state = updateConversationState(this.conversationId, { pendingMentionRoutes: filteredRoutes });
+                }
                 const farmerRoutingPending = Boolean(state.pendingUserMessage || state.farmerJustSpoke);
                 const deferredExpertRoutes = farmerRoutingPending
                     ? state.pendingMentionRoutes.filter(route => route.sourceRole !== null)
@@ -1029,6 +1149,10 @@ export class InteractionOrchestrator {
                 if (latestState.pendingMentionRoutes.some(route => route.sourceRole === null) ||
                     (latestState.lastUserMessage !== routingMessage && latestState.farmerJustSpoke)) continue;
                 state = latestState;
+                if (suggestedRole && isFileCreatorRole(suggestedRole) &&
+                    blocksFileCreator(classifyFarmerFileIntent(state.lastUserMessage?.content))) {
+                    suggestedRole = "RoundRobin";
+                }
                 if (farmerJustSpoke) updateConversationState(this.conversationId, { farmerJustSpoke: false });
 
                 // A farmer input must receive a routed speaker even when the
@@ -1115,6 +1239,14 @@ export class InteractionOrchestrator {
                 });
                 generateInsights(this.conversationId, beforeTurnState.broadcastFn).catch(console.error);
                 return;
+            }
+        }
+
+        if (nextExpertIndex >= 0) {
+            const selectedExpert = state.activeExperts[nextExpertIndex];
+            if (selectedExpert && isFileCreatorRole(selectedExpert.role) &&
+                blocksFileCreator(classifyFarmerFileIntent(beforeTurnState?.lastUserMessage?.content))) {
+                nextExpertIndex = -1;
             }
         }
 
@@ -1318,10 +1450,10 @@ export class InteractionOrchestrator {
                 if (latestAfterStore) {
                     updateConversationState(this.conversationId, storedExpertMessage.role === "assistant" ? {
                         scheduledFailureAttempts: 0,
-                        pendingMentionRoutes: [
-                            ...latestAfterStore.pendingMentionRoutes,
-                            ...mentionRoutesForMessage(storedExpertMessage.mentions, currentExpert.role, latestAfterStore.activeExperts)
-                        ],
+                        pendingMentionRoutes: filterFileCreatorRoutes([
+                                ...latestAfterStore.pendingMentionRoutes,
+                                ...mentionRoutesForMessage(storedExpertMessage.mentions, currentExpert.role, latestAfterStore.activeExperts)
+                            ], classifyFarmerFileIntent(latestAfterStore.lastUserMessage?.content)),
                         ...completedTurnStanceUpdates(
                             latestAfterStore,
                             currentExpert.role,
@@ -1785,12 +1917,16 @@ export async function processMessageTurnBased(
             const newFarmerRoutes = mentionRoutesForMessage(userMessage.mentions, null, activeExperts);
             const existingFarmerRoutes = state.pendingMentionRoutes.filter(route => route.sourceRole === null);
             const existingExpertRoutes = state.pendingMentionRoutes.filter(route => route.sourceRole !== null);
+            const pendingMentionRoutes = filterFileCreatorRoutes(
+                [...existingFarmerRoutes, ...newFarmerRoutes, ...existingExpertRoutes],
+                classifyFarmerFileIntent(userMessage.content),
+            );
             const joined = updateConversationState(conversationId, {
                 activeExperts,
                 moderatorExpert,
                 lastUserMessage: userMessage,
                 pendingUserMessage: userMessage,
-                pendingMentionRoutes: [...existingFarmerRoutes, ...newFarmerRoutes, ...existingExpertRoutes],
+                pendingMentionRoutes,
                 farmerJustSpoke: true,
                 ...resetStanceEvidence(userMessage, activeExperts)
             });
