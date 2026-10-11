@@ -17,6 +17,7 @@ const MAX_PERPLEXITY_DISCUSSION_CHARS = MAX_MODEL_MESSAGE_CHARS * 2;
 const MAX_FILE_CONTEXT_FILES = 10;
 // G9: cap on the carried-forward PRIOR DECISIONS system block.
 const PRIOR_DECISIONS_MAX_CHARS = 1200;
+const INCOMPLETE_EXPERT_RESPONSE_MESSAGE = "⚠️ No complete response was received. Try a shorter request or split it into smaller requests, then retry. You can also continue with the work available so far.";
 
 function truncateForModel(content: string, maxChars = MAX_MODEL_MESSAGE_CHARS): string {
   return content.length > maxChars
@@ -362,6 +363,12 @@ export interface AIModelResponse {
   providerName?: string;
 }
 
+function requireNonEmptyAssistantContent(response: AIModelResponse): void {
+  if (typeof response?.message?.content !== "string" || !response.message.content.trim()) {
+    throw new Error("Empty assistant response");
+  }
+}
+
 // AI-facing Moderator identity. A roster Moderator carries its persisted
 // expert row ID; the system Moderator is synthetic and has no expert row.
 export interface ModeratorContext {
@@ -544,8 +551,9 @@ You are part of a team of experts: [${availableRoles?.join(', ') || 'various rol
 
   const interactionPrompt = `During discussion, actively engage with other experts. Reference their points and ask clarifying questions.
 You can direct the discussion: if you write @[Role Name], that expert will be asked to speak next. Tag only when their expertise is genuinely needed; otherwise speak to the whole table.
-If you need a fact only the farmer can know, put one concise question on its own line exactly as @[User] <question>?, then put a separate next line beginning Assuming <reasonable assumption>. Continue the discussion from that assumption without waiting for the farmer to answer.
-Be concise and clear in your responses.
+Keep responses concise: lead with the answer, then include only useful evidence, calculations, limits, and next steps.
+Clearly distinguish facts supplied by the farmer, fictional or example prices and inputs, calculations, and assumptions. Keep units with values, and do not present fictional inputs as farm facts. Avoid unqualified farm-specific prescriptions when evidence or required farm inputs are missing; state the uncertainty and what is needed.
+If you need a fact only the farmer can know, ask one concise, plain-language question on its own line beginning exactly "Farmer question:". Do not use an @[User] mention for that question. If useful, put a separate next line beginning "Assuming <reasonable assumption>" and continue with that qualified assumption without waiting for the farmer to answer.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ✨ CREATE VIBRANT, VISUALLY STUNNING INTERACTIVE DATA VISUALIZATIONS ✨
@@ -687,7 +695,7 @@ When appropriate, explain how weather conditions impact farming decisions and ri
       `;
       break;
     case "Research Analyst":
-      roleInstructions = `Research the question using available search results and prioritize primary sources, such as government agencies, university extension, official datasets, and peer-reviewed research. Cite factual research claims with Markdown links using only the exact URLs and source details returned by retrieval. Never invent or guess source titles, publication dates, quotations, or URLs. If retrieved results do not support a claim or provide a reliable source, say that supporting evidence is unavailable and qualify the claim.`;
+      roleInstructions = `Research the question using available search results and prioritize primary sources, such as government agencies, university extension, official datasets, and peer-reviewed research. Keep the response concise. Where possible, place the exact retrieved URL next to the factual claim it supports; use only exact URLs returned by retrieval. Never invent or guess source titles, publication dates, quotations, or URLs, and do not imply a URL or its support was independently verified. Distinguish farmer-provided facts, fictional or example prices and inputs, calculations, and assumptions. Do not give an unqualified farm-specific prescription when required evidence or farm inputs are missing. Say when supporting evidence is unavailable and qualify the claim.`;
       break;
     case "Imagery Specialist":
       roleInstructions = `Focus on analyzing satellite, drone, or field imagery to provide visual insights and interpretations. If images are provided, describe what you see and its relevance.
@@ -727,7 +735,7 @@ export async function callOpenRouterAPIStream(
   return provider.chatStream(messages, model, onToken, userId, webSearch);
 }
 
-const PERPLEXITY_RESEARCH_SYSTEM_PROMPT = "You are a Research Analyst specializing in agriculture. Provide concise, accurate information with relevant citations.";
+const PERPLEXITY_RESEARCH_SYSTEM_PROMPT = `You are a Research Analyst specializing in agriculture. Provide concise, accurate information with relevant citations. Keep responses short. Where possible, place exact retrieved URLs next to the factual claims they support; use only URLs returned by retrieval and do not imply independent verification. Distinguish farmer facts, fictional or example prices and inputs, calculations, and assumptions. Qualify recommendations when evidence or farm-specific inputs are missing.`;
 
 function getMessageText(content: AIMessage["content"]): string {
   if (typeof content === "string") return content;
@@ -852,7 +860,7 @@ export async function callPerplexityAPI(query: string, contextMessages: AIMessag
       ...(citations ? { citations } : {}),
     };
   } catch (error: unknown) {
-    console.error("Error calling Perplexity API:", error);
+    console.error("Error calling Perplexity API");
     if (error instanceof Error) {
       throw error;
     } else {
@@ -1183,6 +1191,7 @@ export async function getExpertResponseStream(
       stance = stripExpertStance(response, expert.role);
     }
     
+    requireNonEmptyAssistantContent(response);
     const { artifacts, cleanContent } = extractArtifacts(response.message.content);
     const researchAnswer = expert.role === "Research Analyst"
       ? appendRetrievedCitationUrls(cleanContent, response.citations)
@@ -1206,11 +1215,11 @@ export async function getExpertResponseStream(
     };
 
   } catch (error) {
-    console.error(`[STREAM] Error streaming from expert ${expert.name}:`, error);
+    console.error(`[STREAM] Response generation failed for expert ${expert.name}`);
     streamFilter?.finish();
     const errorMsg = isVisionRejection(error, imageParts)
       ? visionRejectionMessage(expert.name)
-      : `(Error generating response for ${expert.name}: ${error instanceof Error ? error.message : String(error)})`;
+      : INCOMPLETE_EXPERT_RESPONSE_MESSAGE;
     onToken(errorMsg); // Show error inline
     return {
       conversationId: expert.conversationId,
@@ -1307,6 +1316,7 @@ export async function getExpertResponse(
       stance = stripExpertStance(response, expert.role);
     }
     
+    requireNonEmptyAssistantContent(response);
     const { artifacts, cleanContent } = extractArtifacts(response.message.content);
     const researchAnswer = expert.role === "Research Analyst"
       ? appendRetrievedCitationUrls(cleanContent, response.citations)
@@ -1329,10 +1339,10 @@ export async function getExpertResponse(
     };
 
   } catch (error) {
-    console.error(`Error getting response from expert ${expert.name}:`, error);
+    console.error(`Response generation failed for expert ${expert.name}`);
     const errorMsg = isVisionRejection(error, imageParts)
       ? visionRejectionMessage(expert.name)
-      : `(Error generating response for ${expert.name}: ${error instanceof Error ? error.message : String(error)})`;
+      : INCOMPLETE_EXPERT_RESPONSE_MESSAGE;
     return {
       conversationId: expert.conversationId,
       expertId: expert.id,

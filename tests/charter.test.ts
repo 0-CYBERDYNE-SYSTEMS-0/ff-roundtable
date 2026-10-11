@@ -147,14 +147,18 @@ describe("generateSystemPrompt charter injection", () => {
     expect(prompt).not.toContain(`  ${CHARTER}  `);
   });
 
-  it("asks experts to log farmer-only questions and proceed on an assumption", () => {
+  it("asks farmer-only questions in plain language and proceeds on a qualified assumption", () => {
     const prompt = generateSystemPrompt(expert, roles);
-    expect(prompt).toContain("@[User] <question>?");
-    expect(prompt).toContain("beginning Assuming <reasonable assumption>");
+    expect(prompt).toContain('beginning exactly "Farmer question:"');
+    expect(prompt).toContain("plain-language question");
+    expect(prompt).toContain("Do not use an @[User] mention for that question");
+    expect(prompt).toContain('beginning "Assuming <reasonable assumption>"');
     expect(prompt).toContain("without waiting for the farmer to answer");
+    expect(prompt).toContain("fictional or example prices and inputs, calculations, and assumptions");
+    expect(prompt).toContain("Avoid unqualified farm-specific prescriptions");
   });
 
-  it("adds concise expert cross-talk guidance without changing the Moderator or farmer-question instructions", () => {
+  it("adds concise expert cross-talk guidance and keeps farmer questions plain", () => {
     const prompt = generateSystemPrompt(expert, roles);
     expect(prompt).toContain("💬 CROSS-TALK");
     expect(prompt).toContain("I agree with X because");
@@ -163,7 +167,8 @@ describe("generateSystemPrompt charter injection", () => {
     expect(prompt).toContain("Tag @[Role] only when you need that specialty");
     expect(prompt).toContain("never tag yourself or force a tag every turn");
     expect(prompt).toContain("Add new information or an objection instead of repeating settled points");
-    expect(prompt).toContain("@[User] <question>?");
+    expect(prompt).toContain('beginning exactly "Farmer question:"');
+    expect(prompt).not.toContain("@[User] <question>?");
     expect(prompt).toContain("without waiting for the farmer to answer");
     expect(prompt).toContain("STANCE: <agree|disagree|conditional|abstain> | <confidence 1-5> | <one-line position>");
 
@@ -269,9 +274,13 @@ describe("Research Analyst OpenRouter web search", () => {
       expect(streamCall[4]).toBe(true);
       const systemPrompt = streamCall[0].find((message: any) => message.role === "system").content;
       expect(systemPrompt).toContain("prioritize primary sources");
-      expect(systemPrompt).toContain("exact URLs and source details returned by retrieval");
+      expect(systemPrompt).toContain("use only exact URLs returned by retrieval");
       expect(systemPrompt).toContain("Never invent or guess source titles, publication dates, quotations, or URLs");
       expect(systemPrompt).toContain("supporting evidence is unavailable");
+      expect(systemPrompt).toContain("do not imply a URL or its support was independently verified");
+      expect(systemPrompt).toContain("Keep the response concise");
+      expect(systemPrompt).toContain("place the exact retrieved URL next to the factual claim");
+      expect(systemPrompt).toContain("fictional or example prices and inputs, calculations, and assumptions");
 
       await getExpertResponse(expert, [], "Nitrogen recommendation?", [], [expert.role]);
       const chatCall = mockProviderChat.mock.calls[0];
@@ -407,6 +416,92 @@ describe("Research Analyst retrieved source URLs", () => {
         process.env.PERPLEXITY_API_KEY = previousPerplexityKey;
       }
     }
+  });
+});
+
+describe("empty and incomplete expert responses", () => {
+  beforeEach(() => {
+    mockProviderChat.mockReset();
+    mockProviderChatStream.mockReset();
+  });
+
+  it("replaces an empty successful non-stream response with a warning that persists and allows the next turn", async () => {
+    const convo = await storage.createConversation({ userId: 1, title: "Empty expert response" });
+    const expert = createMockExpert(18, convo.id, "Dr. Terra", "Soil Scientist");
+    mockProviderChat
+      .mockResolvedValueOnce({ message: { role: "assistant", content: " \n " } })
+      .mockResolvedValueOnce({ message: { role: "assistant", content: "The soil report indicates low organic matter." } });
+
+    const incomplete = await getExpertResponse(expert, [], "Review the soil report.", [], [expert.role]);
+    const stored = await storage.createMessage(incomplete);
+    const next = await getExpertResponse(
+      { ...expert, id: 19, name: "Crop Specialist", role: "Crop Specialist" },
+      [],
+      "Continue with the available findings.",
+      [],
+      ["Soil Scientist", "Crop Specialist"],
+    );
+
+    expect(incomplete.content.startsWith("⚠️")).toBe(true);
+    expect(incomplete.content).toContain("Try a shorter request or split it into smaller requests");
+    expect(incomplete.content).toContain("continue with the work available so far");
+    expect(stored.content).toBe(incomplete.content);
+    expect(stored.content.trim()).not.toBe("");
+    expect(next.content).toBe("The soil report indicates low organic matter.");
+  });
+
+  it("replaces an empty successful streamed response with a marked actionable message", async () => {
+    const convo = await storage.createConversation({ userId: 1, title: "Empty streamed response" });
+    const expert = createMockExpert(20, convo.id, "Dr. Terra", "Soil Scientist");
+    mockProviderChatStream.mockResolvedValue({ message: { role: "assistant", content: "  " } });
+    const emitted: string[] = [];
+
+    const result = await getExpertResponseStream(
+      expert,
+      [],
+      "Review the soil report.",
+      [],
+      [expert.role],
+      token => emitted.push(token),
+    );
+    const stored = await storage.createMessage(result);
+
+    expect(result.content.startsWith("⚠️")).toBe(true);
+    expect(result.content).toContain("Try a shorter request or split it into smaller requests");
+    expect(emitted.join("")).toContain(result.content);
+    expect(stored.content).toBe(result.content);
+    expect(stored.content.trim()).not.toBe("");
+  });
+
+  it("replaces output-limit failures with a safe warning and redacts provider payloads", async () => {
+    const convo = await storage.createConversation({ userId: 1, title: "Output limit handling" });
+    const expert = createMockExpert(21, convo.id, "Dr. Terra", "Soil Scientist");
+    const secretPayload = "RAW_PROVIDER_PAYLOAD_SHOULD_NOT_ESCAPE";
+    mockProviderChat.mockRejectedValue(new Error(`Response reached the output limit. ${secretPayload}`));
+    const nonStream = await getExpertResponse(expert, [], "Review this report.", [], [expert.role]);
+
+    const emitted: string[] = [];
+    mockProviderChatStream.mockImplementation(async (_messages: any, _model: string, onToken: (token: string) => void) => {
+      onToken("Partial text before the output limit.");
+      throw new Error(`Response reached the output limit. ${secretPayload}`);
+    });
+    const streamed = await getExpertResponseStream(
+      expert,
+      [],
+      "Review this report.",
+      [],
+      [expert.role],
+      token => emitted.push(token),
+    );
+
+    for (const response of [nonStream, streamed]) {
+      expect(response.content.startsWith("⚠️")).toBe(true);
+      expect(response.content).toContain("Try a shorter request or split it into smaller requests");
+      expect(response.content).not.toContain(secretPayload);
+    }
+    expect(emitted.join("")).toContain("Partial text before the output limit.");
+    expect(emitted.join("")).toContain("⚠️");
+    expect(emitted.join("")).not.toContain(secretPayload);
   });
 });
 
