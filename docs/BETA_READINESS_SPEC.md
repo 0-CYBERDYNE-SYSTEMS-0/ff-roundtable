@@ -1,7 +1,7 @@
 # FarmFriend Roundtable — beta readiness specification
 
-Date: 2026-10-11  
-Status: Ready for implementation; beta release has not been approved by validation  
+Date: 2026-10-11
+Status: Ready for implementation; beta release has not been approved by validation
 Evidence: [Real farmer workflow report and artifacts](qa/2026-10-11-farmer-roundtable/report.md)
 
 ## 1. Product outcome
