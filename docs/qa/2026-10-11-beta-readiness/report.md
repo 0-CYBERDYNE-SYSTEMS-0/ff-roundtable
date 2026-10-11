@@ -56,6 +56,12 @@ The Files pane showed only the uploaded `fictional-farm-inputs.csv`; no SOP appe
 
 The calendar preview reported that it was unavailable and would recheck the schedule on export. The date controls remained at 2026-10-12. One Export .ics action produced no visible download; no ICS file was available to preview or inspect. Screenshots: [sidebar with no plan](screenshots/sidebar-no-plan.png) and [export result](screenshots/ics-export-result.png). **Download paths:** none; no SOP or ICS was downloaded.
 
+### Calendar empty-state follow-up
+
+After the initial live run, a browser regression check confirmed the sidebar treated any uploaded file as a possible schedule and left export enabled. The UI now enables export only after a successful schedule preview. A new session using the local Quick Development Login uploaded the existing fictional CSV fixture to conversation 4; the browser showed “No dated plan yet. Ask the council to create a week-by-week plan before exporting.” and kept Export .ics disabled. The upload succeeded, and the stored conversation had one user file and no assistant messages; no model request was made for this check. Screenshots: [desktop empty state with reference file](screenshots/calendar-empty-state-with-reference-file.png) and [mobile viewport](screenshots/calendar-empty-state-mobile.png).
+
+At 390 × 844, `document.documentElement.scrollWidth` matched the 390-pixel viewport. This checks horizontal page overflow only; mobile navigation and the full deliverable workflow remain unverified. The page rendered without a framework overlay. The browser logged a development Vite HMR error for an invalid `ws://localhost:undefined/` URL; the app's own WebSocket connected, and this dev-server issue is outside the calendar change.
+
 ## Acceptance status
 
 | Requirement | Status | Evidence |
@@ -64,7 +70,7 @@ The calendar preview reported that it was unavailable and would recheck the sche
 | BETA-02 Canonical deliverables | FAIL — requested SOP was not produced. Version identity, size/date validation, ownership, and actual download checks are BLOCKED because no file exists. | [Files pane](screenshots/files-pane-after-run.png) |
 | BETA-03 Evidence and calculation consistency | FAIL — only the partial $85 calculation appeared; it did not reflect the $65 correction, and the source response was incomplete. Broader calculation and source scenarios remain BLOCKED. | [partial response](screenshots/first-research-response.png), [error](screenshots/research-output-limit.png) |
 | BETA-04 Questions and final handoff | FAIL — a budget clarification appeared in ordinary language but was not acted on; no closing council handoff appeared before idle. | [partial response](screenshots/first-research-response.png), [idle state](screenshots/run-idle-after-error.png) |
-| BETA-05 Calendar dates and plan consistency | BLOCKED — no plan preview or ICS download; export had no visible result. | [sidebar](screenshots/sidebar-no-plan.png), [export](screenshots/ics-export-result.png) |
+| BETA-05 Calendar dates and plan consistency | BLOCKED — no dated plan, ICS download/import, or current-plan revision was available in the farmer run. Follow-up verified the actionable no-plan UI and disabled export for an uploaded reference CSV. | [original sidebar](screenshots/sidebar-no-plan.png), [empty-state regression](screenshots/calendar-empty-state-with-reference-file.png) |
 | BETA-06 Failure recovery and capability status | FAIL — the observed output-limit path ended with an empty Research Analyst message and no handoff. Broader failure, recovery, and capability scenarios remain BLOCKED. | [error](screenshots/research-output-limit.png), [idle state](screenshots/run-idle-after-error.png) |
 | BETA-07 Continuity and deliverable breadth | BLOCKED — reload/restart, account isolation, and other deliverable journeys not tested. | — |
 

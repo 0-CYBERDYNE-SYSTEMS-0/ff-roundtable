@@ -79,32 +79,54 @@ export default function SidebarPanel({
   const [calendarStart, setCalendarStart] = useState(() => readCalendarStart(activeConversationId) ?? nextMondayDate());
   const [calendarPreview, setCalendarPreview] = useState<CalendarPreview | null>(null);
   const [isLoadingCalendarPreview, setIsLoadingCalendarPreview] = useState(false);
+  const [calendarPreviewError, setCalendarPreviewError] = useState<"empty" | "unavailable" | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     setCalendarStart(readCalendarStart(activeConversationId) ?? nextMondayDate());
+    setCalendarPreview(null);
+    setIsLoadingCalendarPreview(false);
+    setCalendarPreviewError(null);
   }, [activeConversationId]);
 
   useEffect(() => {
     if (!activeConversationId || !canExportIcs || !calendarStart) {
       setCalendarPreview(null);
       setIsLoadingCalendarPreview(false);
+      setCalendarPreviewError(null);
       return;
     }
 
     let cancelled = false;
     const timer = window.setTimeout(async () => {
       setIsLoadingCalendarPreview(true);
+      setCalendarPreviewError(null);
       try {
         const response = await fetch(
           `/api/protected/conversations/${activeConversationId}/export.ics?preview=1&start=${encodeURIComponent(calendarStart)}`,
           { credentials: "include" },
         );
-        if (!response.ok) throw new Error("Schedule preview unavailable");
+        if (!response.ok) {
+          const result = await response.json().catch(() => ({})) as { error?: string };
+          if (response.status === 422 && result.error?.includes("No schedulable items")) {
+            if (!cancelled) {
+              setCalendarPreview(null);
+              setCalendarPreviewError("empty");
+            }
+            return;
+          }
+          throw new Error("Schedule preview unavailable");
+        }
         const preview = await response.json() as CalendarPreview;
-        if (!cancelled) setCalendarPreview(preview);
+        if (!cancelled) {
+          setCalendarPreview(preview);
+          setCalendarPreviewError(null);
+        }
       } catch {
-        if (!cancelled) setCalendarPreview(null);
+        if (!cancelled) {
+          setCalendarPreview(null);
+          setCalendarPreviewError("unavailable");
+        }
       } finally {
         if (!cancelled) setIsLoadingCalendarPreview(false);
       }
@@ -159,6 +181,8 @@ export default function SidebarPanel({
               onChange={(event) => {
                 const value = event.target.value;
                 setCalendarStart(value);
+                setCalendarPreview(null);
+                setCalendarPreviewError(null);
                 if (activeConversationId) {
                   try {
                     localStorage.setItem(`farmFriendCalendarStart:${activeConversationId}`, value);
@@ -175,16 +199,18 @@ export default function SidebarPanel({
               ? "Checking the current plan…"
               : calendarPreview
                 ? `${calendarPreview.scheduleVersion} · ${calendarPreview.eventCount} all-day events · starts ${calendarPreview.startDate} (${calendarPreview.year}) · ${calendarPreview.timeZone}`
-                : canExportIcs
-                  ? "Current plan preview is unavailable; export will recheck the schedule."
-                  : "No schedulable plan yet. Ask the council for a dated plan."}
+                : calendarPreviewError === "unavailable"
+                  ? "Calendar preview is unavailable. Try again when the connection is restored."
+                  : calendarPreviewError === "empty" || !canExportIcs || !activeConversationId
+                    ? "No dated plan yet. Ask the council to create a week-by-week plan before exporting."
+                    : "Checking the current plan…"}
           </p>
           <Button
             variant="outline"
             className="w-full mt-2 border-2 border-farm-green text-farm-green hover:bg-farm-green hover:text-white rounded-lg px-4 py-2.5 flex items-center justify-center transition-all duration-200 font-medium"
             onClick={() => onExportIcs(calendarStart)}
-            disabled={!canExportIcs || !calendarStart}
-            title={canExportIcs ? "Export the week-by-week plan to your calendar (.ics)" : "No schedulable plan yet — ask an expert for a week-by-week plan, or upload files, first"}
+            disabled={!calendarPreview || !calendarStart || isLoadingCalendarPreview}
+            title={calendarPreview ? "Export the week-by-week plan to your calendar (.ics)" : "Create a dated plan with the council before exporting"}
           >
             <CalendarDays className="mr-2 h-4 w-4" />
             Export .ics

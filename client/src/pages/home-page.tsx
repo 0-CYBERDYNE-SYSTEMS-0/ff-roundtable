@@ -515,9 +515,15 @@ export default function HomePage() {
   };
 
   // Export the conversation's week-by-week plan as an .ics calendar.
-  // Enabled only when the conversation has artifacts or files to schedule from.
+  // Uploaded reference files cannot produce calendar events; only plan-like
+  // artifacts and current Expert-generated Markdown are candidates.
   const hasSchedulableSource =
-    (messages ?? []).some((m) => (m.artifacts?.length ?? 0) > 0) || (files ?? []).length > 0;
+    (messages ?? []).some((m) => (m.artifacts?.length ?? 0) > 0) ||
+    (files ?? []).some((file) =>
+      !file.supersededAt &&
+      file.uploadedBy.startsWith("Expert:") &&
+      file.filename.toLowerCase().endsWith(".md")
+    );
 
   // The active conversation's record from the list query (title, charter).
   const activeConversationData =
