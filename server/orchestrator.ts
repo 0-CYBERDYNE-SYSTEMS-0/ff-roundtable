@@ -30,6 +30,8 @@ interface ConversationState {
     moderatorExpert: ModeratorContext;
     currentExpertIndex: number;
     lastUserMessage: Message | null; // Store the user message that triggered the sequence
+    // Keep the active file request while later farmer messages refine it.
+    sequenceFileCreatorRequest?: Message | null;
     mode: InteractionMode;
     broadcastFn: (convId: number, data: any) => void; // Store broadcast function
     // Autonomous settings
@@ -516,8 +518,9 @@ function isFileCreatorRole(role: string): boolean {
 function filterFileCreatorRoutes(
     routes: PendingMentionRoute[],
     farmerContent: string | null | undefined,
+    hasOutstandingRequest = false,
 ): PendingMentionRoute[] {
-    return isFileCreatorAllowed(farmerContent)
+    return isFileCreatorAllowed(farmerContent, hasOutstandingRequest)
         ? routes
         : routes.filter(route => !isFileCreatorRole(route.role));
 }
@@ -526,11 +529,21 @@ function blocksFileCreator(fileIntent: FarmerFileIntent): boolean {
     return fileIntent === "retrieve" || fileIntent === "no_file";
 }
 
-function isFileCreatorAllowed(content: string | null | undefined): boolean {
+function isFileCreatorAllowed(content: string | null | undefined, hasOutstandingRequest = false): boolean {
     const text = cleanFarmerFileText(content);
     if (!text || blocksFileCreator(classifyFarmerFileIntent(text))) return false;
     const fileNoun = "(?:files?|documents?|sops?|calendars?|spreadsheets?|exports?|plans?|scripts?|code)";
-    return new RegExp(`\\b(?:create|make|generate|draft|write|produce|prepare|export|build|turn|convert|provide|give|need|want)\\b.{0,80}\\b${fileNoun}\\b`).test(text);
+    return hasOutstandingRequest ||
+        new RegExp(`\\b(?:create|make|generate|draft|write|produce|prepare|export|build|turn|convert|provide|give|need|want)\\b.{0,80}\\b${fileNoun}\\b`).test(text);
+}
+
+function nextSequenceFileCreatorRequest(
+    existingRequest: Message | null | undefined,
+    message: Message | null | undefined,
+): Message | null {
+    if (!message) return existingRequest ?? null;
+    if (blocksFileCreator(classifyFarmerFileIntent(message.content))) return null;
+    return isFileCreatorAllowed(message.content) ? message : existingRequest ?? null;
 }
 
 const DELIVERABLE_NUMBER_WORDS: Record<string, number> = {
@@ -645,7 +658,7 @@ async function buildDeliverableGenerationRequest(
         throw new Error("I couldn't identify which saved deliverable to revise. Please name the file or open the Files pane.");
     }
 
-    const tokens = deliverableIdentityTokens(content);
+    const tokens = deliverableIdentityTokens(userMessage.content);
     const identity = tokens.join(" ") || `message-${userMessage.id}`;
     const deliverableId = revisionTarget?.deliverableId ?? `deliverable-${createHash("sha256")
         .update(`${conversationId}:${kind}:${identity}`)
@@ -846,6 +859,7 @@ function initializeConversationState(conversationId: number, activeExperts: Expe
         moderatorExpert,
         currentExpertIndex: -1, 
         lastUserMessage: userMessage,
+        sequenceFileCreatorRequest: isFileCreatorAllowed(userMessage.content) ? userMessage : null,
         mode: "idle", 
         broadcastFn: broadcastFn,
         // Initialize autonomous settings
@@ -1020,10 +1034,12 @@ export class InteractionOrchestrator {
             wasInterrupted: false,
             pausedFromMode: null,
             lastUserMessage: pendingMessage,
+            sequenceFileCreatorRequest: isFileCreatorAllowed(pendingMessage.content) ? pendingMessage : null,
             pendingUserMessage: pendingMessage,
             pendingMentionRoutes: filterFileCreatorRoutes(
                 mentionRoutesForMessage(pendingMessage.mentions, null, state.activeExperts),
                 pendingMessage.content,
+                isFileCreatorAllowed(pendingMessage.content),
             ),
             farmerJustSpoke: true,
             singleTurnOnly: !state.isAutonomousEnabled,
@@ -1161,6 +1177,7 @@ export class InteractionOrchestrator {
             mode: "autonomous",
             currentExpertIndex: -1,
             totalAutonomousTurnsTaken: 0,
+            sequenceFileCreatorRequest: isFileCreatorAllowed(state.lastUserMessage?.content) ? state.lastUserMessage : null,
             wasInterrupted: false, // Reset interrupted flag
             pausedFromMode: null,
             sequenceExpertContents: [], // New sequence: redundancy history starts empty
@@ -1172,6 +1189,7 @@ export class InteractionOrchestrator {
             pendingMentionRoutes: filterFileCreatorRoutes(
                 mentionRoutesForMessage(state.lastUserMessage?.mentions, null, state.activeExperts),
                 state.lastUserMessage?.content,
+                isFileCreatorAllowed(state.lastUserMessage?.content),
             ),
             pendingUserMessage: state.lastUserMessage,
             farmerJustSpoke: true,
@@ -1239,9 +1257,11 @@ export class InteractionOrchestrator {
                 wasInterrupted: false,
                 pausedFromMode: null,
                 pendingUserMessage: pendingMessage,
+                sequenceFileCreatorRequest: isFileCreatorAllowed(pendingMessage.content) ? pendingMessage : null,
                 pendingMentionRoutes: filterFileCreatorRoutes(
                     mentionRoutesForMessage(pendingMessage.mentions, null, state.activeExperts),
                     pendingMessage.content,
+                    isFileCreatorAllowed(pendingMessage.content),
                 ),
                 farmerJustSpoke: true,
                 singleTurnOnly: !state.isAutonomousEnabled,
@@ -1330,7 +1350,8 @@ export class InteractionOrchestrator {
                      pendingUserMessage: pendingMessage,
                      farmerJustSpoke: true,
                      singleTurnOnly: false,
-                     lastUserMessage: pendingMessage
+                     lastUserMessage: pendingMessage,
+                     sequenceFileCreatorRequest: isFileCreatorAllowed(pendingMessage?.content) ? pendingMessage : null,
                  });
                  if (pendingMessage) {
                      scheduleInterruptedMessage(state, pendingMessage, true);
@@ -1394,7 +1415,8 @@ export class InteractionOrchestrator {
                             mode: "idle", wasInterrupted: false, currentExpertIndex: -1,
                             totalAutonomousTurnsTaken: 0, pausedFromMode: null,
                             pendingMentionRoutes: [], pendingUserMessage: pendingMessage,
-                            farmerJustSpoke: true, singleTurnOnly: false, lastUserMessage: pendingMessage
+                            farmerJustSpoke: true, singleTurnOnly: false, lastUserMessage: pendingMessage,
+                            sequenceFileCreatorRequest: isFileCreatorAllowed(pendingMessage?.content) ? pendingMessage : null,
                         });
                         if (pendingMessage) scheduleInterruptedMessage(state, pendingMessage, true);
                     }
@@ -1404,6 +1426,7 @@ export class InteractionOrchestrator {
                 const filteredRoutes = filterFileCreatorRoutes(
                     state.pendingMentionRoutes,
                     state.lastUserMessage?.content,
+                    Boolean(state.sequenceFileCreatorRequest),
                 );
                 if (filteredRoutes.length !== state.pendingMentionRoutes.length) {
                     state = updateConversationState(this.conversationId, { pendingMentionRoutes: filteredRoutes });
@@ -1491,7 +1514,7 @@ export class InteractionOrchestrator {
                     (latestState.lastUserMessage !== routingMessage && latestState.farmerJustSpoke)) continue;
                 state = latestState;
                 if (suggestedRole && isFileCreatorRole(suggestedRole) &&
-                    !isFileCreatorAllowed(state.lastUserMessage?.content)) {
+                    !isFileCreatorAllowed(state.lastUserMessage?.content, Boolean(state.sequenceFileCreatorRequest))) {
                     suggestedRole = "RoundRobin";
                 }
                 if (farmerJustSpoke) updateConversationState(this.conversationId, { farmerJustSpoke: false });
@@ -1571,7 +1594,8 @@ export class InteractionOrchestrator {
                 mode: "idle", wasInterrupted: false, currentExpertIndex: -1,
                 totalAutonomousTurnsTaken: 0, pausedFromMode: null,
                 pendingMentionRoutes: [], pendingUserMessage: pendingMessage,
-                farmerJustSpoke: true, singleTurnOnly: false, lastUserMessage: pendingMessage
+                farmerJustSpoke: true, singleTurnOnly: false, lastUserMessage: pendingMessage,
+                sequenceFileCreatorRequest: isFileCreatorAllowed(pendingMessage?.content) ? pendingMessage : null,
             });
             if (pendingMessage) scheduleInterruptedMessage(beforeTurnState, pendingMessage, true);
             return;
@@ -1589,7 +1613,10 @@ export class InteractionOrchestrator {
         if (nextExpertIndex >= 0) {
             const selectedExpert = state.activeExperts[nextExpertIndex];
             if (selectedExpert && isFileCreatorRole(selectedExpert.role) &&
-                !isFileCreatorAllowed(beforeTurnState?.lastUserMessage?.content)) {
+                !isFileCreatorAllowed(
+                    beforeTurnState?.lastUserMessage?.content,
+                    Boolean(beforeTurnState?.sequenceFileCreatorRequest),
+                )) {
                 nextExpertIndex = -1;
             }
         }
@@ -1674,7 +1701,8 @@ export class InteractionOrchestrator {
                         mode: "idle", wasInterrupted: false, currentExpertIndex: -1,
                         totalAutonomousTurnsTaken: 0, pausedFromMode: null,
                         pendingMentionRoutes: [], pendingUserMessage: pendingMessage,
-                        farmerJustSpoke: true, singleTurnOnly: false, lastUserMessage: pendingMessage
+                        farmerJustSpoke: true, singleTurnOnly: false, lastUserMessage: pendingMessage,
+                        sequenceFileCreatorRequest: isFileCreatorAllowed(pendingMessage?.content) ? pendingMessage : null,
                     });
                     if (pendingMessage) scheduleInterruptedMessage(latestState, pendingMessage, true);
                     return;
@@ -1726,11 +1754,18 @@ export class InteractionOrchestrator {
 
                 // Mark the turn in flight before invoking the provider so a
                 // pause or join now lets this selected expert finish.
-                const deliverableRequest = isFileCreatorRole(currentExpert.role) && state.lastUserMessage
+                const fileCreatorSource = state.sequenceFileCreatorRequest;
+                const deliverableContent = fileCreatorSource
+                    ? history
+                        .filter(message => message.role === "user" && message.id >= fileCreatorSource.id)
+                        .map(message => message.content)
+                        .join("\n\n")
+                    : "";
+                const deliverableRequest = isFileCreatorRole(currentExpert.role) && fileCreatorSource
                     ? await buildDeliverableGenerationRequest(
                         this.conversationId,
-                        state.lastUserMessage,
-                        state.lastUserMessage.content,
+                        fileCreatorSource,
+                        deliverableContent || fileCreatorSource.content,
                     )
                     : undefined;
                 const existingCreate = deliverableRequest?.mode === "create"
@@ -1850,7 +1885,7 @@ export class InteractionOrchestrator {
                         pendingMentionRoutes: filterFileCreatorRoutes([
                                 ...latestAfterStore.pendingMentionRoutes,
                                 ...mentionRoutesForMessage(storedExpertMessage.mentions, currentExpert.role, latestAfterStore.activeExperts)
-                            ], latestAfterStore.lastUserMessage?.content),
+                            ], latestAfterStore.lastUserMessage?.content, Boolean(latestAfterStore.sequenceFileCreatorRequest)),
                         ...completedTurnStanceUpdates(
                             latestAfterStore,
                             currentExpert.role,
@@ -2029,7 +2064,8 @@ export class InteractionOrchestrator {
                       pendingUserMessage: pendingMessage,
                       farmerJustSpoke: true,
                       singleTurnOnly: false,
-                      lastUserMessage: pendingMessage
+                      lastUserMessage: pendingMessage,
+                      sequenceFileCreatorRequest: isFileCreatorAllowed(pendingMessage?.content) ? pendingMessage : null,
                   });
                   if (pendingMessage) {
                       scheduleInterruptedMessage(finalStateCheck, pendingMessage, true);
@@ -2290,6 +2326,7 @@ export async function processMessageTurnBased(
                 activeExperts,
                 moderatorExpert,
                 lastUserMessage: userMessage,
+                sequenceFileCreatorRequest: isFileCreatorAllowed(userMessage.content) ? userMessage : null,
                 pendingUserMessage: userMessage,
                 pendingMentionRoutes: [],
                 farmerJustSpoke: true,
@@ -2316,17 +2353,20 @@ export async function processMessageTurnBased(
         }
 
         if (isActive || state.mode === "paused") {
+            const sequenceFileCreatorRequest = nextSequenceFileCreatorRequest(state.sequenceFileCreatorRequest, userMessage);
             const newFarmerRoutes = mentionRoutesForMessage(userMessage.mentions, null, activeExperts);
             const existingFarmerRoutes = state.pendingMentionRoutes.filter(route => route.sourceRole === null);
             const existingExpertRoutes = state.pendingMentionRoutes.filter(route => route.sourceRole !== null);
             const pendingMentionRoutes = filterFileCreatorRoutes(
                 [...existingFarmerRoutes, ...newFarmerRoutes, ...existingExpertRoutes],
                 userMessage.content,
+                Boolean(sequenceFileCreatorRequest),
             );
             const joined = updateConversationState(conversationId, {
                 activeExperts,
                 moderatorExpert,
                 lastUserMessage: userMessage,
+                sequenceFileCreatorRequest,
                 pendingUserMessage: userMessage,
                 pendingMentionRoutes,
                 farmerJustSpoke: true,
@@ -2351,6 +2391,7 @@ export async function processMessageTurnBased(
             activeExperts,
             moderatorExpert,
             lastUserMessage: userMessage,
+            sequenceFileCreatorRequest: isFileCreatorAllowed(userMessage.content) ? userMessage : null,
             pendingUserMessage: userMessage,
             pendingMentionRoutes: [],
             farmerJustSpoke: true,

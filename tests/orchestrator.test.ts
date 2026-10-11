@@ -1381,6 +1381,60 @@ describe("Orchestrator", () => {
       expect(turnNames()).not.toContain("Daisy");
     });
 
+    it("keeps an outstanding File Creator request across a budget correction", async () => {
+      const conversationId = nextConvId();
+      const { waitForTurns, rejectNextTurn, releaseNextTurn, addUserMessageToHistory, turnNames } =
+        setupGatedConversation(conversationId);
+      const research = { ...createMockExpert(5, "Research Scout", "Research Analyst"), conversationId };
+      const fileCreator = { ...createMockExpert(6, "Daisy", "File Creator"), conversationId };
+      mockGetConversationExperts.mockResolvedValue([
+        research,
+        fileCreator,
+        { ...createMockExpert(7, "Dr. Soil", "Soil Scientist"), conversationId },
+      ]);
+      mockGetModeratorNextSpeakerSuggestion.mockReset()
+        .mockResolvedValueOnce("Research Analyst")
+        .mockResolvedValueOnce("File Creator");
+
+      const originalRequest = createMockMessage(
+        1,
+        "Create one Markdown SOP under 2,000 Unicode characters with exactly 4 dated tasks, using an $85/ac input cap.",
+      );
+      addUserMessageToHistory(originalRequest);
+      await processMessageTurnBased(userId, conversationId, originalRequest, broadcastFn);
+      await waitForTurns(1);
+
+      const correction = createMockMessage(
+        2,
+        "My input cap is now $65/ac. Recheck pending calculations; I have no application quote. Keep one current SOP; do not duplicate it.",
+      );
+      addUserMessageToHistory(correction);
+      await processMessageTurnBased(userId, conversationId, correction, broadcastFn);
+      expect(getConversationState(conversationId)!.sequenceFileCreatorRequest?.id).toBe(originalRequest.id);
+
+      new InteractionOrchestrator(conversationId).disableAutonomous();
+      await rejectNextTurn();
+      await waitForTurns(2);
+
+      const fileCreatorCall = mockGetExpertResponseStream.mock.calls.find(([expert]) =>
+        expert.conversationId === conversationId && expert.role === "File Creator",
+      );
+      expect(fileCreatorCall?.[6]).toMatchObject({
+        mode: "create",
+        constraints: {
+          format: "Markdown",
+          maxCharacters: 1999,
+          requiredSections: ["Tasks"],
+          taskCount: 4,
+          datedTasks: true,
+        },
+      });
+      expect(turnNames()).toEqual(["Research Scout", "Daisy"]);
+
+      await releaseNextTurn("Created the requested SOP.");
+      await waitForMode(conversationId, "idle");
+    });
+
     it("builds bounded server-owned File Creator requests and reuses an existing current file", async () => {
       const conversationId = nextConvId();
       const fileCreator = { ...createMockExpert(4, "Daisy", "File Creator"), conversationId };
