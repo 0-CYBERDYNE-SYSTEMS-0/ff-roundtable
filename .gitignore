@@ -8,3 +8,5 @@ vite.config.ts.*
 uploads/*
 .env
 cookies.txt
+jev-audit/
+videos/

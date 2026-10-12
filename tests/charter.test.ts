@@ -20,7 +20,7 @@
  * exercised and their prompt payloads inspected.
  */
 
-import { describe, it, expect, beforeAll, beforeEach, vi } from "vitest";
+import { afterEach, describe, it, expect, beforeAll, beforeEach, vi } from "vitest";
 import request from "supertest";
 import express from "express";
 import type { Express } from "express";
@@ -32,19 +32,19 @@ process.env.NODE_ENV = "test";
 process.env.LOGIN_RATELIMIT_MAX = "1000";
 
 // ── Mock orchestrator (routes import it; never let it reach the AI layer) ──
-const { mockProcessMessageTurnBased, mockSetTurnBudget } = vi.hoisted(() => ({
+const { mockProcessMessageTurnBased, mockPersistAutonomySettings } = vi.hoisted(() => ({
   mockProcessMessageTurnBased: vi.fn(),
-  mockSetTurnBudget: vi.fn(),
+  mockPersistAutonomySettings: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("../server/orchestrator", () => ({
   processMessageTurnBased: mockProcessMessageTurnBased,
+  persistAutonomySettings: mockPersistAutonomySettings,
   InteractionOrchestrator: class {
     pause() {}
     resume() {}
     enableAutonomous(_maxTurns?: number) {}
     disableAutonomous() {}
-    setTurnBudget(turnBudget: number | null) { mockSetTurnBudget(turnBudget); }
   },
   getConversationState: vi.fn().mockReturnValue(null),
 }));
@@ -147,14 +147,18 @@ describe("generateSystemPrompt charter injection", () => {
     expect(prompt).not.toContain(`  ${CHARTER}  `);
   });
 
-  it("asks experts to log farmer-only questions and proceed on an assumption", () => {
+  it("asks farmer-only questions in plain language and proceeds on a qualified assumption", () => {
     const prompt = generateSystemPrompt(expert, roles);
-    expect(prompt).toContain("@[User] <question>?");
-    expect(prompt).toContain("beginning Assuming <reasonable assumption>");
+    expect(prompt).toContain('beginning exactly "Farmer question:"');
+    expect(prompt).toContain("plain-language question");
+    expect(prompt).toContain("Do not use an @[User] mention for that question");
+    expect(prompt).toContain('beginning "Assuming <reasonable assumption>"');
     expect(prompt).toContain("without waiting for the farmer to answer");
+    expect(prompt).toContain("fictional or example prices and inputs, calculations, and assumptions");
+    expect(prompt).toContain("Avoid unqualified farm-specific prescriptions");
   });
 
-  it("adds concise expert cross-talk guidance without changing the Moderator or farmer-question instructions", () => {
+  it("adds concise expert cross-talk guidance and keeps farmer questions plain", () => {
     const prompt = generateSystemPrompt(expert, roles);
     expect(prompt).toContain("💬 CROSS-TALK");
     expect(prompt).toContain("I agree with X because");
@@ -163,7 +167,8 @@ describe("generateSystemPrompt charter injection", () => {
     expect(prompt).toContain("Tag @[Role] only when you need that specialty");
     expect(prompt).toContain("never tag yourself or force a tag every turn");
     expect(prompt).toContain("Add new information or an objection instead of repeating settled points");
-    expect(prompt).toContain("@[User] <question>?");
+    expect(prompt).toContain('beginning exactly "Farmer question:"');
+    expect(prompt).not.toContain("@[User] <question>?");
     expect(prompt).toContain("without waiting for the farmer to answer");
     expect(prompt).toContain("STANCE: <agree|disagree|conditional|abstain> | <confidence 1-5> | <one-line position>");
 
@@ -221,6 +226,7 @@ describe("G15 expert stance parsing", () => {
     expect(emitted.join("")).not.toContain("STANCE:");
     expect(result.content).toBe("Use a cover crop.");
     expect(result.stance).toEqual({ stance: "agree", confidence: 4, position: "Reduces erosion risk" });
+    expect(mockProviderChatStream.mock.calls[0][3]).toBe(convo.userId);
     const stored = await storage.createMessage(result);
     expect(stored.content).toBe("Use a cover crop.");
     expect(stored.content).not.toContain("STANCE:");
@@ -239,6 +245,263 @@ describe("G15 expert stance parsing", () => {
     expect(result.content).toBe("Use a cover crop.");
     expect(result.content).not.toContain("STANCE:");
     expect(result.stance).toEqual({ stance: "disagree", confidence: 2, position: "Seed cost is too high" });
+  });
+});
+
+describe("Research Analyst OpenRouter web search", () => {
+  beforeEach(() => {
+    mockProviderChat.mockReset();
+    mockProviderChatStream.mockReset();
+  });
+
+  it("requests grounding on the assigned model in both fallback paths and sets source rules", async () => {
+    const previousPerplexityKey = process.env.PERPLEXITY_API_KEY;
+    delete process.env.PERPLEXITY_API_KEY;
+    try {
+      const convo = await storage.createConversation({ userId: 1, title: "Grounded research" });
+      const expert = createMockExpert(14, convo.id, "Researcher", "Research Analyst");
+      expert.model = "xiaomi/mimo-v2.6-flash";
+      const response = {
+        message: { role: "assistant", content: "Check the extension guidance.\nSTANCE: conditional | 4 | Confirm with primary evidence" },
+      };
+      mockProviderChat.mockResolvedValue(response);
+      mockProviderChatStream.mockResolvedValue(response);
+
+      await getExpertResponseStream(expert, [], "Nitrogen recommendation?", [], [expert.role], () => {});
+      const streamCall = mockProviderChatStream.mock.calls[0];
+      expect(streamCall[1]).toBe(expert.model);
+      expect(streamCall[3]).toBe(convo.userId);
+      expect(streamCall[4]).toBe(true);
+      const systemPrompt = streamCall[0].find((message: any) => message.role === "system").content;
+      expect(systemPrompt).toContain("prioritize primary sources");
+      expect(systemPrompt).toContain("use only exact URLs returned by retrieval");
+      expect(systemPrompt).toContain("Never invent or guess source titles, publication dates, quotations, or URLs");
+      expect(systemPrompt).toContain("supporting evidence is unavailable");
+      expect(systemPrompt).toContain("do not imply a URL or its support was independently verified");
+      expect(systemPrompt).toContain("Keep the response concise");
+      expect(systemPrompt).toContain("place the exact retrieved URL next to the factual claim");
+      expect(systemPrompt).toContain("fictional or example prices and inputs, calculations, and assumptions");
+
+      await getExpertResponse(expert, [], "Nitrogen recommendation?", [], [expert.role]);
+      const chatCall = mockProviderChat.mock.calls[0];
+      expect(chatCall[1]).toBe(expert.model);
+      expect(chatCall[2]).toBe(convo.userId);
+      expect(chatCall[3]).toBe(true);
+    } finally {
+      if (previousPerplexityKey === undefined) {
+        delete process.env.PERPLEXITY_API_KEY;
+      } else {
+        process.env.PERPLEXITY_API_KEY = previousPerplexityKey;
+      }
+    }
+  });
+});
+
+describe("Research Analyst retrieved source URLs", () => {
+  let previousPerplexityKey: string | undefined;
+
+  beforeEach(() => {
+    previousPerplexityKey = process.env.PERPLEXITY_API_KEY;
+    delete process.env.PERPLEXITY_API_KEY;
+    mockProviderChat.mockReset();
+    mockProviderChatStream.mockReset();
+  });
+
+  afterEach(() => {
+    if (previousPerplexityKey === undefined) {
+      delete process.env.PERPLEXITY_API_KEY;
+    } else {
+      process.env.PERPLEXITY_API_KEY = previousPerplexityKey;
+    }
+  });
+
+  it("persists exact OpenRouter citation URLs on non-stream answers and leaves absent citations absent", async () => {
+    const convo = await storage.createConversation({ userId: 1, title: "Research citations" });
+    const expert = createMockExpert(15, convo.id, "Researcher", "Research Analyst");
+    const existingUrl = "https://extension.example.edu/nitrogen-guide";
+    const returnedUrl = "https://usda.example.gov/nutrient-data";
+    const answer = `The extension guide recommends testing first: [guide](${existingUrl})`;
+    mockProviderChat.mockResolvedValue({
+      message: { role: "assistant", content: answer },
+      citations: [existingUrl, returnedUrl],
+    });
+
+    const result = await getExpertResponse(expert, [], "How should I assess nitrogen?", [], [expert.role]);
+    const stored = await storage.createMessage(result);
+
+    expect(result.content).toBe(`${answer}\n\nURLs returned by retrieval:\n- ${returnedUrl}`);
+    expect(result.content.split(existingUrl)).toHaveLength(2);
+    expect(stored.content).toBe(result.content);
+
+    mockProviderChat.mockResolvedValue({
+      message: { role: "assistant", content: "Supporting evidence is unavailable." },
+    });
+    const noSources = await getExpertResponse(expert, [], "How should I assess nitrogen?", [], [expert.role]);
+    expect(noSources.content).toBe("Supporting evidence is unavailable.");
+    expect(noSources.content).not.toContain("URLs returned by retrieval:");
+  });
+
+  it("streams returned OpenRouter citation URLs into the persisted answer", async () => {
+    const convo = await storage.createConversation({ userId: 1, title: "Streaming research citations" });
+    const expert = createMockExpert(16, convo.id, "Researcher", "Research Analyst");
+    const answer = "Check the applicable extension guidance.";
+    const exactUrl = "https://extension.example.edu/crop-guide?year=2026";
+    mockProviderChatStream.mockImplementation(async (_messages: any, _model: string, onToken: (token: string) => void) => {
+      onToken(answer);
+      return {
+        message: { role: "assistant", content: answer },
+        citations: [exactUrl],
+      };
+    });
+    const emitted: string[] = [];
+
+    const result = await getExpertResponseStream(expert, [], "What does the guidance say?", [], [expert.role], token => emitted.push(token));
+    const stored = await storage.createMessage(result);
+
+    expect(emitted.join("")).toBe(result.content);
+    expect(result.content).toBe(`${answer}\n\nURLs returned by retrieval:\n- ${exactUrl}`);
+    expect(stored.content).toBe(result.content);
+  });
+
+  it("sends Perplexity the existing research prompt and bounded recent discussion context", async () => {
+    const previousPerplexityKey = process.env.PERPLEXITY_API_KEY;
+    process.env.PERPLEXITY_API_KEY = "test-perplexity-key";
+    const exactUrl = "https://extension.example.edu/research-source";
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        choices: [{ message: { role: "assistant", content: "The retrieved guidance addresses the question." } }],
+        citations: [exactUrl],
+      }),
+    } as unknown as Response);
+
+    try {
+      const convo = await storage.createConversation({ userId: 1, title: "Perplexity context" });
+      const expert = createMockExpert(17, convo.id, "Researcher", "Research Analyst");
+      const history = [
+        { role: "user", content: `OLDER-CONTEXT-START ${"o".repeat(12_000)}` },
+        { role: "assistant", content: `MIDDLE-CONTEXT ${"m".repeat(12_000)}` },
+        { role: "user", content: `RECENT-CONTEXT ${"r".repeat(12_000)}` },
+      ] as any;
+      const emitted: string[] = [];
+
+      const result = await getExpertResponseStream(
+        expert,
+        history,
+        "Current farmer question?",
+        [],
+        [expert.role],
+        token => emitted.push(token),
+      );
+
+      const request = JSON.parse(String(fetchSpy.mock.calls[0][1]?.body));
+      const systemPrompt = request.messages[0].content as string;
+      const userContext = request.messages[1].content as string;
+      const stored = await storage.createMessage(result);
+
+      expect(systemPrompt).toContain("You are a Research Analyst specializing in agriculture.");
+      expect(systemPrompt).toContain("Never invent or guess source titles, publication dates, quotations, or URLs");
+      expect(userContext).toContain("RECENT-CONTEXT");
+      expect(userContext).toContain("Current question:\nCurrent farmer question?");
+      expect(userContext.length).toBeLessThanOrEqual(24_000);
+      expect(userContext).not.toContain("OLDER-CONTEXT-START");
+      expect(result.content).toContain(exactUrl);
+      expect(emitted.join("")).toBe(result.content);
+      expect(stored.content).toBe(result.content);
+    } finally {
+      fetchSpy.mockRestore();
+      if (previousPerplexityKey === undefined) {
+        delete process.env.PERPLEXITY_API_KEY;
+      } else {
+        process.env.PERPLEXITY_API_KEY = previousPerplexityKey;
+      }
+    }
+  });
+});
+
+describe("empty and incomplete expert responses", () => {
+  beforeEach(() => {
+    mockProviderChat.mockReset();
+    mockProviderChatStream.mockReset();
+  });
+
+  it("replaces an empty successful non-stream response with a warning that persists and allows the next turn", async () => {
+    const convo = await storage.createConversation({ userId: 1, title: "Empty expert response" });
+    const expert = createMockExpert(18, convo.id, "Dr. Terra", "Soil Scientist");
+    mockProviderChat
+      .mockResolvedValueOnce({ message: { role: "assistant", content: " \n " } })
+      .mockResolvedValueOnce({ message: { role: "assistant", content: "The soil report indicates low organic matter." } });
+
+    const incomplete = await getExpertResponse(expert, [], "Review the soil report.", [], [expert.role]);
+    const stored = await storage.createMessage(incomplete);
+    const next = await getExpertResponse(
+      { ...expert, id: 19, name: "Crop Specialist", role: "Crop Specialist" },
+      [],
+      "Continue with the available findings.",
+      [],
+      ["Soil Scientist", "Crop Specialist"],
+    );
+
+    expect(incomplete.content.startsWith("⚠️")).toBe(true);
+    expect(incomplete.content).toContain("Try a shorter request or split it into smaller requests");
+    expect(incomplete.content).toContain("continue with the work available so far");
+    expect(stored.content).toBe(incomplete.content);
+    expect(stored.content.trim()).not.toBe("");
+    expect(next.content).toBe("The soil report indicates low organic matter.");
+  });
+
+  it("replaces an empty successful streamed response with a marked actionable message", async () => {
+    const convo = await storage.createConversation({ userId: 1, title: "Empty streamed response" });
+    const expert = createMockExpert(20, convo.id, "Dr. Terra", "Soil Scientist");
+    mockProviderChatStream.mockResolvedValue({ message: { role: "assistant", content: "  " } });
+    const emitted: string[] = [];
+
+    const result = await getExpertResponseStream(
+      expert,
+      [],
+      "Review the soil report.",
+      [],
+      [expert.role],
+      token => emitted.push(token),
+    );
+    const stored = await storage.createMessage(result);
+
+    expect(result.content.startsWith("⚠️")).toBe(true);
+    expect(result.content).toContain("Try a shorter request or split it into smaller requests");
+    expect(emitted.join("")).toContain(result.content);
+    expect(stored.content).toBe(result.content);
+    expect(stored.content.trim()).not.toBe("");
+  });
+
+  it("replaces output-limit failures with a safe warning and redacts provider payloads", async () => {
+    const convo = await storage.createConversation({ userId: 1, title: "Output limit handling" });
+    const expert = createMockExpert(21, convo.id, "Dr. Terra", "Soil Scientist");
+    const secretPayload = "RAW_PROVIDER_PAYLOAD_SHOULD_NOT_ESCAPE";
+    mockProviderChat.mockRejectedValue(new Error(`Response reached the output limit. ${secretPayload}`));
+    const nonStream = await getExpertResponse(expert, [], "Review this report.", [], [expert.role]);
+
+    const emitted: string[] = [];
+    mockProviderChatStream.mockImplementation(async (_messages: any, _model: string, onToken: (token: string) => void) => {
+      onToken("Partial text before the output limit.");
+      throw new Error(`Response reached the output limit. ${secretPayload}`);
+    });
+    const streamed = await getExpertResponseStream(
+      expert,
+      [],
+      "Review this report.",
+      [],
+      [expert.role],
+      token => emitted.push(token),
+    );
+
+    for (const response of [nonStream, streamed]) {
+      expect(response.content.startsWith("⚠️")).toBe(true);
+      expect(response.content).toContain("Try a shorter request or split it into smaller requests");
+      expect(response.content).not.toContain(secretPayload);
+    }
+    expect(emitted.join("")).toContain("Partial text before the output limit.");
+    expect(emitted.join("")).toContain("⚠️");
+    expect(emitted.join("")).not.toContain(secretPayload);
   });
 });
 
@@ -579,7 +842,7 @@ describe("PUT /api/protected/conversations/:id (charter + title)", () => {
     await registerRoutes(app);
   });
 
-  beforeEach(() => mockSetTurnBudget.mockReset());
+  beforeEach(() => mockPersistAutonomySettings.mockReset().mockResolvedValue(undefined));
 
   async function registerAndLogin(
     agent: request.SuperAgentTest,
@@ -632,28 +895,28 @@ describe("PUT /api/protected/conversations/:id (charter + title)", () => {
       .send({ turnBudget: 40 });
     expect(set.status).toBe(200);
     expect(set.body.turnBudget).toBe(40);
-    expect(mockSetTurnBudget).toHaveBeenCalledWith(40);
+    expect(mockPersistAutonomySettings).toHaveBeenCalledWith(convo.id, { maxAutonomousTurns: 40 });
 
     const omitted = await agent
       .put(`/api/protected/conversations/${convo.id}`)
       .send({ title: "Budget preserved" });
     expect(omitted.status).toBe(200);
     expect(omitted.body.turnBudget).toBe(40);
-    expect(mockSetTurnBudget).toHaveBeenCalledTimes(1);
+    expect(mockPersistAutonomySettings).toHaveBeenCalledTimes(1);
 
     const zero = await agent
       .put(`/api/protected/conversations/${convo.id}`)
       .send({ turnBudget: 0 });
     expect(zero.status).toBe(200);
     expect(zero.body.turnBudget).toBeNull();
-    expect(mockSetTurnBudget).toHaveBeenLastCalledWith(null);
+    expect(mockPersistAutonomySettings).toHaveBeenLastCalledWith(convo.id, { maxAutonomousTurns: null });
 
     const explicitNull = await agent
       .put(`/api/protected/conversations/${convo.id}`)
       .send({ turnBudget: null });
     expect(explicitNull.status).toBe(200);
     expect(explicitNull.body.turnBudget).toBeNull();
-    expect(mockSetTurnBudget).toHaveBeenCalledTimes(3);
+    expect(mockPersistAutonomySettings).toHaveBeenCalledTimes(3);
 
     const lowerBound = await agent
       .put(`/api/protected/conversations/${convo.id}`)
@@ -663,7 +926,7 @@ describe("PUT /api/protected/conversations/:id (charter + title)", () => {
       .send({ turnBudget: 100 });
     expect(lowerBound.body.turnBudget).toBe(1);
     expect(upperBound.body.turnBudget).toBe(100);
-    expect(mockSetTurnBudget).toHaveBeenLastCalledWith(100);
+    expect(mockPersistAutonomySettings).toHaveBeenLastCalledWith(convo.id, { maxAutonomousTurns: 100 });
   });
 
   it("rejects invalid turn budgets without changing the stored value", async () => {

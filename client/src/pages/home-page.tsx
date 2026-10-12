@@ -52,8 +52,7 @@ export default function HomePage() {
   const [interactionMode, setInteractionMode] = useState<InteractionMode>("idle");
   const [isAutonomousEnabled, setIsAutonomousEnabled] = useState<boolean>(true); // Default to true initially
   const [isProcessing, setIsProcessing] = useState<boolean>(false); // Track if experts are currently responding
-  // We might also want to store maxAutonomousTurns if we allow setting it from UI
-  // const [maxAutonomousTurns, setMaxAutonomousTurns] = useState<number>(0);
+  const [expertTurnCounts, setExpertTurnCounts] = useState<{ consumed: number; remaining: number } | null>(null);
 
   // A busy discussion may queue farmer input for the next Moderator route.
   // Keep it visible until pickup; an idle state after exhausted recovery means
@@ -423,12 +422,14 @@ export default function HomePage() {
         body.maxTurns = maxTurns;
       }
       const res = await apiRequest("POST", `/api/protected/conversations/${activeConversation}/autonomous/enable`, body);
+      if (!res.ok) throw new Error((await res.json()).message || "Failed to enable autonomous mode.");
       return await res.json();
     },
     onSuccess: () => {
       toast({
         title: "Autonomous mode enabled",
       });
+      setIsAutonomousEnabled(true);
        // State update will come via WebSocket
     },
     onError: (error: Error) => {
@@ -445,12 +446,14 @@ export default function HomePage() {
     mutationFn: async () => {
       if (!activeConversation) throw new Error("No active conversation");
       const res = await apiRequest("POST", `/api/protected/conversations/${activeConversation}/autonomous/disable`, {});
+      if (!res.ok) throw new Error((await res.json()).message || "Failed to disable autonomous mode.");
       return await res.json();
     },
     onSuccess: () => {
       toast({
         title: "Autonomous mode disabled",
       });
+      setIsAutonomousEnabled(false);
        // State update will come via WebSocket
     },
     onError: (error: Error) => {
@@ -512,13 +515,26 @@ export default function HomePage() {
   };
 
   // Export the conversation's week-by-week plan as an .ics calendar.
-  // Enabled only when the conversation has artifacts or files to schedule from.
+  // Uploaded reference files cannot produce calendar events; only plan-like
+  // artifacts and current Expert-generated Markdown are candidates.
   const hasSchedulableSource =
-    (messages ?? []).some((m) => (m.artifacts?.length ?? 0) > 0) || (files ?? []).length > 0;
+    (messages ?? []).some((m) => (m.artifacts?.length ?? 0) > 0) ||
+    (files ?? []).some((file) =>
+      !file.supersededAt &&
+      file.uploadedBy.startsWith("Expert:") &&
+      file.filename.toLowerCase().endsWith(".md")
+    );
 
   // The active conversation's record from the list query (title, charter).
   const activeConversationData =
     conversations?.find((conversation) => conversation.id === activeConversation) ?? null;
+  useEffect(() => {
+    setExpertTurnCounts(null);
+  }, [activeConversation]);
+  useEffect(() => {
+    const snapshot = activeConversationData?.orchestratorState;
+    setIsAutonomousEnabled(typeof snapshot?.isAutonomousEnabled === "boolean" ? snapshot.isAutonomousEnabled : true);
+  }, [activeConversation, activeConversationData?.orchestratorState]);
   // G13: older conversation responses may omit turnBudget; the dialog applies
   // the standard 25-turn default in that case. Null means "Let it run".
   const activeTurnBudget = (
@@ -543,7 +559,7 @@ export default function HomePage() {
       // Persistence is best-effort; the nudge stays hidden for this session.
     }
   };
-  const exportIcs = () => {
+  const exportIcs = async (start: string) => {
     if (!activeConversation) {
       toast({
         title: "No active conversation",
@@ -553,7 +569,27 @@ export default function HomePage() {
       return;
     }
 
-    window.open(`/api/protected/conversations/${activeConversation}/export.ics`, "_blank");
+    try {
+      const response = await fetch(`/api/protected/conversations/${activeConversation}/export.ics?start=${encodeURIComponent(start)}`, {
+        credentials: "include",
+      });
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || error.message || "Could not export the calendar.");
+      }
+      const url = URL.createObjectURL(await response.blob());
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = response.headers.get("Content-Disposition")?.match(/filename="([^"]+)"/)?.[1] || "roundtable.ics";
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      toast({
+        title: "Calendar export unavailable",
+        description: error instanceof Error ? error.message : "Could not export the calendar.",
+        variant: "destructive",
+      });
+    }
   };
   
   // Create the conversation before opening the selector so experts are added
@@ -771,6 +807,12 @@ export default function HomePage() {
               debugLog(`[UI State] Setting isAutonomousEnabled to: ${parsedData.isAutonomousEnabled}`);
               setIsAutonomousEnabled(parsedData.isAutonomousEnabled);
             }
+            if (Number.isInteger(parsedData.expertTurnsConsumed) && Number.isInteger(parsedData.expertTurnsRemaining)) {
+              setExpertTurnCounts({
+                consumed: parsedData.expertTurnsConsumed,
+                remaining: parsedData.expertTurnsRemaining,
+              });
+            }
             break;
 
           case "message_queued":
@@ -845,6 +887,7 @@ export default function HomePage() {
                 if (oldData.some(msg => msg.id === parsedData.message.id)) return oldData;
                 return [...oldData, parsedData.message];
               });
+              queryClient.invalidateQueries({ queryKey: [`/api/protected/conversations/${activeConversation}/files`] });
             }
             break;
 
@@ -1018,8 +1061,8 @@ export default function HomePage() {
             )}
             {/* === Interaction Control Bar (Positioned at the top of this column) === */}
             {activeConversation && (
-                 <div className="flex-shrink-0 flex items-center justify-between px-6 py-3 border-b border-farm-tan/30 bg-gradient-to-r from-farm-powder/20 to-white shadow-sm">
-                     <div className="flex items-center gap-3">
+                 <div className="flex-shrink-0 flex flex-wrap items-center justify-between gap-2 px-3 md:px-6 py-3 border-b border-farm-tan/30 bg-gradient-to-r from-farm-powder/20 to-white shadow-sm">
+                     <div className="flex flex-wrap items-center gap-2 md:gap-3">
                          {isMobile && (
                            <Button
                              variant="ghost" 
@@ -1038,11 +1081,16 @@ export default function HomePage() {
                                           font-medium capitalize`}>
                              {interactionMode.replace('_', ' ')}
                          </Badge>
-                          <span className="text-sm font-semibold text-farm-blue ml-4">Autonomous:</span>
+                          <span className="text-sm font-semibold text-farm-blue md:ml-4">Autonomous:</span>
                          <Badge variant={isAutonomousEnabled ? 'default' : 'secondary'}
                                 className={`${isAutonomousEnabled ? 'bg-farm-blue/20 text-farm-blue border-farm-blue' : 'bg-neutral-200 text-neutral-600'} font-medium`}>
                              {isAutonomousEnabled ? 'Enabled' : 'Disabled'}
                          </Badge>
+                         {expertTurnCounts && (
+                           <span className="text-xs text-neutral-600" aria-live="polite">
+                             Expert turns: {expertTurnCounts.consumed} used · {expertTurnCounts.remaining} remaining
+                           </span>
+                         )}
                          {activeHasCharter && (
                            <Badge
                              variant="outline"
@@ -1054,7 +1102,7 @@ export default function HomePage() {
                            </Badge>
                          )}
                      </div>
-                     <div className="flex items-center gap-3">
+                     <div className="flex flex-wrap items-center gap-2 md:gap-3">
                           {/* G6: view/edit the council charter for the active conversation */}
                           <Button
                               variant="outline"

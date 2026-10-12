@@ -1,0 +1,2 @@
+# Preserve downloaded calendar evidence exactly, including required CRLF endings.
+docs/qa/**/*.ics -text whitespace=-blank-at-eol,cr-at-eol

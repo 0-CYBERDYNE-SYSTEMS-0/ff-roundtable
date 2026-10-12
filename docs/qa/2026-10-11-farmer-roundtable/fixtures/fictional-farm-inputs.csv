@@ -1,0 +1,14 @@
+field,value,unit,source
+scenario,fictional QA farm,,test fixture; not an actual farm recommendation
+location,Ames Iowa USA,,fictional farm profile
+crop,corn,,fictional farm profile
+area,120,acres,fictional farm profile
+yield_goal,180,bushels_per_acre,farmer target; unverified
+soil_pH,6.3,,fictional soil laboratory result
+organic_matter,3.4,percent,fictional soil laboratory result
+previous_crop,soybean,,farmer supplied
+nitrogen_budget,85,USD_per_acre,farmer ceiling
+urea_price,550,USD_per_ton,fictional quote; do not treat as current market price
+UAN32_price,420,USD_per_ton,fictional quote; do not treat as current market price
+forecast,unavailable,,weather API unavailable; do not invent forecast
+plan_start,2027-04-05,ISO_date,planning scenario anchor

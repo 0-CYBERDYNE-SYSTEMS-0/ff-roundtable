@@ -1,9 +1,32 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Plus, RefreshCw, Download, Upload, FileDown, FileText, Image, ArrowRight, CalendarDays } from "lucide-react";
 import { Insight, File as FileSchema, Conversation, Expert } from "@shared/schema";
-import { format } from "date-fns";
+import { addDays, format } from "date-fns";
+
+type CalendarPreview = {
+  eventCount: number;
+  startDate: string;
+  year: number;
+  timeZone: string;
+  scheduleVersion: string;
+};
+
+function nextMondayDate(): string {
+  const today = new Date();
+  return format(addDays(today, ((8 - today.getDay()) % 7) || 7), "yyyy-MM-dd");
+}
+
+function readCalendarStart(conversationId: number | null): string | null {
+  if (!conversationId) return null;
+  try {
+    const value = localStorage.getItem(`farmFriendCalendarStart:${conversationId}`);
+    return value && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
 
 interface SidebarPanelProps {
   conversations: Conversation[];
@@ -11,7 +34,7 @@ interface SidebarPanelProps {
   files: FileSchema[];
   onStartNewSession: () => void;
   onExportMarkdown: () => void;
-  onExportIcs: () => void;
+  onExportIcs: (start: string) => void;
   canExportIcs?: boolean;
   onFileUpload: (file: File) => void;
   onSelectConversation: (id: number) => void;
@@ -53,7 +76,67 @@ export default function SidebarPanel({
   experts = []
 }: SidebarPanelProps) {
   const [activeTab, setActiveTab] = useState<'conversations' | 'insights' | 'files'>('insights');
+  const [calendarStart, setCalendarStart] = useState(() => readCalendarStart(activeConversationId) ?? nextMondayDate());
+  const [calendarPreview, setCalendarPreview] = useState<CalendarPreview | null>(null);
+  const [isLoadingCalendarPreview, setIsLoadingCalendarPreview] = useState(false);
+  const [calendarPreviewError, setCalendarPreviewError] = useState<"empty" | "unavailable" | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    setCalendarStart(readCalendarStart(activeConversationId) ?? nextMondayDate());
+    setCalendarPreview(null);
+    setIsLoadingCalendarPreview(false);
+    setCalendarPreviewError(null);
+  }, [activeConversationId]);
+
+  useEffect(() => {
+    if (!activeConversationId || !canExportIcs || !calendarStart) {
+      setCalendarPreview(null);
+      setIsLoadingCalendarPreview(false);
+      setCalendarPreviewError(null);
+      return;
+    }
+
+    let cancelled = false;
+    const timer = window.setTimeout(async () => {
+      setIsLoadingCalendarPreview(true);
+      setCalendarPreviewError(null);
+      try {
+        const response = await fetch(
+          `/api/protected/conversations/${activeConversationId}/export.ics?preview=1&start=${encodeURIComponent(calendarStart)}`,
+          { credentials: "include" },
+        );
+        if (!response.ok) {
+          const result = await response.json().catch(() => ({})) as { error?: string };
+          if (response.status === 422 && result.error?.includes("No schedulable items")) {
+            if (!cancelled) {
+              setCalendarPreview(null);
+              setCalendarPreviewError("empty");
+            }
+            return;
+          }
+          throw new Error("Schedule preview unavailable");
+        }
+        const preview = await response.json() as CalendarPreview;
+        if (!cancelled) {
+          setCalendarPreview(preview);
+          setCalendarPreviewError(null);
+        }
+      } catch {
+        if (!cancelled) {
+          setCalendarPreview(null);
+          setCalendarPreviewError("unavailable");
+        }
+      } finally {
+        if (!cancelled) setIsLoadingCalendarPreview(false);
+      }
+    }, 150);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [activeConversationId, canExportIcs, calendarStart]);
 
   const handleFileUploadClick = () => {
     fileInputRef.current?.click();
@@ -90,12 +173,44 @@ export default function SidebarPanel({
             <Download className="mr-2 h-4 w-4" />
             Export as Markdown
           </Button>
+          <label className="block mt-2 text-sm text-farm-blue">
+            Week 1 starts
+            <input
+              type="date"
+              value={calendarStart}
+              onChange={(event) => {
+                const value = event.target.value;
+                setCalendarStart(value);
+                setCalendarPreview(null);
+                setCalendarPreviewError(null);
+                if (activeConversationId) {
+                  try {
+                    localStorage.setItem(`farmFriendCalendarStart:${activeConversationId}`, value);
+                  } catch {
+                    // The selected anchor remains active for this session.
+                  }
+                }
+              }}
+              className="block w-full mt-1 rounded border border-farm-tan/60 px-2 py-1 text-neutral-900"
+            />
+          </label>
+          <p className="mt-1 text-xs text-neutral-600" aria-live="polite">
+            {isLoadingCalendarPreview
+              ? "Checking the current plan…"
+              : calendarPreview
+                ? `${calendarPreview.scheduleVersion} · ${calendarPreview.eventCount} all-day events · starts ${calendarPreview.startDate} (${calendarPreview.year}) · ${calendarPreview.timeZone}`
+                : calendarPreviewError === "unavailable"
+                  ? "Calendar preview is unavailable. Try again when the connection is restored."
+                  : calendarPreviewError === "empty" || !canExportIcs || !activeConversationId
+                    ? "No dated plan yet. Ask the council to create a week-by-week plan before exporting."
+                    : "Checking the current plan…"}
+          </p>
           <Button
             variant="outline"
             className="w-full mt-2 border-2 border-farm-green text-farm-green hover:bg-farm-green hover:text-white rounded-lg px-4 py-2.5 flex items-center justify-center transition-all duration-200 font-medium"
-            onClick={onExportIcs}
-            disabled={!canExportIcs}
-            title={canExportIcs ? "Export the week-by-week plan to your calendar (.ics)" : "No schedulable plan yet — ask an expert for a week-by-week plan, or upload files, first"}
+            onClick={() => onExportIcs(calendarStart)}
+            disabled={!calendarPreview || !calendarStart || isLoadingCalendarPreview}
+            title={calendarPreview ? "Export the week-by-week plan to your calendar (.ics)" : "Create a dated plan with the council before exporting"}
           >
             <CalendarDays className="mr-2 h-4 w-4" />
             Export .ics
@@ -279,7 +394,14 @@ export default function SidebarPanel({
                         ) : (
                           <FileText className="text-farm-blue h-5 w-5" />
                         )}
-                        <span className="text-sm truncate max-w-[160px] font-medium text-neutral-700">{file.filename}</span>
+                        <div className="min-w-0">
+                          <span className="block text-sm truncate max-w-[160px] font-medium text-neutral-700">{file.filename}</span>
+                          {file.deliverableId && file.version != null && (
+                            <span className="block text-xs text-neutral-500">
+                              v{file.version} · {file.supersededAt ? "Superseded" : "Current"} · {new Date(file.uploadedAt ?? Date.now()).toLocaleString()}
+                            </span>
+                          )}
+                        </div>
                       </div>
                       <a
                         href={file.fileUrl}

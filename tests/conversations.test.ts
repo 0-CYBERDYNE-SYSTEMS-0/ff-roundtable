@@ -21,6 +21,8 @@ import { describe, it, expect, beforeAll, beforeEach, vi } from "vitest";
 import request from "supertest";
 import express from "express";
 import type { Express } from "express";
+import fs from "node:fs";
+import path from "node:path";
 
 // ── Force MemStorage BEFORE any server imports ──
 process.env.DATABASE_URL = "";
@@ -37,12 +39,16 @@ const {
   mockGetModeratorNextSpeakerSuggestion,
   mockGenerateInsights,
   mockGenerateClosingSynthesis,
+  mockGetFarmerFileIntent,
+  mockPersistAutonomySettings,
 } = vi.hoisted(() => ({
   mockProcessMessageTurnBased: vi.fn(),
   mockGetExpertResponseStream: vi.fn(),
   mockGetModeratorNextSpeakerSuggestion: vi.fn(),
   mockGenerateInsights: vi.fn(),
   mockGenerateClosingSynthesis: vi.fn(),
+  mockGetFarmerFileIntent: vi.fn().mockReturnValue(null),
+  mockPersistAutonomySettings: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("../server/orchestrator", () => ({
@@ -54,6 +60,8 @@ vi.mock("../server/orchestrator", () => ({
     disableAutonomous() {}
   },
   getConversationState: vi.fn().mockReturnValue(null),
+  getFarmerFileIntent: mockGetFarmerFileIntent,
+  persistAutonomySettings: mockPersistAutonomySettings,
 }));
 
 // ── Mock AI module (generateSystemPrompt used when creating experts) ──
@@ -196,6 +204,8 @@ describe("Conversations & Expert Flows", () => {
     mockGetModeratorNextSpeakerSuggestion.mockReset();
     mockGenerateInsights.mockReset().mockResolvedValue(undefined);
     mockGenerateClosingSynthesis.mockReset().mockResolvedValue(undefined);
+    mockGetFarmerFileIntent.mockReset().mockReturnValue(null);
+    mockPersistAutonomySettings.mockReset().mockResolvedValue(undefined);
   });
 
   // ─────────────────────────────────────────────────────────────────
@@ -687,6 +697,110 @@ describe("Conversations & Expert Flows", () => {
       expect(mockProcessMessageTurnBased).toHaveBeenCalledTimes(1);
     });
 
+    it("answers a current-file link request from storage without starting a provider turn", async () => {
+      const agent = request.agent(app);
+      await login(agent);
+      const conversation = await createConversation(agent, "Stored SOP link");
+      const file = await storage.createFile({
+        conversationId: conversation.id,
+        filename: "nitrogen-sop.md",
+        fileUrl: "/uploads/private-nitrogen-sop.md",
+        fileType: "text/markdown",
+        uploadedBy: "Expert: File Creator",
+        deliverableId: "nitrogen-sop",
+        generationRequestId: "generation-1",
+        version: 1,
+      });
+      mockGetFarmerFileIntent.mockReturnValue("retrieve");
+
+      const res = await agent
+        .post(`/api/protected/conversations/${conversation.id}/messages`)
+        .send({ content: "Please just send me the current SOP link." });
+
+      expect(res.status).toBe(201);
+      expect(res.body.role).toBe("user");
+      expect(mockProcessMessageTurnBased).not.toHaveBeenCalled();
+      const messages = await storage.getConversationMessages(conversation.id);
+      expect(messages.at(-1)?.content).toContain(
+        `/api/protected/conversations/${conversation.id}/files/${file.id}/download`,
+      );
+      expect(messages.at(-1)?.content).toContain("nitrogen-sop.md");
+      expect(await storage.getConversationFiles(conversation.id)).toHaveLength(1);
+    });
+
+    it("retrieves a legacy calendar alongside a canonical SOP", async () => {
+      const agent = request.agent(app);
+      await login(agent);
+      const conversation = await createConversation(agent, "Legacy calendar link");
+      await storage.createFile({
+        conversationId: conversation.id,
+        filename: "nitrogen-sop.md",
+        fileUrl: "/uploads/nitrogen-sop.md",
+        fileType: "text/markdown",
+        uploadedBy: "Expert: File Creator",
+        deliverableId: "nitrogen-sop",
+        generationRequestId: "generation-sop-1",
+        version: 1,
+      });
+      const legacyCalendar = await storage.createFile({
+        conversationId: conversation.id,
+        filename: "nitrogen-calendar.ics",
+        fileUrl: "/uploads/nitrogen-calendar.ics",
+        fileType: "text/calendar",
+        uploadedBy: "Expert: File Creator",
+      });
+      mockGetFarmerFileIntent.mockReturnValue("retrieve");
+
+      const res = await agent
+        .post(`/api/protected/conversations/${conversation.id}/messages`)
+        .send({ content: "Please send me the saved calendar link." });
+
+      expect(res.status).toBe(201);
+      expect(mockProcessMessageTurnBased).not.toHaveBeenCalled();
+      const messages = await storage.getConversationMessages(conversation.id);
+      expect(messages.at(-1)?.content).toContain(
+        `/api/protected/conversations/${conversation.id}/files/${legacyCalendar.id}/download`,
+      );
+      expect(messages.at(-1)?.content).toContain("nitrogen-calendar.ics");
+      expect(messages.at(-1)?.content).not.toContain("nitrogen-sop.md");
+    });
+
+    it("prefers the current canonical version over a newer legacy file of the same kind", async () => {
+      const agent = request.agent(app);
+      await login(agent);
+      const conversation = await createConversation(agent, "Canonical SOP link");
+      const canonical = await storage.createFile({
+        conversationId: conversation.id,
+        filename: "nitrogen-sop.md",
+        fileUrl: "/uploads/nitrogen-sop-v2.md",
+        fileType: "text/markdown",
+        uploadedBy: "Expert: File Creator",
+        deliverableId: "nitrogen-sop",
+        generationRequestId: "generation-sop-2",
+        version: 2,
+      });
+      await new Promise(resolve => setTimeout(resolve, 5));
+      await storage.createFile({
+        conversationId: conversation.id,
+        filename: "nitrogen-sop.md",
+        fileUrl: "/uploads/legacy-nitrogen-sop.md",
+        fileType: "text/markdown",
+        uploadedBy: "Expert: File Creator",
+      });
+      mockGetFarmerFileIntent.mockReturnValue("retrieve");
+
+      const res = await agent
+        .post(`/api/protected/conversations/${conversation.id}/messages`)
+        .send({ content: "Please send me the latest SOP link." });
+
+      expect(res.status).toBe(201);
+      const messages = await storage.getConversationMessages(conversation.id);
+      expect(messages.at(-1)?.content).toContain(
+        `/api/protected/conversations/${conversation.id}/files/${canonical.id}/download`,
+      );
+      expect(messages.at(-1)?.content).not.toContain("legacy-nitrogen-sop.md");
+    });
+
     it("stores message and returns it before orchestrator completes (async fire-and-forget)", async () => {
       const agent = request.agent(app);
       await login(agent);
@@ -857,6 +971,30 @@ describe("Conversations & Expert Flows", () => {
     });
   });
 
+  describe("persisted autonomy controls", () => {
+    it("allows autonomy settings to change while no run state is in memory", async () => {
+      const agent = request.agent(app);
+      await login(agent);
+      const conversation = await createConversation(agent, "Cold-start settings");
+
+      const disabled = await agent
+        .post(`/api/protected/conversations/${conversation.id}/autonomous/disable`)
+        .send({});
+      expect(disabled.status).toBe(200);
+      expect(mockPersistAutonomySettings).toHaveBeenCalledWith(conversation.id, { isAutonomousEnabled: false });
+
+      const enabled = await agent
+        .post(`/api/protected/conversations/${conversation.id}/autonomous/enable`)
+        .send({ maxTurns: 4 });
+      expect(enabled.status).toBe(200);
+      expect(mockPersistAutonomySettings).toHaveBeenLastCalledWith(conversation.id, {
+        isAutonomousEnabled: true,
+        maxAutonomousTurns: 4,
+      });
+      expect((await storage.getConversation(conversation.id))?.turnBudget).toBe(4);
+    });
+  });
+
   // ─────────────────────────────────────────────────────────────────
   // Get Messages
   // ─────────────────────────────────────────────────────────────────
@@ -929,6 +1067,51 @@ describe("Conversations & Expert Flows", () => {
         `/api/protected/conversations/${convo.id}/messages`,
       );
       expect(res.status).toBe(404);
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────
+  // File downloads and ownership
+  // ─────────────────────────────────────────────────────────────────
+
+  describe("File download routes", () => {
+    it("serves stored bytes to the owner and denies guessed links to another user", async () => {
+      const owner = request.agent(app);
+      await registerAndLogin(owner, "fileDownloadOwner", "pass123");
+      const conversation = await createConversation(owner, "Private file");
+      const filename = `download-test-${Date.now()}-${Math.random().toString(16).slice(2)}.txt`;
+      const uploadDir = path.join(process.cwd(), "uploads");
+      const filePath = path.join(uploadDir, filename);
+      const bytes = "stored content for authorized download";
+      fs.mkdirSync(uploadDir, { recursive: true });
+      fs.writeFileSync(filePath, bytes);
+
+      try {
+        const file = await storage.createFile({
+          conversationId: conversation.id,
+          filename,
+          fileUrl: `/uploads/${filename}`,
+          fileType: "text/plain",
+          uploadedBy: "ai",
+        });
+        const canonicalUrl = `/api/protected/conversations/${conversation.id}/files/${file.id}/download`;
+
+        const list = await owner.get(`/api/protected/conversations/${conversation.id}/files`);
+        expect(list.status).toBe(200);
+        expect(list.body[0].fileUrl).toBe(canonicalUrl);
+
+        const download = await owner.get(canonicalUrl);
+        expect(download.status).toBe(200);
+        expect(download.text).toBe(bytes);
+
+        const otherUser = request.agent(app);
+        await registerAndLogin(otherUser, "fileDownloadOther", "pass456");
+        expect((await otherUser.get(canonicalUrl)).status).toBe(404);
+        expect((await otherUser.get(`/uploads/${filename}`)).status).toBe(404);
+        expect((await request(app).get(`/uploads/${filename}`)).status).toBe(401);
+      } finally {
+        fs.rmSync(filePath, { force: true });
+      }
     });
   });
 

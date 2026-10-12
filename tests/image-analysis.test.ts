@@ -104,10 +104,10 @@ function okChatResponse(content = "I see a healthy field.") {
   };
 }
 
-function sseStreamResponse(content: string) {
+function sseStreamResponse(content: string, finishReason?: string) {
   const encoder = new TextEncoder();
   const chunks = [
-    `data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\n`,
+    `data: ${JSON.stringify({ choices: [{ delta: { content }, ...(finishReason ? { finish_reason: finishReason } : {}) }] })}\n\n`,
     `data: [DONE]\n\n`,
   ];
   let i = 0;
@@ -349,6 +349,8 @@ describe("expert message building with images (stream path)", () => {
 describe("honest vision failure", () => {
   const HONEST_MSG =
     "⚠️ Terra could not analyze the image — this model doesn't accept image input. Try a vision-capable model (e.g. switch this expert to one, or use BYOK).";
+  const INCOMPLETE_MSG =
+    "⚠️ No complete response was received. Try a shorter request or split it into smaller requests, then retry. You can also continue with the work available so far.";
 
   beforeEach(() => {
     mockFetch.mockReset();
@@ -420,28 +422,29 @@ describe("honest vision failure", () => {
     expect(fine.content).toBe("The image shows erosion.");
   });
 
-  it("does not swallow non-vision errors (500, or 400 without vision keywords)", async () => {
+  it("returns a safe incomplete message for non-vision errors without exposing provider payloads", async () => {
     const png = makeImageFile("photo.png", "bytes", new Date());
 
-    mockFetch.mockResolvedValueOnce(errorResponse(500, "Internal server error"));
+    mockFetch.mockResolvedValueOnce(errorResponse(500, "Internal server error RAW_PROVIDER_BODY"));
     const serverError = await getExpertResponse(
       makeImageryExpert(), [], "Hi", [png], ["Imagery Specialist"]
     );
-    expect(serverError.content).toMatch(/^\(Error generating response for Terra:/);
-    expect(serverError.content).toContain("500");
+    expect(serverError.content).toBe(INCOMPLETE_MSG);
+    expect(serverError.content).not.toContain("Internal server error");
+    expect(serverError.content).not.toContain("RAW_PROVIDER_BODY");
 
     mockFetch.mockResolvedValueOnce(errorResponse(400, "Insufficient credits"));
     const creditError = await getExpertResponse(
       makeImageryExpert(), [], "Hi", [png], ["Imagery Specialist"]
     );
-    expect(creditError.content).toMatch(/^\(Error generating response for Terra:/);
+    expect(creditError.content).toBe(INCOMPLETE_MSG);
 
     // A vision-looking 400 on a turn WITHOUT image parts must also stay generic.
     mockFetch.mockResolvedValueOnce(errorResponse(400, "image something"));
     const noImage = await getExpertResponse(
       makeImageryExpert(), [], "Hi", [], ["Imagery Specialist"]
     );
-    expect(noImage.content).toMatch(/^\(Error generating response for Terra:/);
+    expect(noImage.content).toBe(INCOMPLETE_MSG);
   });
 
   it("keeps rate limits generic even when the body echoes a vision-slug model name (429)", async () => {
@@ -452,8 +455,44 @@ describe("honest vision failure", () => {
     const result = await getExpertResponse(
       makeImageryExpert(), [], "What is this?", [png], ["Imagery Specialist"]
     );
-    expect(result.content).toMatch(/^\(Error generating response for Terra:/);
+    expect(result.content).toBe(INCOMPLETE_MSG);
     expect(result.content).not.toBe(HONEST_MSG);
+    expect(result.content).not.toContain("vision-instruct");
+  });
+
+  it("replaces empty successful responses and output-limited partials on both paths", async () => {
+    mockFetch.mockResolvedValueOnce(okChatResponse("  \n"));
+    const empty = await getExpertResponse(
+      makeImageryExpert(), [], "Summarize the available image findings.", [], ["Imagery Specialist"]
+    );
+
+    mockFetch.mockResolvedValueOnce(sseStreamResponse("Partial streamed text.", "length"));
+    const tokens: string[] = [];
+    const limitedStream = await getExpertResponseStream(
+      makeImageryExpert(),
+      [],
+      "Summarize the available image findings.",
+      [],
+      ["Imagery Specialist"],
+      token => tokens.push(token),
+    );
+
+    const outputLimitBody = {
+      ok: true,
+      json: async () => ({
+        choices: [{ message: { role: "assistant", content: "Partial non-stream text." }, finish_reason: "length" }],
+      }),
+    };
+    mockFetch.mockResolvedValueOnce(outputLimitBody);
+    const limitedNonStream = await getExpertResponse(
+      makeImageryExpert(), [], "Summarize the available image findings.", [], ["Imagery Specialist"]
+    );
+
+    expect(empty.content).toBe(INCOMPLETE_MSG);
+    expect(limitedStream.content).toBe(INCOMPLETE_MSG);
+    expect(limitedNonStream.content).toBe(INCOMPLETE_MSG);
+    expect(tokens.join("")).toContain("Partial streamed text.");
+    expect(tokens.join("")).toContain(INCOMPLETE_MSG);
   });
 
   it("recognizes a 200-wrapped provider error object (status-less) as a vision rejection", async () => {

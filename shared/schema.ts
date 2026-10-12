@@ -1,5 +1,6 @@
 import { pgTable, pgEnum, text, serial, integer, boolean, timestamp, json, jsonb, uniqueIndex, type AnyPgColumn } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
+import { sql } from "drizzle-orm";
 import { z } from "zod";
 
 export const users = pgTable("users", {
@@ -112,8 +113,25 @@ export const files = pgTable("files", {
   fileUrl: text("file_url").notNull(),
   fileType: text("file_type").notNull(),
   uploadedBy: text("uploaded_by").notNull(),
+  // Generated deliverables use a server-owned identity across revisions.
+  // Legacy uploads and files remain unversioned when these values are null.
+  deliverableId: text("deliverable_id"),
+  generationRequestId: text("generation_request_id"),
+  version: integer("version"),
+  supersedesFileId: integer("supersedes_file_id").references((): AnyPgColumn => files.id),
+  supersededAt: timestamp("superseded_at"),
   uploadedAt: timestamp("uploaded_at").defaultNow(),
-});
+}, (table) => ({
+  generationRequestUnique: uniqueIndex("files_generation_request_unique")
+    .on(table.conversationId, table.generationRequestId)
+    .where(sql`${table.generationRequestId} is not null`),
+  deliverableVersionUnique: uniqueIndex("files_deliverable_version_unique")
+    .on(table.conversationId, table.deliverableId, table.version)
+    .where(sql`${table.deliverableId} is not null and ${table.version} is not null`),
+  currentDeliverableUnique: uniqueIndex("files_current_deliverable_unique")
+    .on(table.conversationId, table.deliverableId)
+    .where(sql`${table.deliverableId} is not null and ${table.supersededAt} is null`),
+}));
 
 export const insights = pgTable("insights", {
   id: serial("id").primaryKey(),
@@ -239,7 +257,32 @@ export type Message = Omit<typeof messages.$inferSelect, 'artifacts' | 'mentions
 };
 
 export type InsertFile = z.infer<typeof insertFileSchema>;
-export type File = typeof files.$inferSelect;
+export type File = Omit<typeof files.$inferSelect, "deliverableId" | "generationRequestId" | "version" | "supersedesFileId" | "supersededAt"> & {
+  deliverableId?: string | null;
+  generationRequestId?: string | null;
+  version?: number | null;
+  supersedesFileId?: number | null;
+  supersededAt?: Date | null;
+};
+
+export type DeliverableGenerationRequest = {
+  deliverableId: string;
+  generationRequestId: string;
+  mode: "create" | "revise";
+  expectedCurrentFileId?: number;
+  constraints: {
+    format?: string;
+    maxCharacters?: number;
+    requiredSections?: string[];
+    taskCount?: number;
+    datedTasks?: boolean;
+  };
+};
+
+export type SaveDeliverableVersionResult = {
+  file: File;
+  created: boolean;
+};
 
 export type InsertInsight = z.infer<typeof insertInsightSchema>;
 export type Insight = typeof insights.$inferSelect;

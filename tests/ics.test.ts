@@ -668,6 +668,12 @@ describe("extractScheduleRows — Expert-generated .md files", () => {
     expect(rows).toEqual([]);
   });
 
+  it("does not export superseded deliverable versions", () => {
+    const oldVersion = makeFile({ supersededAt: new Date("2026-04-01T00:00:00Z"), version: 1 });
+    const rows = extractScheduleRows([], [oldVersion], () => mdContent);
+    expect(rows).toEqual([]);
+  });
+
   it("caps md descriptions at 200 chars", () => {
     const longMd = "Week 1\n" + ("Filler line with plenty of words. ".repeat(10) + "\n").repeat(5);
     const rows = extractScheduleRows([], [makeFile()], () => longMd);
@@ -911,6 +917,31 @@ describe("GET /api/protected/conversations/:id/export.ics", () => {
     expect(res.text).toContain("DTEND;VALUE=DATE:20260407\r\n"); // exclusive +1 day
     expect(res.text).toContain("DTSTART;VALUE=DATE:20260413\r\n"); // week 2
     expect(res.text).toContain("DTSTART;VALUE=DATE:20260420\r\n"); // week 3
+  });
+
+  it("previews the exact current schedule dates and all-day behavior before export", async () => {
+    const agent = request.agent(app);
+    await registerAndLogin(agent, "icsPreview");
+    const convo = await createConversation(agent, "Preview");
+
+    await storage.createMessage({
+      conversationId: convo.id,
+      content: "",
+      role: "expert",
+      artifacts: [tableArtifact()],
+    } as any);
+
+    const res = await agent
+      .get(`/api/protected/conversations/${convo.id}/export.ics`)
+      .query({ preview: "1", start: "2027-04-05" });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      eventCount: 3,
+      startDate: "2027-04-05",
+      year: 2027,
+      timeZone: "All-day dates (timezone-neutral)",
+      scheduleVersion: "Current conversation schedule",
+    });
   });
 
   it("returns 422 for garbage ?start values", async () => {

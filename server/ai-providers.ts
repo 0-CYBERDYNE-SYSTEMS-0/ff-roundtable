@@ -1,22 +1,184 @@
 import type { AIMessage, AIModelResponse } from './ai';
+import { randomUUID } from 'crypto';
 
 const AI_REQUEST_TIMEOUT_MS = 120_000;
+const OUTPUT_LIMIT_ERROR = "Response reached the output limit. Please ask for a shorter response or split the request into smaller parts.";
+const SPEND_CAP_MAX_TOKENS = 1024;
+const SPEND_CAP_PER_REQUEST_USD = 0.4;
+
+export class OpenRouterSpendLimitError extends Error {
+  constructor() {
+    super("The OpenRouter verification spend limit has been reached. Keep the saved work and retry only after reviewing usage.");
+    this.name = "OpenRouterSpendLimitError";
+  }
+}
+
+type OpenRouterAttempt = {
+  id: string;
+  model: string;
+  startedAt: number;
+  reservedUsd: number;
+  maxTokens: number;
+  providerPriceLimit?: { prompt: number; completion: number };
+  settled: boolean;
+};
+
+export type OpenRouterUsageSnapshot = {
+  capUsd: number | null;
+  spentUsd: number;
+  reservedUsd: number;
+  attempts: Array<{
+    requestId: string;
+    generationId?: string;
+    model: string;
+    provider?: string;
+    elapsedMs: number;
+    result: "success" | "failed";
+    costUsd: number | null;
+    errorCode?: number;
+  }>;
+};
+
+function configuredSpendCap(): number | null {
+  const raw = process.env.OPENROUTER_SPEND_CAP_USD;
+  if (raw === undefined || raw.trim() === "") return null;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+}
+
+function numericCost(usage: any): number | undefined {
+  const value = usage?.cost ?? usage?.total_cost ?? usage?.totalCost;
+  const cost = typeof value === "string" ? Number(value) : value;
+  return typeof cost === "number" && Number.isFinite(cost) && cost >= 0 ? cost : undefined;
+}
+
+const UNSUPPORTED_IMAGE_ERROR = /(?:image|vision|modalit|multimodal)[\s\S]{0,100}(?:not\s+support|unsupport\w*|reject\w*|invalid|disabled|not\s+allowed|can(?:not|'t)|unable)|(?:not\s+support|unsupport\w*|reject\w*|invalid|disabled|not\s+allowed|can(?:not|'t)|unable)[\s\S]{0,100}(?:image|vision|modalit|multimodal)|support\s+(?:[\w-]+\s+){0,2}(?:image|vision|multimodal|modalit)/i;
+
+function safeOpenRouterError(status: number | undefined, providerDetail?: unknown): Error {
+  let detail = "";
+  try {
+    detail = typeof providerDetail === "string" ? providerDetail : JSON.stringify(providerDetail ?? "");
+  } catch {
+    detail = "";
+  }
+  const unsupportedImage = status === 413 ||
+    ((status === undefined || [400, 404, 422].includes(status)) && UNSUPPORTED_IMAGE_ERROR.test(detail.slice(0, 4096)));
+  const message = unsupportedImage
+    ? "This model does not support image input."
+    : status === 401
+    ? "OpenRouter authentication failed. Contact the account operator."
+    : status === 402
+      ? "The OpenRouter account needs credits. Contact the account operator."
+      : status === 429
+        ? "OpenRouter is temporarily rate-limited. Try again later."
+        : `OpenRouter could not complete this request${status === undefined ? "" : ` (${status})`}. Retry or continue with available work.`;
+  return Object.assign(new Error(message), status === undefined ? {} : { statusCode: status });
+}
 
 // ─── Provider Interface ───────────────────────────────────────────────────────
 
 export interface AIProvider {
-  chat(messages: AIMessage[], model: string, userId?: number): Promise<AIModelResponse>;
+  chat(messages: AIMessage[], model: string, userId?: number, webSearch?: boolean): Promise<AIModelResponse>;
   chatStream(
     messages: AIMessage[],
     model: string,
     onToken: (token: string) => void,
-    userId?: number
+    userId?: number,
+    webSearch?: boolean
   ): Promise<AIModelResponse>;
 }
 
 // ─── OpenRouter Provider ───────────────────────────────────────────────────────
 
 export class OpenRouterProvider implements AIProvider {
+  private readonly spendCapUsd: number | null;
+  private spentUsd = 0;
+  private reservedUsd = 0;
+  private attempts: OpenRouterUsageSnapshot["attempts"] = [];
+
+  constructor(spendCapUsd?: number | null) {
+    this.spendCapUsd = spendCapUsd === undefined ? configuredSpendCap() : spendCapUsd;
+  }
+
+  getUsageSnapshot(): OpenRouterUsageSnapshot {
+    return {
+      capUsd: this.spendCapUsd,
+      spentUsd: Number(this.spentUsd.toFixed(8)),
+      reservedUsd: Number(this.reservedUsd.toFixed(8)),
+      attempts: this.attempts.map(attempt => ({ ...attempt })),
+    };
+  }
+
+  private beginAttempt(model: string, messages: AIMessage[]): OpenRouterAttempt {
+    const attempt: OpenRouterAttempt = {
+      id: randomUUID(),
+      model,
+      startedAt: Date.now(),
+      reservedUsd: 0,
+      maxTokens: 8192,
+      settled: false,
+    };
+    if (this.spendCapUsd === null) return attempt;
+
+    const remainingUsd = this.spendCapUsd - this.spentUsd - this.reservedUsd;
+    if (remainingUsd < 0.002) throw new OpenRouterSpendLimitError();
+    const reservation = Math.min(SPEND_CAP_PER_REQUEST_USD, remainingUsd);
+    const estimatedInputTokens = Math.max(1, Math.ceil(JSON.stringify(messages).length * 2));
+    attempt.reservedUsd = reservation;
+    attempt.maxTokens = SPEND_CAP_MAX_TOKENS;
+    attempt.providerPriceLimit = {
+      prompt: Number(((reservation * 0.45 * 1_000_000) / estimatedInputTokens).toFixed(8)),
+      completion: Number(((reservation * 0.45 * 1_000_000) / attempt.maxTokens).toFixed(8)),
+    };
+    this.reservedUsd += reservation;
+    return attempt;
+  }
+
+  private settleAttempt(
+    attempt: OpenRouterAttempt,
+    result: "success" | "failed",
+    usage?: unknown,
+    metadata: { generationId?: string; provider?: string; errorCode?: number } = {},
+  ): void {
+    if (attempt.settled) return;
+    attempt.settled = true;
+    const costUsd = numericCost(usage);
+    if (attempt.reservedUsd > 0) {
+      this.reservedUsd = Math.max(0, this.reservedUsd - attempt.reservedUsd);
+      // When the provider omits cost, conservatively consume the reservation
+      // so later calls cannot turn missing telemetry into unbounded spend.
+      this.spentUsd += costUsd ?? attempt.reservedUsd;
+    } else if (costUsd !== undefined) {
+      this.spentUsd += costUsd;
+    }
+    const record: OpenRouterUsageSnapshot["attempts"][number] = {
+      requestId: attempt.id,
+      ...(metadata.generationId ? { generationId: metadata.generationId } : {}),
+      model: attempt.model,
+      ...(metadata.provider ? { provider: metadata.provider } : {}),
+      elapsedMs: Date.now() - attempt.startedAt,
+      result,
+      costUsd: costUsd ?? null,
+      ...(metadata.errorCode === undefined ? {} : { errorCode: metadata.errorCode }),
+    };
+    this.attempts.push(record);
+    if (this.attempts.length > 100) this.attempts.splice(0, this.attempts.length - 100);
+    console.info(`OPENROUTER_ATTEMPT ${JSON.stringify({
+      ...record,
+      ...(attempt.reservedUsd ? { reservedUsd: attempt.reservedUsd } : {}),
+      usageKnown: costUsd !== undefined,
+      sessionSpentUsd: Number(this.spentUsd.toFixed(8)),
+      sessionCapUsd: this.spendCapUsd,
+    })}`);
+  }
+
+  private requestBudget(attempt: OpenRouterAttempt) {
+    return {
+      max_tokens: attempt.maxTokens,
+      ...(attempt.providerPriceLimit ? { provider: { max_price: attempt.providerPriceLimit } } : {}),
+    };
+  }
+
   private async getApiKey(userId?: number): Promise<string> {
     // If a userId is provided, try to use their stored BYOK key first
     if (userId) {
@@ -40,12 +202,17 @@ export class OpenRouterProvider implements AIProvider {
     return platformKey;
   }
 
-  async chat(messages: AIMessage[], model: string, userId?: number): Promise<AIModelResponse> {
-    console.log(`[DEBUG] Entering OpenRouterProvider.chat for model: ${model}`);
+  async chat(messages: AIMessage[], model: string, userId?: number, webSearch = false): Promise<AIModelResponse> {
+    const attempt = this.beginAttempt(model, messages);
+    let requestStarted = false;
+    let usage: unknown;
+    let generationId: string | undefined;
+    let provider: string | undefined;
+    let responseModel: string | undefined;
     try {
       const openRouterKey = await this.getApiKey(userId);
-      console.log(`[DEBUG] Calling OpenRouter fetch: https://openrouter.ai/api/v1/chat/completions, Model: ${model}`);
 
+      requestStarted = true;
       const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
         method: "POST",
         headers: {
@@ -58,44 +225,58 @@ export class OpenRouterProvider implements AIProvider {
           model: model,
           messages: messages,
           temperature: 0.7,
-          max_tokens: 8192,
+          ...this.requestBudget(attempt),
+          usage: { include: true },
+          ...(process.env.OPENROUTER_REASONING_EFFORT
+            ? { reasoning: { effort: process.env.OPENROUTER_REASONING_EFFORT } }
+            : {}),
+          ...(webSearch ? { plugins: [{ id: "web", max_results: 3 }] } : {}),
         }),
         signal: AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS),
       });
 
-      console.log(`[DEBUG] OpenRouter fetch completed. Status: ${response.status}`);
-
       if (!response.ok) {
-        const errorText = await response.text();
-        console.error(`[DEBUG] OpenRouter API Error Response Text: ${errorText}`);
-        throw new Error(`OpenRouter API Error (${response.status}): ${errorText}`);
+        throw safeOpenRouterError(response.status, await response.text().catch(() => ""));
       }
 
-      console.log("[DEBUG] OpenRouter response OK. Parsing JSON...");
-      const data = await response.json();
-      console.log("[DEBUG] OpenRouter JSON parsed successfully.");
+      const data = await response.json() as any;
+      usage = data?.usage;
+      generationId = typeof data?.id === "string" ? data.id : undefined;
+      provider = typeof data?.provider === "string" ? data.provider : undefined;
+      responseModel = typeof data?.model === "string" ? data.model : undefined;
 
       if (data && data.error) {
-        console.error(`[DEBUG] OpenRouter returned error object despite 200 OK:`, JSON.stringify(data.error));
-        const errorMsg = data.error.message || JSON.stringify(data.error);
-        throw new Error(`OpenRouter Provider Error: ${errorMsg}`);
+        throw safeOpenRouterError(Number.isInteger(data.error.code) ? data.error.code : undefined, data.error);
       }
 
       if (!data || !data.choices || !Array.isArray(data.choices) || data.choices.length === 0 || !data.choices[0] || !data.choices[0].message) {
-        console.error("[DEBUG] Invalid/Incomplete response structure from OpenRouter API:", JSON.stringify(data));
         throw new Error("Invalid response format from OpenRouter API");
       }
 
-      console.log("[DEBUG] OpenRouter response structure validated. Returning message.");
+      if (data.choices[0].finish_reason === "length") {
+        throw new Error(OUTPUT_LIMIT_ERROR);
+      }
+
+      this.settleAttempt(attempt, "success", usage, { generationId, provider });
       return {
-        message: data.choices[0].message
+        message: data.choices[0].message,
+        ...(Array.isArray(data.citations) ? { citations: data.citations.filter((value: unknown): value is string => typeof value === "string") } : {}),
+        ...(usage && typeof usage === "object" ? { usage } : {}),
+        ...(generationId ? { providerGenerationId: generationId } : {}),
+        ...(responseModel ? { providerModel: responseModel } : {}),
+        ...(provider ? { providerName: provider } : {}),
       };
     } catch (error: unknown) {
-      console.error("[DEBUG] Error caught within OpenRouterProvider.chat:", error);
+      const status = typeof (error as any)?.statusCode === "number" ? (error as any).statusCode : undefined;
+      this.settleAttempt(attempt, "failed", requestStarted ? usage : { cost: 0 }, {
+        generationId,
+        provider,
+        errorCode: status,
+      });
       if (error instanceof Error) {
         throw error;
       } else {
-        throw new Error(`Unknown error in OpenRouterProvider.chat: ${String(error)}`);
+        throw new Error("OpenRouter could not complete this request. Retry or continue with available work.");
       }
     }
   }
@@ -104,12 +285,19 @@ export class OpenRouterProvider implements AIProvider {
     messages: AIMessage[],
     model: string,
     onToken: (token: string) => void,
-    userId?: number
+    userId?: number,
+    webSearch = false
   ): Promise<AIModelResponse> {
-    console.log(`[STREAM] Starting OpenRouter stream for model: ${model}`);
+    const attempt = this.beginAttempt(model, messages);
+    let requestStarted = false;
+    let usage: unknown;
+    let generationId: string | undefined;
+    let provider: string | undefined;
+    let responseModel: string | undefined;
     try {
       const openRouterKey = await this.getApiKey(userId);
 
+      requestStarted = true;
       const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
         method: "POST",
         headers: {
@@ -122,15 +310,19 @@ export class OpenRouterProvider implements AIProvider {
           model: model,
           messages: messages,
           temperature: 0.7,
-          max_tokens: 8192,
+          ...this.requestBudget(attempt),
+          usage: { include: true },
+          ...(process.env.OPENROUTER_REASONING_EFFORT
+            ? { reasoning: { effort: process.env.OPENROUTER_REASONING_EFFORT } }
+            : {}),
+          ...(webSearch ? { plugins: [{ id: "web", max_results: 3 }] } : {}),
           stream: true,
         }),
         signal: AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS),
       });
 
       if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`OpenRouter API Error (${response.status}): ${errorText}`);
+        throw safeOpenRouterError(response.status, await response.text().catch(() => ""));
       }
 
       if (!response.body) {
@@ -141,6 +333,7 @@ export class OpenRouterProvider implements AIProvider {
       const decoder = new TextDecoder();
       let fullContent = "";
       let buffer = "";
+      let finishReason: string | null = null;
 
       try {
         while (true) {
@@ -158,15 +351,31 @@ export class OpenRouterProvider implements AIProvider {
             const data = trimmed.slice(6);
             if (data === "[DONE]") continue;
 
+            let parsed: any;
             try {
-              const parsed = JSON.parse(data);
-              const content = parsed?.choices?.[0]?.delta?.content;
-              if (content) {
-                fullContent += content;
-                onToken(content);
-              }
+              parsed = JSON.parse(data);
             } catch {
               // Skip unparseable chunks
+              continue;
+            }
+
+            if (parsed?.id && typeof parsed.id === "string") generationId = parsed.id;
+            if (parsed?.provider && typeof parsed.provider === "string") provider = parsed.provider;
+            if (parsed?.model && typeof parsed.model === "string") responseModel = parsed.model;
+            if (parsed?.usage) usage = parsed.usage;
+
+            if (parsed?.error) {
+              throw safeOpenRouterError(Number.isInteger(parsed.error.code) ? parsed.error.code : undefined, parsed.error);
+            }
+
+            const choice = parsed?.choices?.[0];
+            if (typeof choice?.finish_reason === "string") {
+              finishReason = choice.finish_reason;
+            }
+            const content = choice?.delta?.content;
+            if (content) {
+              fullContent += content;
+              onToken(content);
             }
           }
         }
@@ -174,15 +383,28 @@ export class OpenRouterProvider implements AIProvider {
         reader.releaseLock();
       }
 
-      console.log(`[STREAM] OpenRouter complete for ${model}. ${fullContent.length} chars`);
+      if (finishReason === "length") {
+        throw new Error(OUTPUT_LIMIT_ERROR);
+      }
+
+      this.settleAttempt(attempt, "success", usage, { generationId, provider });
 
       return {
-        message: { role: "assistant", content: fullContent }
+        message: { role: "assistant", content: fullContent },
+        ...(usage && typeof usage === "object" ? { usage } : {}),
+        ...(generationId ? { providerGenerationId: generationId } : {}),
+        ...(responseModel ? { providerModel: responseModel } : {}),
+        ...(provider ? { providerName: provider } : {}),
       };
     } catch (error: unknown) {
-      console.error("[STREAM] OpenRouter Error:", error);
+      const status = typeof (error as any)?.statusCode === "number" ? (error as any).statusCode : undefined;
+      this.settleAttempt(attempt, "failed", requestStarted ? usage : { cost: 0 }, {
+        generationId,
+        provider,
+        errorCode: status,
+      });
       if (error instanceof Error) throw error;
-      throw new Error(`Unknown error in OpenRouterProvider.chatStream: ${String(error)}`);
+      throw new Error("OpenRouter could not complete this request. Retry or continue with available work.");
     }
   }
 }

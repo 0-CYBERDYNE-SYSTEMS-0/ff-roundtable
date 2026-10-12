@@ -273,6 +273,9 @@ export default function ConversationSidebar({
 
         <TabsContent value="visualizations" className="flex-1 mt-0 min-h-0">
           <ScrollArea className="h-full w-full px-4">
+            {allArtifacts.filter((artifact) => artifact.type === 'chart').map((artifact, index) => (
+              <ArtifactDisplay key={`chart-${index}`} artifact={artifact} />
+            ))}
             {activeVisualizations.map((vis, index) => (
               <Card key={index} className="mb-4">
                 <CardHeader>
@@ -283,7 +286,7 @@ export default function ConversationSidebar({
                 </CardContent>
               </Card>
             ))}
-            {activeVisualizations.length === 0 && (
+            {activeVisualizations.length === 0 && !allArtifacts.some((artifact) => artifact.type === 'chart') && (
               <div className="text-center text-neutral-500 mt-8">
                 <div className="flex flex-col items-center space-y-2">
                   <div className="flex space-x-2">
@@ -315,4 +318,4 @@ export default function ConversationSidebar({
       />
     </div>
   );
-} 
+}

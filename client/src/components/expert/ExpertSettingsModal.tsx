@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Save, X } from "lucide-react";
+import { REQUESTED_OPENROUTER_MODELS } from "@/lib/openrouter-model-options";
 
 // Keep in sync with isPaidModel() in server/tiers.ts
 const isFreeModelId = (id: string) => id.endsWith(":free");
@@ -25,6 +26,7 @@ const MODEL_OPTIONS = [
   // Free-tier options — the server rejects paid models for free users
   { id: "deepseek/deepseek-v3.2:free", label: "DeepSeek V3.2 (Free)" },
   { id: "meta-llama/llama-3.1-70b-instruct:free", label: "Llama 3.1 70B (Free)" },
+  ...REQUESTED_OPENROUTER_MODELS.map(({ id, name }) => ({ id, label: name })),
 ];
 
 interface ExpertSettingsModalProps {
