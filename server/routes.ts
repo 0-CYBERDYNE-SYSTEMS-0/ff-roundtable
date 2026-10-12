@@ -55,9 +55,11 @@ function buildStoredDeliverableReply(content: string, files: File[]): string {
   const lowerContent = content.toLowerCase();
   const requestedKind = ["sop", "calendar", "spreadsheet", "csv", "chart", "plan", "budget", "script"]
     .find(kind => lowerContent.includes(kind));
-  const kindMatches = requestedKind
+  const matchingKind = requestedKind
     ? files.filter(file => file.filename.toLowerCase().includes(requestedKind))
     : files;
+  const currentKindMatches = matchingKind.filter(file => file.deliverableId);
+  const kindMatches = currentKindMatches.length > 0 ? currentKindMatches : matchingKind;
   const ordered = [...kindMatches].sort(
     (a, b) => (b.uploadedAt?.getTime() ?? 0) - (a.uploadedAt?.getTime() ?? 0),
   );
@@ -777,12 +779,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
     if (isRetrievalOnlyRequest(content)) {
       const currentDeliverables = await storage.getCurrentDeliverableFiles(conversationId);
-      const legacyGeneratedFiles = currentDeliverables.length > 0
-        ? []
-        : (await storage.getConversationFiles(conversationId))
-            .filter(file => file.uploadedBy.toLowerCase() !== "user")
-            .sort((a, b) => (b.uploadedAt?.getTime() ?? 0) - (a.uploadedAt?.getTime() ?? 0));
-      const candidates = currentDeliverables.length > 0 ? currentDeliverables : legacyGeneratedFiles;
+      const legacyGeneratedFiles = (await storage.getConversationFiles(conversationId))
+        .filter(file => file.uploadedBy.toLowerCase() !== "user" && !file.deliverableId)
+        .sort((a, b) => (b.uploadedAt?.getTime() ?? 0) - (a.uploadedAt?.getTime() ?? 0));
+      const candidates = [...currentDeliverables, ...legacyGeneratedFiles];
       const experts = await storage.getConversationExperts(conversationId);
       const moderator = experts.find(expert => expert.role.trim().toLowerCase() === "moderator");
       const retrievalReply = await storage.createMessage({

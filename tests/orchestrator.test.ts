@@ -1435,6 +1435,52 @@ describe("Orchestrator", () => {
       await waitForMode(conversationId, "idle");
     });
 
+    it("routes a natural-language SOP revision to File Creator", async () => {
+      const conversationId = nextConvId();
+      const fileCreator = { ...createMockExpert(4, "Daisy", "File Creator"), conversationId };
+      const roster = [...experts.map(expert => ({ ...expert, conversationId })), fileCreator];
+      setupGatedConversation(conversationId);
+      mockGetConversationExperts.mockResolvedValue(roster);
+      mockGetCurrentDeliverableFiles.mockResolvedValue([{
+        id: 77,
+        conversationId,
+        filename: "nitrogen-sop.md",
+        fileUrl: "/uploads/nitrogen-sop.md",
+        fileType: "text/markdown",
+        uploadedBy: "Expert: File Creator",
+        deliverableId: "nitrogen-sop",
+        generationRequestId: "generation-1",
+        version: 1,
+        supersedesFileId: null,
+        supersededAt: null,
+        uploadedAt: new Date(),
+      }]);
+      mockGetModeratorNextSpeakerSuggestion.mockReset()
+        .mockResolvedValueOnce("File Creator")
+        .mockResolvedValue("Conclude");
+      mockGetExpertResponseStream.mockImplementation(async (expert: Expert) => ({
+        conversationId,
+        expertId: expert.id,
+        userId: null,
+        content: "Revised nitrogen SOP.",
+        role: "assistant",
+        expertName: expert.name,
+        expertRole: expert.role,
+        artifacts: [],
+      }));
+
+      const userMessage = createMockMessage(1, "Revise the nitrogen SOP to add a costs section.");
+      await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn);
+      await waitForMode(conversationId, "idle");
+
+      const fileCreatorCall = mockGetExpertResponseStream.mock.calls.find(([expert]) => expert.role === "File Creator");
+      expect(fileCreatorCall?.[6]).toMatchObject({
+        mode: "revise",
+        deliverableId: "nitrogen-sop",
+        expectedCurrentFileId: 77,
+      });
+    });
+
     it("builds bounded server-owned File Creator requests and reuses an existing current file", async () => {
       const conversationId = nextConvId();
       const fileCreator = { ...createMockExpert(4, "Daisy", "File Creator"), conversationId };

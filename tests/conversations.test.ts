@@ -728,6 +728,79 @@ describe("Conversations & Expert Flows", () => {
       expect(await storage.getConversationFiles(conversation.id)).toHaveLength(1);
     });
 
+    it("retrieves a legacy calendar alongside a canonical SOP", async () => {
+      const agent = request.agent(app);
+      await login(agent);
+      const conversation = await createConversation(agent, "Legacy calendar link");
+      await storage.createFile({
+        conversationId: conversation.id,
+        filename: "nitrogen-sop.md",
+        fileUrl: "/uploads/nitrogen-sop.md",
+        fileType: "text/markdown",
+        uploadedBy: "Expert: File Creator",
+        deliverableId: "nitrogen-sop",
+        generationRequestId: "generation-sop-1",
+        version: 1,
+      });
+      const legacyCalendar = await storage.createFile({
+        conversationId: conversation.id,
+        filename: "nitrogen-calendar.ics",
+        fileUrl: "/uploads/nitrogen-calendar.ics",
+        fileType: "text/calendar",
+        uploadedBy: "Expert: File Creator",
+      });
+      mockGetFarmerFileIntent.mockReturnValue("retrieve");
+
+      const res = await agent
+        .post(`/api/protected/conversations/${conversation.id}/messages`)
+        .send({ content: "Please send me the saved calendar link." });
+
+      expect(res.status).toBe(201);
+      expect(mockProcessMessageTurnBased).not.toHaveBeenCalled();
+      const messages = await storage.getConversationMessages(conversation.id);
+      expect(messages.at(-1)?.content).toContain(
+        `/api/protected/conversations/${conversation.id}/files/${legacyCalendar.id}/download`,
+      );
+      expect(messages.at(-1)?.content).toContain("nitrogen-calendar.ics");
+      expect(messages.at(-1)?.content).not.toContain("nitrogen-sop.md");
+    });
+
+    it("prefers the current canonical version over a newer legacy file of the same kind", async () => {
+      const agent = request.agent(app);
+      await login(agent);
+      const conversation = await createConversation(agent, "Canonical SOP link");
+      const canonical = await storage.createFile({
+        conversationId: conversation.id,
+        filename: "nitrogen-sop.md",
+        fileUrl: "/uploads/nitrogen-sop-v2.md",
+        fileType: "text/markdown",
+        uploadedBy: "Expert: File Creator",
+        deliverableId: "nitrogen-sop",
+        generationRequestId: "generation-sop-2",
+        version: 2,
+      });
+      await new Promise(resolve => setTimeout(resolve, 5));
+      await storage.createFile({
+        conversationId: conversation.id,
+        filename: "nitrogen-sop.md",
+        fileUrl: "/uploads/legacy-nitrogen-sop.md",
+        fileType: "text/markdown",
+        uploadedBy: "Expert: File Creator",
+      });
+      mockGetFarmerFileIntent.mockReturnValue("retrieve");
+
+      const res = await agent
+        .post(`/api/protected/conversations/${conversation.id}/messages`)
+        .send({ content: "Please send me the latest SOP link." });
+
+      expect(res.status).toBe(201);
+      const messages = await storage.getConversationMessages(conversation.id);
+      expect(messages.at(-1)?.content).toContain(
+        `/api/protected/conversations/${conversation.id}/files/${canonical.id}/download`,
+      );
+      expect(messages.at(-1)?.content).not.toContain("legacy-nitrogen-sop.md");
+    });
+
     it("stores message and returns it before orchestrator completes (async fire-and-forget)", async () => {
       const agent = request.agent(app);
       await login(agent);

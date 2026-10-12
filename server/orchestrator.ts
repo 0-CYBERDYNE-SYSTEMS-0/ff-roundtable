@@ -534,7 +534,7 @@ function isFileCreatorAllowed(content: string | null | undefined, hasOutstanding
     if (!text || blocksFileCreator(classifyFarmerFileIntent(text))) return false;
     const fileNoun = "(?:files?|documents?|sops?|calendars?|spreadsheets?|exports?|plans?|scripts?|code)";
     return hasOutstandingRequest ||
-        new RegExp(`\\b(?:create|make|generate|draft|write|produce|prepare|export|build|turn|convert|provide|give|need|want)\\b.{0,80}\\b${fileNoun}\\b`).test(text);
+        new RegExp(`\\b(?:create|make|generate|draft|write|produce|prepare|export|build|turn|convert|provide|give|need|want|revise|update|edit|modify|replace|change|adjust)\\b.{0,80}\\b${fileNoun}\\b`).test(text);
 }
 
 function nextSequenceFileCreatorRequest(

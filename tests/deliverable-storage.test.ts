@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MemStorage, DeliverableConflictError } from "../server/storage";
+import { MemStorage, PostgresStorage, DeliverableConflictError } from "../server/storage";
 
 const request = (generationRequestId: string, mode: "create" | "revise", expectedCurrentFileId?: number) => ({
   deliverableId: "nitrogen-sop",
@@ -72,5 +72,42 @@ describe("canonical deliverable storage", () => {
 
     expect(await storage.getCurrentDeliverableFile(conversation.id, "nitrogen-sop")).toEqual(file.file);
     expect(await storage.getConversationFiles(conversation.id)).toHaveLength(1);
+  });
+
+  it("returns the committed version when a concurrent revision retry sees a stale-current conflict", async () => {
+    const savedRevision = {
+      id: 8,
+      conversationId: 5,
+      filename: "nitrogen-sop.md",
+      fileUrl: "/uploads/nitrogen-sop-v2.md",
+      fileType: "text/markdown",
+      uploadedBy: "Expert: File Creator",
+      deliverableId: "nitrogen-sop",
+      generationRequestId: "run-2",
+      version: 2,
+      supersedesFileId: 7,
+      supersededAt: null,
+      uploadedAt: new Date(),
+    };
+    const db = {
+      transaction: async () => { throw new DeliverableConflictError("The deliverable changed before this revision could be saved."); },
+      select: () => ({
+        from: () => ({
+          where: () => ({
+            limit: async () => [savedRevision],
+          }),
+        }),
+      }),
+    };
+    const storage = Object.create(PostgresStorage.prototype) as PostgresStorage & { db: typeof db };
+    storage.db = db;
+
+    await expect(storage.saveDeliverableVersion({
+      conversationId: 5,
+      filename: "nitrogen-sop.md",
+      fileUrl: "/uploads/retry.md",
+      fileType: "text/markdown",
+      uploadedBy: "Expert: File Creator",
+    }, request("run-2", "revise", 7))).resolves.toEqual({ file: savedRevision, created: false });
   });
 });

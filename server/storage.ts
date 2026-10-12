@@ -1114,7 +1114,7 @@ export class PostgresStorage implements IStorage {
         return { file: inserted[0], created: true };
       });
     } catch (error: any) {
-      if (request.mode === "create" && error?.code === "23505") {
+      if (error?.code === "23505" || (request.mode === "revise" && error instanceof DeliverableConflictError)) {
         const priorAttempt = await this.db
           .select()
           .from(files)
@@ -1126,8 +1126,10 @@ export class PostgresStorage implements IStorage {
         if (priorAttempt[0] && priorAttempt[0].deliverableId === request.deliverableId) {
           return { file: priorAttempt[0], created: false };
         }
-        const current = await this.getCurrentDeliverableFile(insertFile.conversationId, request.deliverableId);
-        if (current) return { file: current, created: false };
+        if (request.mode === "create" && error?.code === "23505") {
+          const current = await this.getCurrentDeliverableFile(insertFile.conversationId, request.deliverableId);
+          if (current) return { file: current, created: false };
+        }
       }
       throw error;
     }
