@@ -75,4 +75,3 @@ At 390 × 844, `document.documentElement.scrollWidth` matched the 390-pixel view
 | BETA-07 Continuity and deliverable breadth | BLOCKED — reload/restart, account isolation, and other deliverable journeys not tested. | — |
 
 No application server restart, database change, or app-source edit was performed. Only QA screenshots and this report are intended for the validation-worktree commit.
-
