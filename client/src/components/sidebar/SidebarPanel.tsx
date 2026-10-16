@@ -136,7 +136,7 @@ export default function SidebarPanel({
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [activeConversationId, canExportIcs, calendarStart]);
+  }, [activeConversationId, canExportIcs, calendarStart, files]);
 
   const handleFileUploadClick = () => {
     fileInputRef.current?.click();
@@ -152,7 +152,7 @@ export default function SidebarPanel({
   };
   
   return (
-    <aside className="w-72 bg-gradient-to-b from-farm-powder/5 to-white border-r border-farm-tan/30 flex flex-col z-10 shadow-lg">
+    <aside className="w-72 bg-white bg-gradient-to-b from-farm-powder/5 to-white border-r border-farm-tan/30 flex flex-col z-10 shadow-lg">
       <div className="flex flex-col h-full">
         {/* Session Controls */}
         <div className="p-4 border-b border-farm-tan/30">

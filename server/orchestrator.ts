@@ -277,6 +277,7 @@ function buildSnapshot(state: ConversationState): OrchestratorSnapshot {
         // rows written before G13.
         isAutonomousEnabled: state.isAutonomousEnabled,
         maxAutonomousTurns: state.maxAutonomousTurns,
+        sequenceFileCreatorRequestId: state.sequenceFileCreatorRequest?.id ?? null,
     };
 }
 
@@ -287,7 +288,8 @@ function snapshotsDiffer(a: OrchestratorSnapshot, b: OrchestratorSnapshot): bool
         a.wasInterrupted !== b.wasInterrupted ||
         a.pausedFromMode !== b.pausedFromMode ||
         a.isAutonomousEnabled !== b.isAutonomousEnabled ||
-        a.maxAutonomousTurns !== b.maxAutonomousTurns;
+        a.maxAutonomousTurns !== b.maxAutonomousTurns ||
+        a.sequenceFileCreatorRequestId !== b.sequenceFileCreatorRequestId;
 }
 
 /** Convert the persisted user choice into a runtime limit with a hard ceiling. */
@@ -479,7 +481,7 @@ function classifyFarmerFileIntent(content: string | null | undefined): FarmerFil
     const fileNoun = "(?:files?|documents?|sops?|calendars?|spreadsheets?|exports?)";
 
     if (
-        new RegExp(`\\b(?:stop|don't|do not|no longer)\\b.{0,60}\\b(?:create|make|generate|draft|write|produce|attach|export|creating|making|generating|drafting|writing|producing|attaching|exporting)\\b.{0,60}\\b${fileNoun}\\b`).test(text) ||
+        new RegExp(`\\b(?:stop|don't|do not|no longer)\\b.{0,60}\\b(?:create|make|generate|draft|write|produce|attach|export|save|creating|making|generating|drafting|writing|producing|attaching|exporting|saving)\\b.{0,60}\\b${fileNoun}\\b`).test(text) ||
         new RegExp(`\\bno (?:more|new|additional) ${fileNoun}\\b`).test(text) ||
         /\bno\s+(?:file|document)\s+(?:creation|generation|output)\b/.test(text) ||
         /\b(?:stop|disable)\s+(?:file|document)\s+(?:creation|generation)\b/.test(text)
@@ -490,7 +492,7 @@ function classifyFarmerFileIntent(content: string | null | undefined): FarmerFil
     // A request that creates or revises an artifact may also ask for its link.
     // Keep that work in the generation path; only a retrieval-only message is
     // fulfilled directly from stored files.
-    if (/\b(?:create|make|generate|draft|write|produce|prepare|revise|update|modify|export)\b.{0,80}\b(?:files?|documents?|sops?|calendars?|spreadsheets?|exports?)\b/.test(text)) {
+    if (/\b(?:create|make|generate|draft|write|produce|prepare|revise|update|modify|export|save)\b.{0,80}\b(?:files?|documents?|sops?|calendars?|spreadsheets?|exports?)\b/.test(text)) {
         return null;
     }
 
@@ -534,7 +536,7 @@ function isFileCreatorAllowed(content: string | null | undefined, hasOutstanding
     if (!text || blocksFileCreator(classifyFarmerFileIntent(text))) return false;
     const fileNoun = "(?:files?|documents?|sops?|calendars?|spreadsheets?|exports?|plans?|scripts?|code)";
     return hasOutstandingRequest ||
-        new RegExp(`\\b(?:create|make|generate|draft|write|produce|prepare|export|build|turn|convert|provide|give|need|want|revise|update|edit|modify|replace|change|adjust)\\b.{0,80}\\b${fileNoun}\\b`).test(text);
+        new RegExp(`\\b(?:create|make|generate|draft|write|produce|prepare|export|build|turn|convert|provide|give|need|want|revise|update|edit|modify|replace|change|adjust|save)\\b.{0,80}\\b${fileNoun}\\b`).test(text);
 }
 
 function nextSequenceFileCreatorRequest(
@@ -942,8 +944,16 @@ export async function restorePausedFromSnapshot(
     // Fresh in-memory state, then restore the pause through the shared update
     // path so the paused state_update broadcast and persisted snapshot
     // (carrying the restored index/counters) behave like the cold-start path.
-    // lastUserMessage stays null until a new farmer message joins the parked
-    // sequence in place.
+    // Recover the farmer context too, so File Creator can finish a saved request.
+    const history = await Promise.resolve().then(() => storage.getConversationMessages(conversationId)).then(messages => messages ?? []).catch(error => {
+        console.error(`Orchestrator: Could not rebuild context for paused conversation ${conversationId}:`, error);
+        return [];
+    });
+    const farmerMessages = history.filter(message => message.role === "user");
+    const lastUserMessage = farmerMessages.at(-1) ?? null;
+    const fileRequest = storedSnapshot.sequenceFileCreatorRequestId === undefined
+        ? nextSequenceFileCreatorRequest(null, lastUserMessage)
+        : farmerMessages.find(message => message.id === storedSnapshot.sequenceFileCreatorRequestId) ?? null;
     const restored: ConversationState = {
         conversationId,
         activeExperts,
@@ -951,7 +961,8 @@ export async function restorePausedFromSnapshot(
         currentExpertIndex: Number.isInteger(storedSnapshot.currentExpertIndex)
             ? storedSnapshot.currentExpertIndex
             : -1,
-        lastUserMessage: null,
+        lastUserMessage,
+        sequenceFileCreatorRequest: fileRequest,
         mode: "idle",
         broadcastFn,
         isAutonomousEnabled: snapshotBooleanOrDefault(storedSnapshot.isAutonomousEnabled, true),
@@ -974,10 +985,7 @@ export async function restorePausedFromSnapshot(
         failedExpertIds: [],
         roundExperts: activeExperts,
         mentionPairStreak: null,
-        ...stanceStateForRestoredQuestion(await Promise.resolve().then(() => storage.getConversationMessages(conversationId)).then(messages => messages ?? []).catch(error => {
-            console.error(`Orchestrator: Could not rebuild stance ledger for paused conversation ${conversationId}:`, error);
-            return [];
-        }), activeExperts),
+        ...stanceStateForRestoredQuestion(history, activeExperts),
         stanceCycleRoles: [],
         stableSplitSignature: null,
         stableSplitCycleCount: 0,
@@ -2240,6 +2248,7 @@ export async function processMessageTurnBased(
             // previous behavior exactly. A stale-but-present in-memory state
             // keeps its existing recovery semantics regardless of the row.
             let storedSnapshot: OrchestratorSnapshot | null = null;
+            let restoredSequenceFileCreatorRequest: Message | null | undefined;
             let configuredBudget: number | null | undefined;
             if (typeof storage.getConversation === "function") {
                 try {
@@ -2255,6 +2264,20 @@ export async function processMessageTurnBased(
                     // farmer message. Continue safely with the default budget.
                     console.error(`Orchestrator: Could not read conversation settings/snapshot for ${conversationId}; using safe budget defaults:`, error);
                     if (explicitRestart) explicitRestartBudgetRead = true;
+                }
+            }
+            if (storedSnapshot?.mode === "paused" && !explicitRestart &&
+                storedSnapshot.sequenceFileCreatorRequestId !== undefined) {
+                restoredSequenceFileCreatorRequest = null;
+                if (storedSnapshot.sequenceFileCreatorRequestId !== null) {
+                    try {
+                        const history = await storage.getConversationMessages(conversationId);
+                        restoredSequenceFileCreatorRequest = history.find(message =>
+                            message.id === storedSnapshot!.sequenceFileCreatorRequestId && message.role === "user"
+                        ) ?? null;
+                    } catch (error) {
+                        console.error(`Orchestrator: Could not restore File Creator request for paused conversation ${conversationId}:`, error);
+                    }
                 }
             }
             if (!state) {
@@ -2297,6 +2320,9 @@ export async function processMessageTurnBased(
                     totalAutonomousTurnsTaken: Number.isInteger(storedSnapshot.totalAutonomousTurnsTaken)
                         ? storedSnapshot.totalAutonomousTurnsTaken
                         : 0,
+                    ...(restoredSequenceFileCreatorRequest === undefined
+                        ? {}
+                        : { sequenceFileCreatorRequest: restoredSequenceFileCreatorRequest }),
                 });
                 state = getConversationState(conversationId)!;
             }

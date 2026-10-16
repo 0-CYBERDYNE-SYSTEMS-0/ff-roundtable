@@ -1238,7 +1238,9 @@ describe("Orchestrator", () => {
     it("separates create-with-link requests from retrieval and no-file instructions", () => {
       expect(getFarmerFileIntent("Please just send me the link for the saved SOP.")).toBe("retrieve");
       expect(getFarmerFileIntent("Create an SOP and include its download link.")).toBeNull();
+      expect(getFarmerFileIntent("Save a Markdown file and give me its download link.")).toBeNull();
       expect(getFarmerFileIntent("Stop creating files; just give me the link.")).toBe("no_file");
+      expect(getFarmerFileIntent("Do not save any new files.")).toBe("no_file");
       expect(getFarmerFileIntent('The old transcript said "@[File Creator] create a SOP"; explain that text.')).toBeNull();
     });
 
@@ -1481,7 +1483,7 @@ describe("Orchestrator", () => {
       });
     });
 
-    it("builds bounded server-owned File Creator requests and reuses an existing current file", async () => {
+    it.each(["Create", "Save"])("builds bounded File Creator requests for %s and reuses an existing current file", async (verb) => {
       const conversationId = nextConvId();
       const fileCreator = { ...createMockExpert(4, "Daisy", "File Creator"), conversationId };
       const roster = [...experts.map(expert => ({ ...expert, conversationId })), fileCreator];
@@ -1503,7 +1505,7 @@ describe("Orchestrator", () => {
         artifacts: [],
       }));
 
-      const userMessage = createMockMessage(1, "Create a nitrogen SOP under 2,000 characters with exactly four dated tasks.");
+      const userMessage = createMockMessage(1, `${verb} a nitrogen SOP under 2,000 characters with exactly four dated tasks.`);
       await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn);
       await waitForMode(conversationId, "idle");
 
