@@ -170,15 +170,30 @@ Reusing the same title revises that document as a new version.
 export type ParsedDeliverable = { title: string; content: string };
 
 export function extractDeliverable(text: string): { deliverable: ParsedDeliverable | null; cleanContent: string } {
-  const re = /```deliverable\s*\n([\s\S]*?)```/i;
-  const m = re.exec(text);
-  if (!m) return { deliverable: null, cleanContent: text };
+  // Models often nest fenced tables inside the block or omit the closing
+  // fence; take everything up to a closing fence on its own line, else to the end.
+  const start = text.search(/```deliverable[^\n]*\n/i);
+  if (start < 0) return { deliverable: null, cleanContent: text };
+  const bodyStart = text.indexOf("\n", start) + 1;
+  let depth = 0; let end = -1;
+  const lines = text.slice(bodyStart).split("\n"); let offset = bodyStart;
+  for (const line of lines) {
+    const fence = /^\s*```(\w*)\s*$/.exec(line);
+    if (fence) {
+      if (fence[1]) depth++;
+      else if (depth > 0) depth--;
+      else { end = offset; break; }
+    }
+    offset += line.length + 1;
+  }
+  const m = [null, text.slice(bodyStart, end < 0 ? text.length : end)] as const;
+  const re = { full: text.slice(start, end < 0 ? text.length : Math.min(text.length, text.indexOf("\n", end) < 0 ? text.length : text.indexOf("\n", end) + 1)) };
   const body = m[1];
   const titleMatch = /^\s*title:\s*(.+)$/im.exec(body);
   const sep = body.indexOf("\n---");
   const content = (sep >= 0 ? body.slice(sep + 4) : body.replace(/^\s*title:.*$/im, "")).trim();
   const title = (titleMatch?.[1] ?? "").trim().slice(0, 100);
-  const cleanContent = text.replace(re, "").replace(/```deliverable[\s\S]*$/i, "").trim();
+  const cleanContent = text.replace(re.full, "").trim();
   if (!title || content.length < 20) return { deliverable: null, cleanContent };
   return { deliverable: { title, content: content.slice(0, 20_000) }, cleanContent };
 }

@@ -89,3 +89,19 @@ describe("charts must be sourced", () => {
     expect(kept.map(k => k.type)).toEqual(["chart", "table"]);
   });
 });
+
+describe("deliverable extraction edge cases (seen live)", () => {
+  it("keeps nested tables inside the document and handles a missing closing fence", () => {
+    const text = "Intro.\n```deliverable\ntitle: Store vs Sell Checklist\n---\n### Table\n```table\n| a | b |\n|---|---|\n| 1 | 2 |\n```\nEnd of checklist\n---\n";
+    const { deliverable, cleanContent } = extractDeliverable(text);
+    expect(deliverable?.title).toBe("Store vs Sell Checklist");
+    expect(deliverable?.content).toContain("| 1 | 2 |");
+    expect(deliverable?.content).toContain("End of checklist");
+    expect(cleanContent).toBe("Intro.");
+  });
+  it("stops at the closing fence and keeps trailing prose", () => {
+    const { deliverable, cleanContent } = extractDeliverable("A\n```deliverable\ntitle: Plan\n---\nStep one is to scout fields.\n```\nAfter text");
+    expect(deliverable?.content).toBe("Step one is to scout fields.");
+    expect(cleanContent).toBe("A\n\nAfter text".replace("\n\n", "\n"));
+  });
+});

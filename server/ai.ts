@@ -53,12 +53,11 @@ async function finalizeExpertTools(
   expert: Expert,
   content: string,
   toolRun: ToolRun | null,
+  deliverable: ReturnType<typeof extractDeliverable>["deliverable"],
 ): Promise<{ content: string; addition: string }> {
   let text = content;
   let addition = "";
-  const { deliverable, cleanContent } = extractDeliverable(text);
   if (deliverable) {
-    text = cleanContent;
     try {
       const saved = await saveExpertDeliverable(storage as any, expert.conversationId, expert, deliverable);
       const line = `\n\n📄 ${saved.revised ? "Updated" : "Created"} deliverable **${deliverable.title}** (v${saved.version}) — open it in the Files tab.`;
@@ -70,7 +69,7 @@ async function finalizeExpertTools(
     }
   }
   if (toolRun?.sources.length) {
-    const cited = toolRun.sources.filter(s => text.includes(`[${s.id}]`) || text.includes(s.url));
+    const cited = toolRun.sources.filter(s => new RegExp(`\\b${s.id}\\b`).test(text) || text.includes(s.url));
     if (cited.length && !/\n(?:\*\*)?Sources(?:\*\*)?:/i.test(text)) {
       const block = `\n\n**Sources:**\n${cited.map(s => `- [${s.id}] [${s.title || s.url}](${s.url})`).join("\n")}`;
       text += block; addition += block;
@@ -1196,13 +1195,18 @@ export async function getExpertResponseStream(
     }
     
     requireNonEmptyAssistantContent(response);
-    const extracted = extractArtifacts(response.message.content);
+    // Deliverable blocks are pulled out before artifact extraction so tables
+    // inside a document stay in the document.
+    const deliverableSplit = expert.role === "File Creator" || expert.role === "Moderator"
+      ? { deliverable: null, cleanContent: response.message.content }
+      : extractDeliverable(response.message.content);
+    const extracted = extractArtifacts(deliverableSplit.cleanContent);
     const allowedChartUrls = toolRun?.sources.map(src => src.url) ?? [];
     const { kept: artifacts, dropped: droppedCharts } = filterChartArtifacts(extracted.artifacts, allowedChartUrls);
     if (droppedCharts) console.log(`[CHARTS] dropped ${droppedCharts} unsourced chart(s) from ${expert.role}`);
     const finalized = expert.role === "File Creator" || expert.role === "Moderator"
       ? { content: extracted.cleanContent, addition: "" }
-      : await finalizeExpertTools(expert, extracted.cleanContent, toolRun);
+      : await finalizeExpertTools(expert, extracted.cleanContent, toolRun, deliverableSplit.deliverable);
     if (finalized.addition) onToken(finalized.addition);
     const cleanContent = finalized.content;
     const researchAnswer = expert.role === "Research Analyst"
