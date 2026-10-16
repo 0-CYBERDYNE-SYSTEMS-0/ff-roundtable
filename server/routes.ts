@@ -1,3 +1,4 @@
+import { catalogAvatar } from "@shared/expert-catalog";
 import { billingErrorResponse, billingUnavailable } from "./billing-errors";
 import type { Express, Request, Response } from "express";
 import express from "express";
@@ -1147,7 +1148,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
         });
       }
       
-      const { name, role, model, avatarUrl } = req.body;
+      const { name, model } = req.body;
+      const role = typeof req.body.role === "string" ? req.body.role.trim().slice(0, 60) : "";
+      if (!role || /^(moderator|user|farmer)$/i.test(role)) {
+        return res.status(400).json({ message: "Choose a valid expert role." });
+      }
+      if (existingExperts.some(e => e.role.toLowerCase() === role.toLowerCase())) {
+        return res.status(409).json({ message: `A ${role} is already at the table.` });
+      }
+      const customInstructions = typeof req.body.customInstructions === "string" && req.body.customInstructions.trim()
+        ? req.body.customInstructions.trim().slice(0, 2000)
+        : null;
+      // Built-in roles always get the bundled avatar; custom roles get the custom badge.
+      const avatarUrl = catalogAvatar(role);
 
       // Check paid model restriction for free tier
       if (tier === "free" && isPaidModel(model)) {
@@ -1162,8 +1175,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
         name,
         role,
         model,
-        systemPrompt: generateSystemPrompt({ role } as any),
-        avatarUrl
+        systemPrompt: generateSystemPrompt({ role, customInstructions } as any),
+        avatarUrl,
+        customInstructions,
       };
       
       const createdExpert = await storage.createExpert(expert);

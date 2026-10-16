@@ -1,3 +1,4 @@
+import { catalogAvatar } from "@shared/expert-catalog";
 import { useState, useRef, useEffect, useMemo } from "react";
 import type { ReactNode } from "react";
 import { Button } from "@/components/ui/button";
@@ -560,7 +561,7 @@ export default function ChatInterface({
           <div key={expert.id} className="flex items-start mb-4 animate-pulse">
             <div className="flex-shrink-0 mr-3">
               <Avatar className="h-10 w-10 ring-2 ring-farm-green/20">
-                <AvatarImage src={expert.avatarUrl || ""} alt={expert.name} />
+                <AvatarImage src={expert.avatarUrl?.startsWith("http") ? catalogAvatar(expert.role) : (expert.avatarUrl || catalogAvatar(expert.role))} alt={expert.name} />
                 <AvatarFallback className="bg-farm-green text-white font-semibold">{expert.name.charAt(0)}</AvatarFallback>
               </Avatar>
             </div>
@@ -621,7 +622,7 @@ export default function ChatInterface({
                     <div className="flex items-start gap-2">
                       <div className="relative">
                         <Avatar className={`h-8 w-8 ring-2 flex-shrink-0 group-hover:ring-farm-blue/40 transition-all ${upNextExpertId === expert.id ? `animate-pulse ${getExpertRingColor(expert.id)}` : "ring-farm-green/20"}`}>
-                          <AvatarImage src={expert.avatarUrl || ""} alt={expert.name} />
+                          <AvatarImage src={expert.avatarUrl?.startsWith("http") ? catalogAvatar(expert.role) : (expert.avatarUrl || catalogAvatar(expert.role))} alt={expert.name} />
                           <AvatarFallback className="bg-farm-green text-white text-xs font-semibold">
                             {expert.name.charAt(0)}
                           </AvatarFallback>
@@ -670,7 +671,7 @@ export default function ChatInterface({
                 >
                   {/* G9: collapsed panel shows only the up-next avatar shimmer */}
                   <Avatar className={`h-8 w-8 ring-2 hover:ring-farm-blue/40 transition-all ${upNextExpertId === expert.id ? `animate-pulse ${getExpertRingColor(expert.id)}` : "ring-farm-green/20"}`}>
-                    <AvatarImage src={expert.avatarUrl || ""} alt={expert.name} />
+                    <AvatarImage src={expert.avatarUrl?.startsWith("http") ? catalogAvatar(expert.role) : (expert.avatarUrl || catalogAvatar(expert.role))} alt={expert.name} />
                     <AvatarFallback className="bg-farm-green text-white text-xs font-semibold">
                       {expert.name.charAt(0)}
                     </AvatarFallback>
@@ -980,7 +981,7 @@ export default function ChatInterface({
                         onClick={() => applyMentionSelection(expert)}
                       >
                         <Avatar className="h-6 w-6 flex-shrink-0">
-                          <AvatarImage src={expert.avatarUrl || ""} alt={expert.name} />
+                          <AvatarImage src={expert.avatarUrl?.startsWith("http") ? catalogAvatar(expert.role) : (expert.avatarUrl || catalogAvatar(expert.role))} alt={expert.name} />
                           <AvatarFallback className="bg-farm-green text-white text-[10px] font-semibold">
                             {expert.name.charAt(0)}
                           </AvatarFallback>

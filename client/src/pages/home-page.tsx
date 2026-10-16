@@ -152,7 +152,7 @@ export default function HomePage() {
   
   // Add expert to conversation
   const addExpertMutation = useMutation({
-    mutationFn: async (expert: { name: string; role: string; model: string; avatarUrl: string }) => {
+    mutationFn: async (expert: { name: string; role: string; model: string; avatarUrl: string; customInstructions?: string }) => {
       if (!activeConversation) throw new Error("No active conversation");
       const res = await apiRequest("POST", `/api/protected/conversations/${activeConversation}/experts`, expert);
       return await res.json();
@@ -605,7 +605,7 @@ export default function HomePage() {
   };
   
   // Handle adding experts to conversation
-  const handleAddExperts = (experts: { name: string; role: string; model: string; avatarUrl: string }[]) => {
+  const handleAddExperts = (experts: { name: string; role: string; model: string; avatarUrl: string; customInstructions?: string }[]) => {
     experts.forEach(expert => {
       addExpertMutation.mutate(expert);
     });

@@ -296,7 +296,7 @@ export default function AuthPage() {
               </div>
               <div>
                 <h3 className="font-medium text-lg">Interactive Roundtable</h3>
-                <p className="text-sm opacity-90">Engage with 4-8 AI experts in a virtual roundtable format.</p>
+                <p className="text-sm opacity-90">Seat up to 3 AI experts free, or up to 8 on Pro, from 20 farm specialties or your own custom experts.</p>
               </div>
             </div>
             
