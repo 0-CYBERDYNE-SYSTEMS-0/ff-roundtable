@@ -105,3 +105,16 @@ describe("deliverable extraction edge cases (seen live)", () => {
     expect(cleanContent).toBe("A\n\nAfter text".replace("\n\n", "\n"));
   });
 });
+
+describe("unfenced deliverable (seen live in a revise turn)", () => {
+  it("parses a **deliverable** header with a title line and revises by title", () => {
+    const text = "**deliverable**\ntitle: Corn Storage vs. Sell‑at‑Harvest Checklist\n---\n# Corn Storage vs. Sell‑at‑Harvest Checklist\n### Drying Cost Section\n1. Points to remove = 20 - 15";
+    const { deliverable, cleanContent } = extractDeliverable(text);
+    expect(deliverable?.title).toBe("Corn Storage vs. Sell‑at‑Harvest Checklist");
+    expect(deliverable?.content).toContain("Drying Cost Section");
+    expect(cleanContent).toBe("");
+  });
+  it("ignores the word deliverable in prose", () => {
+    expect(extractDeliverable("The deliverable is ready.\ntitle: nope").deliverable).toBeNull();
+  });
+});

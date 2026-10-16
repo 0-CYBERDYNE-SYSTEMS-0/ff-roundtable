@@ -172,8 +172,14 @@ export type ParsedDeliverable = { title: string; content: string };
 export function extractDeliverable(text: string): { deliverable: ParsedDeliverable | null; cleanContent: string } {
   // Models often nest fenced tables inside the block or omit the closing
   // fence; take everything up to a closing fence on its own line, else to the end.
-  const start = text.search(/```deliverable[^\n]*\n/i);
-  if (start < 0) return { deliverable: null, cleanContent: text };
+  // Accept the fenced form and the unfenced variants models produce
+  // ("**deliverable**" / "deliverable:" on its own line, then "title:").
+  let start = text.search(/```\s*deliverable[^\n]*\n/i);
+  if (start < 0) {
+    const loose = /(^|\n)[ \t]*(?:[*_#>]+[ \t]*)?deliverable[ \t]*(?:[*_]+)?[ \t]*:?[ \t]*\n(?=[ \t]*(?:[*_]+)?title[ \t]*(?:[*_]+)?:)/i.exec(text);
+    if (!loose) return { deliverable: null, cleanContent: text };
+    start = loose.index + loose[1].length;
+  }
   const bodyStart = text.indexOf("\n", start) + 1;
   let depth = 0; let end = -1;
   const lines = text.slice(bodyStart).split("\n"); let offset = bodyStart;
@@ -189,7 +195,7 @@ export function extractDeliverable(text: string): { deliverable: ParsedDeliverab
   const m = [null, text.slice(bodyStart, end < 0 ? text.length : end)] as const;
   const re = { full: text.slice(start, end < 0 ? text.length : Math.min(text.length, text.indexOf("\n", end) < 0 ? text.length : text.indexOf("\n", end) + 1)) };
   const body = m[1];
-  const titleMatch = /^\s*title:\s*(.+)$/im.exec(body);
+  const titleMatch = /^\s*(?:[*_]+)?title(?:[*_]+)?:\s*(?:[*_]+)?(.+?)(?:[*_]+)?\s*$/im.exec(body);
   const sep = body.indexOf("\n---");
   const content = (sep >= 0 ? body.slice(sep + 4) : body.replace(/^\s*title:.*$/im, "")).trim();
   const title = (titleMatch?.[1] ?? "").trim().slice(0, 100);
