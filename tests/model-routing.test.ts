@@ -1,0 +1,21 @@
+import { afterEach, describe, expect, it } from "vitest";
+import { DEFAULT_MAX_OUTPUT_TOKENS, FREE_MODEL_FALLBACKS, maxOutputTokens, modelRouting } from "../server/ai-providers";
+
+describe("model routing and output cap", () => {
+  afterEach(() => { delete process.env.OPENROUTER_MAX_OUTPUT_TOKENS; });
+  it("adds free fallbacks only for :free models, primary first, max 3", () => {
+    const r = modelRouting("google/gemma-4-31b-it:free");
+    expect(r.models?.[0]).toBe("google/gemma-4-31b-it:free");
+    expect(r.models).toHaveLength(3);
+    expect(new Set(r.models).size).toBe(3);
+    expect(r.models!.every(m => m.endsWith(":free"))).toBe(true);
+    expect(modelRouting("openai/gpt-4o")).toEqual({ model: "openai/gpt-4o" });
+    expect(FREE_MODEL_FALLBACKS.length).toBeGreaterThanOrEqual(3);
+  });
+  it("defaults to 4096 and honours a sane override", () => {
+    expect(maxOutputTokens()).toBe(DEFAULT_MAX_OUTPUT_TOKENS);
+    process.env.OPENROUTER_MAX_OUTPUT_TOKENS = "2048"; expect(maxOutputTokens()).toBe(2048);
+    process.env.OPENROUTER_MAX_OUTPUT_TOKENS = "9999999"; expect(maxOutputTokens()).toBe(4096);
+    process.env.OPENROUTER_MAX_OUTPUT_TOKENS = "abc"; expect(maxOutputTokens()).toBe(4096);
+  });
+});

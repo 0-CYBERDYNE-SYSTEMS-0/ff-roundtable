@@ -60,7 +60,7 @@ const availableExperts = [
   {
     role: "Soil Scientist",
     description: "Specializes in soil health, composition analysis, and fertilization recommendations.",
-    defaultModel: "deepseek/deepseek-v4-flash:free",
+    defaultModel: "google/gemma-4-31b-it:free",
     avatarUrl: "https://images.unsplash.com/photo-1530836369250-ef72a3f5cda8?ixlib=rb-1.2.1&auto=format&fit=crop&w=48&h=48&q=80",
     category: EXPERT_CATEGORIES.AGRICULTURE,
     recommended: true
@@ -68,7 +68,7 @@ const availableExperts = [
   {
     role: "Crop Specialist",
     description: "Expert in crop varieties, rotation strategies, and yield optimization techniques.",
-    defaultModel: "z-ai/glm-4.5-air:free",
+    defaultModel: "nvidia/nemotron-3-super-120b-a12b:free",
     avatarUrl: "https://images.unsplash.com/photo-1530836369250-ef72a3f5cda8?ixlib=rb-1.2.1&auto=format&fit=crop&w=48&h=48&q=80",
     category: EXPERT_CATEGORIES.AGRICULTURE,
     recommended: true
@@ -76,28 +76,28 @@ const availableExperts = [
   {
     role: "Irrigation Engineer",
     description: "Specializes in water management systems, irrigation scheduling, and water conservation.",
-    defaultModel: "deepseek/deepseek-v4-flash:free",
+    defaultModel: "google/gemma-4-26b-a4b-it:free",
     avatarUrl: "https://images.unsplash.com/photo-1584824188625-0d6dd2183f9e?ixlib=rb-1.2.1&auto=format&fit=crop&w=48&h=48&q=80",
     category: EXPERT_CATEGORIES.AGRICULTURE
   },
   {
     role: "Pest Management",
     description: "Advises on insect, disease, and weed control strategies using integrated pest management.",
-    defaultModel: "anthropic/claude-3.5-sonnet",
+    defaultModel: "nvidia/nemotron-3.5-super-vl:free",
     avatarUrl: "https://images.unsplash.com/photo-1580852300654-2d5a84ba2603?ixlib=rb-1.2.1&auto=format&fit=crop&w=48&h=48&q=80",
     category: EXPERT_CATEGORIES.AGRICULTURE
   },
   {
     role: "Meteorologist",
     description: "Provides weather analysis, forecasting, and climate pattern insights for farm planning.",
-    defaultModel: "anthropic/claude-3.5-sonnet",
+    defaultModel: "google/gemma-4-31b-it:free",
     avatarUrl: "https://images.unsplash.com/photo-1590552515252-3a5a1bce7bed?ixlib=rb-1.2.1&auto=format&fit=crop&w=48&h=48&q=80",
     category: EXPERT_CATEGORIES.RESEARCH
   },
   {
     role: "File Creator",
     description: "Helps draft reports, field notes, action plans, and documentation with a focus on clarity.",
-    defaultModel: "openai/gpt-4o",
+    defaultModel: "nvidia/nemotron-3-super-120b-a12b:free",
     avatarUrl: "https://images.unsplash.com/photo-1506097425191-7ad538b29cef?ixlib=rb-1.2.1&auto=format&fit=crop&w=48&h=48&q=80",
     category: EXPERT_CATEGORIES.SUPPORT,
     recommended: true
@@ -105,14 +105,14 @@ const availableExperts = [
   {
     role: "Research Analyst",
     description: "Conducts literature reviews, analyzes trends, and provides evidence-based recommendations.",
-    defaultModel: "z-ai/glm-4.5-air:free",
+    defaultModel: "nvidia/nemotron-3.5-super-vl:free",
     avatarUrl: "https://images.unsplash.com/photo-1551836022-d5d88e9218df?ixlib=rb-1.2.1&auto=format&fit=crop&w=48&h=48&q=80",
     category: EXPERT_CATEGORIES.RESEARCH
   },
   {
     role: "Imagery Specialist",
     description: "Analyzes satellite, drone, and field imagery to provide visual insights and recommendations.",
-    defaultModel: "openai/gpt-4o-vision",
+    defaultModel: "nvidia/nemotron-3.5-super-vl:free",
     avatarUrl: "https://images.unsplash.com/photo-1562408590-e32931084e23?ixlib=rb-1.2.1&auto=format&fit=crop&w=48&h=48&q=80",
     category: EXPERT_CATEGORIES.RESEARCH,
     recommended: true

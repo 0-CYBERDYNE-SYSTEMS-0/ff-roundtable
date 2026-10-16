@@ -3,7 +3,25 @@ import { randomUUID } from 'crypto';
 
 const AI_REQUEST_TIMEOUT_MS = 120_000;
 const OUTPUT_LIMIT_ERROR = "Response reached the output limit. Please ask for a shorter response or split the request into smaller parts.";
-const SPEND_CAP_MAX_TOKENS = 1024;
+// Output ceiling per call. 1024 truncated File Creator SOPs mid-document;
+// 8192 let one runaway answer cost 8x a normal turn. 4096 (~3,000 words)
+// fits the longest documents we generate. Override with OPENROUTER_MAX_OUTPUT_TOKENS.
+export const DEFAULT_MAX_OUTPUT_TOKENS = 4096;
+export function maxOutputTokens(): number {
+  const parsed = Number(process.env.OPENROUTER_MAX_OUTPUT_TOKENS);
+  return Number.isInteger(parsed) && parsed >= 256 && parsed <= 32768 ? parsed : DEFAULT_MAX_OUTPUT_TOKENS;
+}
+// Free OpenRouter models come and go; when a :free model is requested,
+// OpenRouter's `models` array lets it fall through to these (verified live 2026-10-16).
+export const FREE_MODEL_FALLBACKS = [
+  "nvidia/nemotron-3-super-120b-a12b:free",
+  "nvidia/nemotron-3.5-super-vl:free",
+  "google/gemma-4-31b-it:free",
+];
+export function modelRouting(model: string): { model: string; models?: string[] } {
+  if (!model.endsWith(":free")) return { model };
+  return { model, models: [model, ...FREE_MODEL_FALLBACKS.filter(m => m !== model)].slice(0, 3) };
+}
 const SPEND_CAP_PER_REQUEST_USD = 0.4;
 
 export class OpenRouterSpendLimitError extends Error {
@@ -115,7 +133,7 @@ export class OpenRouterProvider implements AIProvider {
       model,
       startedAt: Date.now(),
       reservedUsd: 0,
-      maxTokens: 8192,
+      maxTokens: maxOutputTokens(),
       settled: false,
     };
     if (this.spendCapUsd === null) return attempt;
@@ -125,7 +143,7 @@ export class OpenRouterProvider implements AIProvider {
     const reservation = Math.min(SPEND_CAP_PER_REQUEST_USD, remainingUsd);
     const estimatedInputTokens = Math.max(1, Math.ceil(JSON.stringify(messages).length * 2));
     attempt.reservedUsd = reservation;
-    attempt.maxTokens = SPEND_CAP_MAX_TOKENS;
+    attempt.maxTokens = maxOutputTokens();
     attempt.providerPriceLimit = {
       prompt: Number(((reservation * 0.45 * 1_000_000) / estimatedInputTokens).toFixed(8)),
       completion: Number(((reservation * 0.45 * 1_000_000) / attempt.maxTokens).toFixed(8)),
@@ -222,7 +240,7 @@ export class OpenRouterProvider implements AIProvider {
           "X-Title": "Farm Friend Roundtable"
         },
         body: JSON.stringify({
-          model: model,
+          ...modelRouting(model),
           messages: messages,
           temperature: 0.7,
           ...this.requestBudget(attempt),
@@ -307,7 +325,7 @@ export class OpenRouterProvider implements AIProvider {
           "X-Title": "Farm Friend Roundtable"
         },
         body: JSON.stringify({
-          model: model,
+          ...modelRouting(model),
           messages: messages,
           temperature: 0.7,
           ...this.requestBudget(attempt),
@@ -448,7 +466,7 @@ export class LocalOpenAIProvider implements AIProvider {
           model: actualModel,
           messages: messages,
           temperature: 0.7,
-          max_tokens: 8192,
+          max_tokens: maxOutputTokens(),
           stream: false,
         }),
         signal: AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS),
@@ -509,7 +527,7 @@ export class LocalOpenAIProvider implements AIProvider {
           model: actualModel,
           messages: messages,
           temperature: 0.7,
-          max_tokens: 8192,
+          max_tokens: maxOutputTokens(),
           stream: true,
         }),
         signal: AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS),

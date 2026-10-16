@@ -317,7 +317,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           }
 
           const experts = await storage.getConversationExperts(conversationId);
-          const testModel = devConfig.experts[0]?.model || "deepseek/deepseek-v4-flash:free";
+          const testModel = devConfig.experts[0]?.model || "nvidia/nemotron-3-super-120b-a12b:free";
 
           // Update all experts to use the test model
           const updatePromises = experts.map((expert) =>

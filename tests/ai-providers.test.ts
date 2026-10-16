@@ -220,7 +220,7 @@ describe("AI Providers", () => {
       const body = JSON.parse(mockFetch.mock.calls[0][1].body);
 
       expect(body.usage).toEqual({ include: true });
-      expect(body.max_tokens).toBe(1024);
+      expect(body.max_tokens).toBe(4096);
       expect(body.provider.max_price).toEqual({ prompt: expect.any(Number), completion: expect.any(Number) });
       expect(result.usage).toEqual({ prompt_tokens: 20, completion_tokens: 10, total_tokens: 30, cost: "0.12" });
       expect(result.providerGenerationId).toBe("gen_123");
@@ -246,7 +246,7 @@ describe("AI Providers", () => {
       const body = JSON.parse(mockFetch.mock.calls[0][1].body);
 
       expect(body.usage).toEqual({ include: true });
-      expect(body.max_tokens).toBe(1024);
+      expect(body.max_tokens).toBe(4096);
       expect(result.providerGenerationId).toBe("gen_stream");
       expect(result.usage?.cost).toBe(0.07);
       expect(provider.getUsageSnapshot()).toMatchObject({
