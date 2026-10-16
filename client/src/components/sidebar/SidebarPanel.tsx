@@ -1,3 +1,4 @@
+import { formatLocalDateTime } from "@/lib/format-local-time";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -136,7 +137,7 @@ export default function SidebarPanel({
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [activeConversationId, canExportIcs, calendarStart]);
+  }, [activeConversationId, canExportIcs, calendarStart, files]);
 
   const handleFileUploadClick = () => {
     fileInputRef.current?.click();
@@ -152,7 +153,7 @@ export default function SidebarPanel({
   };
   
   return (
-    <aside className="w-72 bg-gradient-to-b from-farm-powder/5 to-white border-r border-farm-tan/30 flex flex-col z-10 shadow-lg">
+    <aside className="w-72 bg-white bg-gradient-to-b from-farm-powder/5 to-white border-r border-farm-tan/30 flex flex-col z-10 shadow-lg">
       <div className="flex flex-col h-full">
         {/* Session Controls */}
         <div className="p-4 border-b border-farm-tan/30">
@@ -398,7 +399,7 @@ export default function SidebarPanel({
                           <span className="block text-sm truncate max-w-[160px] font-medium text-neutral-700">{file.filename}</span>
                           {file.deliverableId && file.version != null && (
                             <span className="block text-xs text-neutral-500">
-                              v{file.version} · {file.supersededAt ? "Superseded" : "Current"} · {new Date(file.uploadedAt ?? Date.now()).toLocaleString()}
+                              v{file.version} · {file.supersededAt ? "Superseded" : "Current"} · {formatLocalDateTime(file.uploadedAt ?? Date.now())}
                             </span>
                           )}
                         </div>

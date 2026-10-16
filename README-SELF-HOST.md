@@ -26,8 +26,8 @@ Run your own AI-powered farm advisory roundtable on your hardware. This guide co
 
 ```bash
 # 1. Clone the repo
-git clone https://github.com/your-org/farmfriend-roundtable-pro.git
-cd farmfriend-roundtable-pro
+git clone https://github.com/0-CYBERDYNE-SYSTEMS-0/ff-roundtable.git
+cd ff-roundtable
 
 # 2. Run the interactive setup script
 bash scripts/self-host-setup.sh
@@ -37,6 +37,22 @@ bash scripts/self-host-setup.sh
 ```
 
 That's it. The setup script handles secrets, database initialization, and first startup.
+
+---
+
+## Without Docker (Node.js + Postgres)
+
+```bash
+git clone https://github.com/0-CYBERDYNE-SYSTEMS-0/ff-roundtable.git
+cd ff-roundtable
+cp .env.example .env          # set DATABASE_URL, SESSION_SECRET, and OPENROUTER_API_KEY or OLLAMA_ENABLED=true
+npm ci
+npm run db:setup              # creates the local database and pushes the schema
+npm run build && npm start    # serves on PORT (default 5001)
+curl http://localhost:5001/api/health
+```
+
+Without `DATABASE_URL` the app runs on in-memory storage (data is lost on restart).
 
 ---
 
@@ -53,7 +69,7 @@ Edit `.env.production` and set at minimum:
 | Variable | What it's for |
 |----------|---------------|
 | `ALLOWED_ORIGIN` | Public URL of your instance (e.g. `https://farm.example.com`) |
-| `OPENROUTER_API_KEY` | AI inference — get one free at [openrouter.ai/keys](https://openrouter.ai/keys) |
+| `OPENROUTER_API_KEY` | AI inference — get one free at [openrouter.ai/keys](https://openrouter.ai/keys). Not needed in local-only mode (`OLLAMA_ENABLED=true`, see below). |
 | `SESSION_SECRET` | Cookie encryption — generate with `openssl rand -hex 32` |
 | `POSTGRES_PASSWORD` | Database password — generate with `openssl rand -base64 24` |
 
@@ -71,7 +87,8 @@ docker compose up -d app
 
 ```bash
 curl http://localhost:5001/api/health
-# Expected: {"status":"ok"}
+# Expected: {"status":"ok","database":"ok","uptimeSeconds":12}
+# HTTP 503 with "status":"degraded" means the app is up but cannot reach Postgres.
 ```
 
 ---
@@ -108,6 +125,13 @@ Then restart:
 docker compose restart app
 ```
 
+What these do:
+
+- `OLLAMA_ENABLED=true` turns on **local-only mode**. Every expert, the Moderator, and insights are sent to `LOCAL_AI_BASE_URL`; no OpenRouter key is needed and nothing leaves your network.
+- `OLLAMA_MODEL` is the model every expert uses in local-only mode (default `llama3`). Pull it first.
+- With `OLLAMA_ENABLED=false` you can still use a local model for single experts by choosing a model whose id starts with `local/` (for example `local/llama3`).
+- Small local models follow the roundtable's format less reliably than hosted ones; `llama3.1` or larger is recommended.
+
 ### Recommended models for farming use
 
 | Model | Size | Notes |
@@ -118,6 +142,23 @@ docker compose restart app
 | `phi3:medium` | 7.9 GB | Best quality / size ratio |
 
 > **Tip:** Start with `llama3`. If you have 16 GB+ RAM, `llama3.1` or `phi3:medium` give noticeably better farm-planning responses.
+
+---
+
+### Timestamps look shifted by several hours (instances created before Oct 16, 2026)
+
+The app now pins every database session to UTC. Older builds wrote `now()` in the Postgres server's own `TimeZone`, so rows written then are off by your UTC offset (for example 12:28 PT showed as 5:28 AM). New rows are correct. To repair old rows once, using your server's former zone and the time you upgraded:
+
+```sql
+-- check first: SHOW timezone;  (e.g. America/Los_Angeles)
+BEGIN;
+UPDATE messages SET timestamp   = (timestamp   AT TIME ZONE 'America/Los_Angeles') AT TIME ZONE 'UTC' WHERE timestamp   < '2026-10-16 19:45';
+UPDATE files    SET uploaded_at = (uploaded_at AT TIME ZONE 'America/Los_Angeles') AT TIME ZONE 'UTC' WHERE uploaded_at < '2026-10-16 19:45';
+-- repeat for other tables with created_at columns (conversations, insights, open_questions) if you care about them
+COMMIT;
+```
+
+Skip this if your Postgres server already ran in UTC (the default in the Docker image).
 
 ---
 
@@ -315,8 +356,8 @@ Stripe requires a publicly reachable HTTPS endpoint. Use the Caddy or nginx setu
 
 ## Support
 
-- **Issues:** [GitHub Issues](https://github.com/your-org/farmfriend-roundtable-pro/issues)
-- **Discussions:** [GitHub Discussions](https://github.com/your-org/farmfriend-roundtable-pro/discussions)
+- **Issues:** [GitHub Issues](https://github.com/0-CYBERDYNE-SYSTEMS-0/ff-roundtable/issues)
+- **Discussions:** [GitHub Discussions](https://github.com/0-CYBERDYNE-SYSTEMS-0/ff-roundtable/discussions)
 - **Docs:** See `README.md` for developer setup and architecture overview.
 
 ---

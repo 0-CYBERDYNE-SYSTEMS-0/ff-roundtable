@@ -12,6 +12,9 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { Separator } from "@/components/ui/separator";
+import { EXPERT_CATALOG, avatarDataUri, CUSTOM_EXPERT_EMOJI } from "@shared/expert-catalog";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { withRequestedOpenRouterModels } from "@/lib/openrouter-model-options";
 import {
   Dialog,
@@ -37,87 +40,43 @@ const isFreeModelId = (model: OpenRouterModel) =>
 
 // --- Define reliable fallback models when OpenRouter API fails ---
 const FALLBACK_MODELS: OpenRouterModel[] = [
-  { id: "deepseek/deepseek-v3.2:free", name: "Quick Test", description: "DeepSeek V3.2 - Fast and efficient model", isFree: true },
-  { id: "openai/gpt-3.5-turbo", name: "GPT-3.5 Turbo", description: "OpenAI's GPT-3.5 Turbo model", isFree: false },
-  { id: "openai/gpt-4", name: "GPT-4", description: "OpenAI's GPT-4 model", isFree: false },
-  { id: "anthropic/claude-3-haiku:free", name: "Claude 3 Haiku", description: "Anthropic's Claude 3 Haiku model", isFree: true },
-  { id: "anthropic/claude-3-sonnet", name: "Claude 3 Sonnet", description: "Anthropic's Claude 3 Sonnet model", isFree: false },
-  { id: "meta-llama/llama-3-8b-instruct:free", name: "Llama 3 8B", description: "Meta's Llama 3 8B model", isFree: true },
-  { id: "google/gemini-pro:free", name: "Gemini Pro", description: "Google's Gemini Pro model", isFree: true },
+  { id: "nvidia/nemotron-3-super-120b-a12b:free", name: "Nemotron 3 Super (free)", description: "NVIDIA Nemotron 3 Super 120B", isFree: true },
+  { id: "nvidia/nemotron-3.5-super-vl:free", name: "Nemotron 3.5 Super VL (free)", description: "Vision-capable Nemotron", isFree: true },
+  { id: "google/gemma-4-31b-it:free", name: "Gemma 4 31B (free)", description: "Google Gemma 4 31B", isFree: true },
+  { id: "google/gemma-4-26b-a4b-it:free", name: "Gemma 4 26B (free)", description: "Google Gemma 4 26B MoE", isFree: true },
   { id: "local/llama3", name: "Llama 3 (Local)", description: "Local Llama 3 via ollama/LM Studio/llama.cpp", isFree: true },
-  { id: "local/codestral", name: "Codestral (Local)", description: "Local Codestral via ollama/LM Studio/llama.cpp", isFree: true },
 ];
 
 // Expert categories for better organization
 const EXPERT_CATEGORIES = {
   AGRICULTURE: "Agriculture",
+  LIVESTOCK: "Livestock",
+  BUSINESS: "Business",
+  OPERATIONS: "Operations",
   RESEARCH: "Research & Analysis",
-  SUPPORT: "Support"
+  SUPPORT: "Support",
+  CUSTOM: "Custom",
 };
 
-// --- Define available experts data with categories ---
-const availableExperts = [
-  {
-    role: "Soil Scientist",
-    description: "Specializes in soil health, composition analysis, and fertilization recommendations.",
-    defaultModel: "deepseek/deepseek-v4-flash:free",
-    avatarUrl: "https://images.unsplash.com/photo-1530836369250-ef72a3f5cda8?ixlib=rb-1.2.1&auto=format&fit=crop&w=48&h=48&q=80",
-    category: EXPERT_CATEGORIES.AGRICULTURE,
-    recommended: true
-  },
-  {
-    role: "Crop Specialist",
-    description: "Expert in crop varieties, rotation strategies, and yield optimization techniques.",
-    defaultModel: "z-ai/glm-4.5-air:free",
-    avatarUrl: "https://images.unsplash.com/photo-1530836369250-ef72a3f5cda8?ixlib=rb-1.2.1&auto=format&fit=crop&w=48&h=48&q=80",
-    category: EXPERT_CATEGORIES.AGRICULTURE,
-    recommended: true
-  },
-  {
-    role: "Irrigation Engineer",
-    description: "Specializes in water management systems, irrigation scheduling, and water conservation.",
-    defaultModel: "deepseek/deepseek-v4-flash:free",
-    avatarUrl: "https://images.unsplash.com/photo-1584824188625-0d6dd2183f9e?ixlib=rb-1.2.1&auto=format&fit=crop&w=48&h=48&q=80",
-    category: EXPERT_CATEGORIES.AGRICULTURE
-  },
-  {
-    role: "Pest Management",
-    description: "Advises on insect, disease, and weed control strategies using integrated pest management.",
-    defaultModel: "anthropic/claude-3.5-sonnet",
-    avatarUrl: "https://images.unsplash.com/photo-1580852300654-2d5a84ba2603?ixlib=rb-1.2.1&auto=format&fit=crop&w=48&h=48&q=80",
-    category: EXPERT_CATEGORIES.AGRICULTURE
-  },
-  {
-    role: "Meteorologist",
-    description: "Provides weather analysis, forecasting, and climate pattern insights for farm planning.",
-    defaultModel: "anthropic/claude-3.5-sonnet",
-    avatarUrl: "https://images.unsplash.com/photo-1590552515252-3a5a1bce7bed?ixlib=rb-1.2.1&auto=format&fit=crop&w=48&h=48&q=80",
-    category: EXPERT_CATEGORIES.RESEARCH
-  },
-  {
-    role: "File Creator",
-    description: "Helps draft reports, field notes, action plans, and documentation with a focus on clarity.",
-    defaultModel: "openai/gpt-4o",
-    avatarUrl: "https://images.unsplash.com/photo-1506097425191-7ad538b29cef?ixlib=rb-1.2.1&auto=format&fit=crop&w=48&h=48&q=80",
-    category: EXPERT_CATEGORIES.SUPPORT,
-    recommended: true
-  },
-  {
-    role: "Research Analyst",
-    description: "Conducts literature reviews, analyzes trends, and provides evidence-based recommendations.",
-    defaultModel: "z-ai/glm-4.5-air:free",
-    avatarUrl: "https://images.unsplash.com/photo-1551836022-d5d88e9218df?ixlib=rb-1.2.1&auto=format&fit=crop&w=48&h=48&q=80",
-    category: EXPERT_CATEGORIES.RESEARCH
-  },
-  {
-    role: "Imagery Specialist",
-    description: "Analyzes satellite, drone, and field imagery to provide visual insights and recommendations.",
-    defaultModel: "openai/gpt-4o-vision",
-    avatarUrl: "https://images.unsplash.com/photo-1562408590-e32931084e23?ixlib=rb-1.2.1&auto=format&fit=crop&w=48&h=48&q=80",
-    category: EXPERT_CATEGORIES.RESEARCH,
-    recommended: true
-  },
-];
+// --- Built-in experts come from the shared catalog (20 roles) ---
+type SelectableExpert = {
+  role: string;
+  description: string;
+  defaultModel: string;
+  avatarUrl: string;
+  category: string;
+  recommended?: boolean;
+  name?: string;
+  customInstructions?: string;
+};
+const availableExperts: SelectableExpert[] = EXPERT_CATALOG.map(e => ({
+  role: e.role,
+  description: e.description,
+  defaultModel: e.defaultModel,
+  avatarUrl: avatarDataUri(e.emoji, e.color),
+  category: e.category,
+  recommended: e.recommended,
+}));
 
 // Preset expert combinations for quick selection
 const EXPERT_PRESETS = [
@@ -140,7 +99,7 @@ const EXPERT_PRESETS = [
 
 interface ExpertSelectorProps {
   onClose: () => void;
-  onAddExperts: (experts: { name: string; role: string; model: string; avatarUrl: string }[]) => void;
+  onAddExperts: (experts: { name: string; role: string; model: string; avatarUrl: string; customInstructions?: string }[]) => void;
   selectedExperts: Expert[];
 }
 
@@ -157,7 +116,29 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
   const [currentTab, setCurrentTab] = useState<string>(EXPERT_CATEGORIES.AGRICULTURE);
   const [selectedPreset, setSelectedPreset] = useState<string | null>(null);
   const [userTier, setUserTier] = useState<string>("free");
-  const [maxExperts, setMaxExperts] = useState<number>(8);
+  const [maxExperts, setMaxExperts] = useState<number>(3);
+  const [customExperts, setCustomExperts] = useState<SelectableExpert[]>([]);
+  const [customName, setCustomName] = useState("");
+  const [customRole, setCustomRole] = useState("");
+  const [customInstructions, setCustomInstructions] = useState("");
+  const allExperts: SelectableExpert[] = [...availableExperts, ...customExperts];
+  const customRoleTaken = (role: string) =>
+    allExperts.some(e => e.role.toLowerCase() === role.trim().toLowerCase()) ||
+    selectedExperts.some(e => e.role.toLowerCase() === role.trim().toLowerCase());
+  const addCustomExpert = () => {
+    const role = customRole.trim();
+    if (!role || role.length > 60 || customRoleTaken(role)) return;
+    setCustomExperts(prev => [...prev, {
+      role,
+      name: customName.trim() || role,
+      description: customInstructions.trim().slice(0, 140) || "Custom expert",
+      defaultModel: availableExperts[0].defaultModel,
+      avatarUrl: avatarDataUri(CUSTOM_EXPERT_EMOJI, "#7A8B5A"),
+      category: EXPERT_CATEGORIES.CUSTOM,
+      customInstructions: customInstructions.trim().slice(0, 2000),
+    }]);
+    setCustomName(""); setCustomRole(""); setCustomInstructions("");
+  };
 
   // --- Fetch OpenRouter Models ---
   useEffect(() => {
@@ -228,7 +209,7 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
       "google/gemini-pro:free"
     ];
 
-    let defaultModelId = availableExperts[expertIndex]?.defaultModel;
+    let defaultModelId = allExperts[expertIndex]?.defaultModel;
 
     if (!modelExists(defaultModelId)) {
       const preferred = userTier === "free" ? preferredFree : preferredPaid;
@@ -289,7 +270,7 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
     const newSelectedExperts: SelectedExpertState[] = [];
 
     preset.experts.forEach(expertRole => {
-      const expertIndex = availableExperts.findIndex(e => e.role === expertRole);
+      const expertIndex = allExperts.findIndex(e => e.role === expertRole);
       if (expertIndex === -1) return;
       if (newSelectedExperts.length >= maxExperts) return;
 
@@ -320,8 +301,11 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
   // Handle adding experts to conversation
   const handleAddExperts = () => {
     const selectedExpertData = localSelectedExperts.map(({ expertIndex, model }) => {
-      const expert = availableExperts[expertIndex];
+      const expert = allExperts[expertIndex];
 
+      if (expert.category === EXPERT_CATEGORIES.CUSTOM) {
+        return { name: expert.name || expert.role, role: expert.role, model, avatarUrl: expert.avatarUrl, customInstructions: expert.customInstructions };
+      }
       // Generate a name based on the role
       let name;
       switch (expert.role) {
@@ -350,7 +334,7 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
           name = "Vision Artist";
           break;
         default:
-          name = `${expert.role.split(' ')[0]} Expert`;
+          name = expert.role;
       }
 
       return {
@@ -381,7 +365,7 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
   };
 
   // Filter experts by the current category tab
-  const filteredExperts = availableExperts.filter(expert => expert.category === currentTab);
+  const filteredExperts = allExperts.filter(expert => expert.category === currentTab);
 
   // Filter models by tier — free users only see models the server will accept
   const visibleModels = userTier === "free"
@@ -463,7 +447,7 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
       {(!isLoadingModels || errorLoadingModels) && (
         <Tabs value={currentTab} onValueChange={setCurrentTab} className="flex-1 flex flex-col">
           <div className="flex justify-between items-center mb-1">
-            <TabsList className="mb-2">
+            <TabsList className="mb-2 flex-wrap h-auto">
               {Object.values(EXPERT_CATEGORIES).map(category => (
                 <TabsTrigger key={category} value={category} className="text-sm">
                   {category}
@@ -481,9 +465,19 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
 
           <div className="flex-1 overflow-hidden">
             <ScrollArea className="h-full px-1">
+              {currentTab === EXPERT_CATEGORIES.CUSTOM && (
+                <div className="border rounded-md p-3 mb-3 space-y-2" data-testid="custom-expert-form">
+                  <p className="text-sm font-medium">Create your own expert</p>
+                  <Input placeholder="Name (e.g. Grandpa Joe)" value={customName} maxLength={60} onChange={e => setCustomName(e.target.value)} />
+                  <Input placeholder="Role (e.g. Beekeeper)" value={customRole} maxLength={60} onChange={e => setCustomRole(e.target.value)} />
+                  <Textarea placeholder="Instructions: what this expert knows, how they should answer" value={customInstructions} maxLength={2000} onChange={e => setCustomInstructions(e.target.value)} />
+                  {customRole.trim() && customRoleTaken(customRole) && <p className="text-xs text-red-600">That role already exists.</p>}
+                  <Button size="sm" onClick={addCustomExpert} disabled={!customRole.trim() || customRoleTaken(customRole)}>Create expert</Button>
+                </div>
+              )}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pb-1">
                 {filteredExperts.map((expert) => {
-                  const actualIndex = availableExperts.findIndex(e => e.role === expert.role);
+                  const actualIndex = allExperts.findIndex(e => e.role === expert.role);
                   const isSelected = isExpertSelected(actualIndex);
                   const isAlreadyAdded = expertRoles.has(expert.role);
                   const selectedModel = getSelectedModel(actualIndex);

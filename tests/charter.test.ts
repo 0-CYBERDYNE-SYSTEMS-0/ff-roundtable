@@ -257,6 +257,8 @@ describe("Research Analyst OpenRouter web search", () => {
   it("requests grounding on the assigned model in both fallback paths and sets source rules", async () => {
     const previousPerplexityKey = process.env.PERPLEXITY_API_KEY;
     delete process.env.PERPLEXITY_API_KEY;
+    // The paid OpenRouter web plugin is opt-in (free DuckDuckGo tools are the default).
+    process.env.OPENROUTER_WEB_PLUGIN = "true";
     try {
       const convo = await storage.createConversation({ userId: 1, title: "Grounded research" });
       const expert = createMockExpert(14, convo.id, "Researcher", "Research Analyst");
@@ -288,6 +290,7 @@ describe("Research Analyst OpenRouter web search", () => {
       expect(chatCall[2]).toBe(convo.userId);
       expect(chatCall[3]).toBe(true);
     } finally {
+      delete process.env.OPENROUTER_WEB_PLUGIN;
       if (previousPerplexityKey === undefined) {
         delete process.env.PERPLEXITY_API_KEY;
       } else {

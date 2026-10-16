@@ -500,6 +500,75 @@ describe("Orchestrator recovery (G7 snapshots)", () => {
     });
   });
 
+  it.each([
+    ["Use 50 acres instead.", true],
+    ["Do not save any new files.", false],
+    ["Just give me the link for the saved SOP.", false],
+  ])("restores paused farmer context after %s", async (correction, keepRequest) => {
+    const conversationId = nextConvId();
+    const { messages } = setupFullRound(conversationId);
+    const request = { ...createMockMessage(1, "Save a Markdown plan with two dated tasks."), conversationId };
+    const latest = { ...createMockMessage(2, correction), conversationId };
+    messages.push(request, latest);
+    persistRow(conversationId, {
+      mode: "paused",
+      currentExpertIndex: 0,
+      totalAutonomousTurnsTaken: 1,
+      wasInterrupted: false,
+      pausedFromMode: "autonomous",
+      sequenceFileCreatorRequestId: keepRequest ? request.id : null,
+    });
+
+    expect(await restorePausedFromSnapshot(conversationId, broadcastFn)).toBe(true);
+    const state = getConversationState(conversationId)!;
+    expect(state.lastUserMessage).toEqual(latest);
+    expect(state.sequenceFileCreatorRequest).toEqual(keepRequest ? request : null);
+  });
+
+  it.each([undefined, null])("does not revive an older file request with saved request id %s", async (requestId) => {
+    const conversationId = nextConvId();
+    const { messages } = setupFullRound(conversationId);
+    messages.push(
+      { ...createMockMessage(1, "Save an old Markdown plan."), conversationId },
+      { ...createMockMessage(2, "Discuss crop rotation."), conversationId },
+    );
+    persistRow(conversationId, {
+      mode: "paused",
+      currentExpertIndex: 0,
+      totalAutonomousTurnsTaken: 1,
+      wasInterrupted: false,
+      pausedFromMode: "autonomous",
+      sequenceFileCreatorRequestId: requestId,
+    });
+    expect(await restorePausedFromSnapshot(conversationId, broadcastFn)).toBe(true);
+    expect(getConversationState(conversationId)!.sequenceFileCreatorRequest).toBeNull();
+  });
+
+  it.each([
+    ["ordinary correction", "Use the north field instead.", false, true],
+    ["file cancellation", "Do not save any new files.", false, false],
+    ["explicit restart", "Use the north field instead.", true, false],
+  ])("applies a post-restart %s to the saved file request", async (_label, content, restart, keepRequest) => {
+    const conversationId = nextConvId();
+    const { messages } = setupFullRound(conversationId);
+    const request = { ...createMockMessage(1, "Save a Markdown field plan."), conversationId };
+    const userMessage = { ...createMockMessage(2, content), conversationId };
+    messages.push(request, userMessage);
+    persistRow(conversationId, {
+      mode: "paused",
+      currentExpertIndex: 0,
+      totalAutonomousTurnsTaken: 1,
+      wasInterrupted: false,
+      pausedFromMode: "autonomous",
+      sequenceFileCreatorRequestId: request.id,
+    });
+
+    await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn, { restart });
+    new InteractionOrchestrator(conversationId).pause();
+
+    expect(getConversationState(conversationId)!.sequenceFileCreatorRequest).toEqual(keepRequest ? request : null);
+  });
+
   it("restores legacy paused snapshots without G13 settings using safe defaults", async () => {
     const conversationId = nextConvId();
     setupFullRound(conversationId);

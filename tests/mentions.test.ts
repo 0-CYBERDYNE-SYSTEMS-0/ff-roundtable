@@ -67,6 +67,14 @@ describe("extractMentions", () => {
     expect(extractMentions("@meteorologist, is rain coming?", ROSTER)).toEqual(["Meteorologist"]);
   });
 
+  it("resolves an expert display alias, full role, and first role word case-insensitively", () => {
+    const pestRoster = ["Pest Management"];
+    expect(extractMentions("@Pest Expert", pestRoster)).toEqual(["Pest Management"]);
+    expect(extractMentions("@Pest Management", pestRoster)).toEqual(["Pest Management"]);
+    expect(extractMentions("@pest", pestRoster)).toEqual(["Pest Management"]);
+    expect(extractMentions("@pEsT eXpErT", pestRoster)).toEqual(["Pest Management"]);
+  });
+
   it("prefix-matches even when trailing prose follows the role", () => {
     // The bare run is "soil scientist and then some" — word-prefix matching
     // still resolves the first two words to the role.

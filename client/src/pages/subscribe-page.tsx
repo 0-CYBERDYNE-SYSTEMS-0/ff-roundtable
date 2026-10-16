@@ -99,6 +99,19 @@ function PaymentForm() {
   );
 }
 
+// apiRequest throws "<status>: <body>". Only ever show the server's
+// friendly `message` field, never raw provider text.
+function friendlyBillingMessage(err: unknown): string {
+  const fallback = "Subscriptions are temporarily unavailable. You can keep using the free plan; please try again later.";
+  const text = err instanceof Error ? err.message : "";
+  const json = text.slice(text.indexOf("{"));
+  try {
+    const body = JSON.parse(json);
+    if (typeof body?.code === "string" && typeof body?.message === "string") return body.message;
+  } catch { /* not JSON */ }
+  return fallback;
+}
+
 export default function SubscribePage() {
   const { user, isLoading: isAuthLoading } = useAuth();
   const [clientSecret, setClientSecret] = useState("");
@@ -127,10 +140,11 @@ export default function SubscribePage() {
         })
         .catch((err) => {
           console.error("Subscription error:", err);
-          setError(err.message || "Failed to create subscription. Please try again.");
+          const friendly = friendlyBillingMessage(err);
+          setError(friendly);
           toast({
-            title: "Subscription Error",
-            description: err.message || "Failed to create subscription",
+            title: "Subscriptions unavailable",
+            description: friendly,
             variant: "destructive",
           });
           setIsLoadingSecret(false);

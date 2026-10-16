@@ -27,6 +27,7 @@ export interface OrchestratorSnapshot {
   pausedFromMode: string | null;
   isAutonomousEnabled?: boolean;
   maxAutonomousTurns?: number;
+  sequenceFileCreatorRequestId?: number | null;
 }
 
 export const openQuestionStatus = pgEnum("open_question_status", ["open", "answered"]);

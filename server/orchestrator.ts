@@ -1,7 +1,9 @@
 import { storage } from "./storage";
 import { getExpertResponse, getExpertResponseStream, generateInsights, getModeratorNextSpeakerSuggestion, generateClosingSynthesis, resolveAuxModel } from "./ai";
 import type { DeliverableGenerationRequest, ModeratorContext } from "./ai";
-import { shouldStopForRedundancy, REDUNDANCY_STOP_SIMILARITY_THRESHOLD } from "./text-similarity";
+import { isNearDuplicate, shouldStopForRedundancy, REDUNDANCY_STOP_SIMILARITY_THRESHOLD } from "./text-similarity";
+import { enforceTurnFairness } from "./turn-fairness";
+import { commitPendingDeliverable, discardPendingDeliverable } from "./pending-deliverables";
 import type { InsertMessage, Expert, Message, File, MessageStance, OrchestratorSnapshot } from "@shared/schema";
 import { extractFarmerQuestions } from "@shared/mentions";
 import { createHash } from "crypto";
@@ -277,6 +279,7 @@ function buildSnapshot(state: ConversationState): OrchestratorSnapshot {
         // rows written before G13.
         isAutonomousEnabled: state.isAutonomousEnabled,
         maxAutonomousTurns: state.maxAutonomousTurns,
+        sequenceFileCreatorRequestId: state.sequenceFileCreatorRequest?.id ?? null,
     };
 }
 
@@ -287,7 +290,8 @@ function snapshotsDiffer(a: OrchestratorSnapshot, b: OrchestratorSnapshot): bool
         a.wasInterrupted !== b.wasInterrupted ||
         a.pausedFromMode !== b.pausedFromMode ||
         a.isAutonomousEnabled !== b.isAutonomousEnabled ||
-        a.maxAutonomousTurns !== b.maxAutonomousTurns;
+        a.maxAutonomousTurns !== b.maxAutonomousTurns ||
+        a.sequenceFileCreatorRequestId !== b.sequenceFileCreatorRequestId;
 }
 
 /** Convert the persisted user choice into a runtime limit with a hard ceiling. */
@@ -479,7 +483,7 @@ function classifyFarmerFileIntent(content: string | null | undefined): FarmerFil
     const fileNoun = "(?:files?|documents?|sops?|calendars?|spreadsheets?|exports?)";
 
     if (
-        new RegExp(`\\b(?:stop|don't|do not|no longer)\\b.{0,60}\\b(?:create|make|generate|draft|write|produce|attach|export|creating|making|generating|drafting|writing|producing|attaching|exporting)\\b.{0,60}\\b${fileNoun}\\b`).test(text) ||
+        new RegExp(`\\b(?:stop|don't|do not|no longer)\\b.{0,60}\\b(?:create|make|generate|draft|write|produce|attach|export|save|creating|making|generating|drafting|writing|producing|attaching|exporting|saving)\\b.{0,60}\\b${fileNoun}\\b`).test(text) ||
         new RegExp(`\\bno (?:more|new|additional) ${fileNoun}\\b`).test(text) ||
         /\bno\s+(?:file|document)\s+(?:creation|generation|output)\b/.test(text) ||
         /\b(?:stop|disable)\s+(?:file|document)\s+(?:creation|generation)\b/.test(text)
@@ -490,7 +494,7 @@ function classifyFarmerFileIntent(content: string | null | undefined): FarmerFil
     // A request that creates or revises an artifact may also ask for its link.
     // Keep that work in the generation path; only a retrieval-only message is
     // fulfilled directly from stored files.
-    if (/\b(?:create|make|generate|draft|write|produce|prepare|revise|update|modify|export)\b.{0,80}\b(?:files?|documents?|sops?|calendars?|spreadsheets?|exports?)\b/.test(text)) {
+    if (/\b(?:create|make|generate|draft|write|produce|prepare|revise|update|modify|export|save)\b.{0,80}\b(?:files?|documents?|sops?|calendars?|spreadsheets?|exports?)\b/.test(text)) {
         return null;
     }
 
@@ -534,7 +538,7 @@ function isFileCreatorAllowed(content: string | null | undefined, hasOutstanding
     if (!text || blocksFileCreator(classifyFarmerFileIntent(text))) return false;
     const fileNoun = "(?:files?|documents?|sops?|calendars?|spreadsheets?|exports?|plans?|scripts?|code)";
     return hasOutstandingRequest ||
-        new RegExp(`\\b(?:create|make|generate|draft|write|produce|prepare|export|build|turn|convert|provide|give|need|want|revise|update|edit|modify|replace|change|adjust)\\b.{0,80}\\b${fileNoun}\\b`).test(text);
+        new RegExp(`\\b(?:create|make|generate|draft|write|produce|prepare|export|build|turn|convert|provide|give|need|want|revise|update|edit|modify|replace|change|adjust|save)\\b.{0,80}\\b${fileNoun}\\b`).test(text);
 }
 
 function nextSequenceFileCreatorRequest(
@@ -729,8 +733,43 @@ function isUsableExpertResponse(role: Message["role"], content: string): boolean
         !trimmedContent.startsWith("⚠️");
 }
 
+// Per-sequence fairness memory, keyed by the sequence's
+// sequenceExpertContents array: every new sequence (farmer message, restart,
+// resume) starts with a fresh array, so this resets exactly when it should.
+type SequenceFairness = { speakers: number[]; retired: Set<number> };
+const sequenceFairness = new WeakMap<object, SequenceFairness>();
+function fairnessFor(sequenceKey: object | undefined): SequenceFairness {
+    if (!sequenceKey) return { speakers: [], retired: new Set() };
+    let entry = sequenceFairness.get(sequenceKey);
+    if (!entry) { entry = { speakers: [], retired: new Set() }; sequenceFairness.set(sequenceKey, entry); }
+    return entry;
+}
+function messagesSinceLatestFarmer(history: Message[]): { farmerMessageId: number | null; expertMessages: Message[] } {
+    let idx = -1;
+    for (let i = history.length - 1; i >= 0; i--) if (history[i].role === "user") { idx = i; break; }
+    return {
+        farmerMessageId: idx >= 0 ? history[idx].id : null,
+        expertMessages: history.slice(idx + 1).filter(m => m.expertId != null && isRealExpertHistoryMessage(m)),
+    };
+}
+
 function isRealExpertHistoryMessage(m: Message): boolean {
     return isUsableExpertResponse(m.role, m.content);
+}
+
+function expertMessagesSinceLatestFarmer(messages: Message[]): Message[] {
+    let latestFarmerIndex = -1;
+    for (let index = messages.length - 1; index >= 0; index--) {
+        if (messages[index].role === "user") {
+            latestFarmerIndex = index;
+            break;
+        }
+    }
+    return messages.slice(latestFarmerIndex + 1).filter(message =>
+        typeof message.expertId === "number" &&
+        Number.isInteger(message.expertId) &&
+        isRealExpertHistoryMessage(message),
+    );
 }
 
 function nextHealthyExpertIndex(activeExperts: Expert[], currentIndex: number, failedExpertIds: number[]): number {
@@ -942,8 +981,16 @@ export async function restorePausedFromSnapshot(
     // Fresh in-memory state, then restore the pause through the shared update
     // path so the paused state_update broadcast and persisted snapshot
     // (carrying the restored index/counters) behave like the cold-start path.
-    // lastUserMessage stays null until a new farmer message joins the parked
-    // sequence in place.
+    // Recover the farmer context too, so File Creator can finish a saved request.
+    const history = await Promise.resolve().then(() => storage.getConversationMessages(conversationId)).then(messages => messages ?? []).catch(error => {
+        console.error(`Orchestrator: Could not rebuild context for paused conversation ${conversationId}:`, error);
+        return [];
+    });
+    const farmerMessages = history.filter(message => message.role === "user");
+    const lastUserMessage = farmerMessages.at(-1) ?? null;
+    const fileRequest = storedSnapshot.sequenceFileCreatorRequestId === undefined
+        ? nextSequenceFileCreatorRequest(null, lastUserMessage)
+        : farmerMessages.find(message => message.id === storedSnapshot.sequenceFileCreatorRequestId) ?? null;
     const restored: ConversationState = {
         conversationId,
         activeExperts,
@@ -951,7 +998,8 @@ export async function restorePausedFromSnapshot(
         currentExpertIndex: Number.isInteger(storedSnapshot.currentExpertIndex)
             ? storedSnapshot.currentExpertIndex
             : -1,
-        lastUserMessage: null,
+        lastUserMessage,
+        sequenceFileCreatorRequest: fileRequest,
         mode: "idle",
         broadcastFn,
         isAutonomousEnabled: snapshotBooleanOrDefault(storedSnapshot.isAutonomousEnabled, true),
@@ -974,10 +1022,7 @@ export async function restorePausedFromSnapshot(
         failedExpertIds: [],
         roundExperts: activeExperts,
         mentionPairStreak: null,
-        ...stanceStateForRestoredQuestion(await Promise.resolve().then(() => storage.getConversationMessages(conversationId)).then(messages => messages ?? []).catch(error => {
-            console.error(`Orchestrator: Could not rebuild stance ledger for paused conversation ${conversationId}:`, error);
-            return [];
-        }), activeExperts),
+        ...stanceStateForRestoredQuestion(history, activeExperts),
         stanceCycleRoles: [],
         stableSplitSignature: null,
         stableSplitCycleCount: 0,
@@ -1621,6 +1666,34 @@ export class InteractionOrchestrator {
             }
         }
 
+        // 1b. Turn fairness: every expert speaks before anyone repeats, nobody
+        // speaks twice in a row, a farmer @mention is honoured once.
+        const candidateExpert = nextExpertIndex >= 0 ? state.activeExperts[nextExpertIndex] : undefined;
+        const fairness = fairnessFor(getConversationState(this.conversationId)?.sequenceExpertContents);
+        const fileCreatorAlreadyDelivered = Boolean(candidateExpert && isFileCreatorRole(candidateExpert.role) &&
+            fairness.speakers.includes(candidateExpert.id));
+        if (state.mode === "autonomous" && candidateExpert && (!isFileCreatorRole(candidateExpert.role) || fileCreatorAlreadyDelivered)) {
+            const speakers = fairness.speakers;
+            // File Creator is an on-request utility, not a discussant; it is
+            // governed by the File Creator gate, not by rotation.
+            const rotation = state.activeExperts.filter(e => isSpeakableExpertRole(e.role) && !isFileCreatorRole(e.role));
+            const excludedIds = [...state.failedExpertIds, ...Array.from(fairness.retired)];
+            const fairId = enforceTurnFairness({
+                rosterIds: rotation.map(e => e.id),
+                excludedIds,
+                speakersSinceFarmer: speakers.filter(id => rotation.some(e => e.id === id)),
+                candidateId: fileCreatorAlreadyDelivered ? null : candidateExpert.id,
+                isFarmerMentionRoute: selectedMentionRoute?.sourceRole === null,
+                turnBudget: state.maxAutonomousTurns,
+            });
+            const fairIndex = fairId === null ? -1 : state.activeExperts.findIndex(e => e.id === fairId);
+            if (fairIndex !== nextExpertIndex) {
+                debugLog(`Orchestrator: fairness override ${candidateExpert.role} -> ${fairIndex >= 0 ? state.activeExperts[fairIndex].role : "stop"} for ${this.conversationId}`);
+                nextExpertIndex = fairIndex;
+                if (fairIndex === -1) moderatorConcluded = true;
+            }
+        }
+
         // 2. Check if processing should stop based on index or limits
         let endOfProcessing = false;
         // G4: sequential rounds iterate roundExperts (the addressed subset
@@ -1820,13 +1893,29 @@ export class InteractionOrchestrator {
                 
                 // Store and broadcast completed message
                 let storedExpertMessage: Message | undefined;
+                let discardedDuplicate = false;
                 if (isUsableExpertResponse(expertResponse.role, expertResponse.content)) {
-                    storedExpertMessage = await storage.createMessage(expertResponse);
-                    expertResponseFailed = !isRealExpertHistoryMessage(storedExpertMessage);
+                    const turnFairness = fairnessFor(getConversationState(this.conversationId)?.sequenceExpertContents);
+                    const priorContents = [
+                        ...messagesSinceLatestFarmer(history).expertMessages.map(m => m.content),
+                        ...(getConversationState(this.conversationId)?.sequenceExpertContents ?? []),
+                    ];
+                    if (state.mode === "autonomous" && !isFileCreatorRole(currentExpert.role) && isNearDuplicate(expertResponse.content, priorContents)) {
+                        discardedDuplicate = true;
+                        turnFairness.retired.add(currentExpert.id);
+                        console.warn(`Orchestrator: discarded near-duplicate answer from ${currentExpert.role} in conversation ${this.conversationId}; retiring it until the farmer speaks.`);
+                        broadcastFn(this.conversationId, { type: "expert_stream_done", expertId: currentExpert.id });
+                        discardPendingDeliverable(expertResponse);
+                    } else {
+                        await commitPendingDeliverable(expertResponse, { farmerMessage: state.lastUserMessage ?? null });
+                        storedExpertMessage = await storage.createMessage(expertResponse);
+                        expertResponseFailed = !isRealExpertHistoryMessage(storedExpertMessage);
+                        if (!expertResponseFailed) fairnessFor(getConversationState(this.conversationId)?.sequenceExpertContents).speakers.push(currentExpert.id);
+                    }
                 } else {
                     expertResponseFailed = true;
                 }
-                if (expertResponseFailed) {
+                if (expertResponseFailed && !discardedDuplicate) {
                     storedExpertMessage = await this.recordExpertFailure(currentExpert);
                 }
                 if (storedExpertMessage?.role === "assistant" && !expertResponseFailed) {
@@ -2240,6 +2329,7 @@ export async function processMessageTurnBased(
             // previous behavior exactly. A stale-but-present in-memory state
             // keeps its existing recovery semantics regardless of the row.
             let storedSnapshot: OrchestratorSnapshot | null = null;
+            let restoredSequenceFileCreatorRequest: Message | null | undefined;
             let configuredBudget: number | null | undefined;
             if (typeof storage.getConversation === "function") {
                 try {
@@ -2255,6 +2345,20 @@ export async function processMessageTurnBased(
                     // farmer message. Continue safely with the default budget.
                     console.error(`Orchestrator: Could not read conversation settings/snapshot for ${conversationId}; using safe budget defaults:`, error);
                     if (explicitRestart) explicitRestartBudgetRead = true;
+                }
+            }
+            if (storedSnapshot?.mode === "paused" && !explicitRestart &&
+                storedSnapshot.sequenceFileCreatorRequestId !== undefined) {
+                restoredSequenceFileCreatorRequest = null;
+                if (storedSnapshot.sequenceFileCreatorRequestId !== null) {
+                    try {
+                        const history = await storage.getConversationMessages(conversationId);
+                        restoredSequenceFileCreatorRequest = history.find(message =>
+                            message.id === storedSnapshot!.sequenceFileCreatorRequestId && message.role === "user"
+                        ) ?? null;
+                    } catch (error) {
+                        console.error(`Orchestrator: Could not restore File Creator request for paused conversation ${conversationId}:`, error);
+                    }
                 }
             }
             if (!state) {
@@ -2297,6 +2401,9 @@ export async function processMessageTurnBased(
                     totalAutonomousTurnsTaken: Number.isInteger(storedSnapshot.totalAutonomousTurnsTaken)
                         ? storedSnapshot.totalAutonomousTurnsTaken
                         : 0,
+                    ...(restoredSequenceFileCreatorRequest === undefined
+                        ? {}
+                        : { sequenceFileCreatorRequest: restoredSequenceFileCreatorRequest }),
                 });
                 state = getConversationState(conversationId)!;
             }

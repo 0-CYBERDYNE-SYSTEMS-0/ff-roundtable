@@ -1,3 +1,5 @@
+import { catalogAvatar } from "@shared/expert-catalog";
+import { billingErrorResponse, billingUnavailable } from "./billing-errors";
 import type { Express, Request, Response } from "express";
 import express from "express";
 import { createServer, type Server } from "http";
@@ -201,6 +203,15 @@ function getVerifiedSessionIdFromUpgradeRequest(req: { headers: { cookie?: strin
 }
 
 export async function registerRoutes(app: Express): Promise<Server> {
+  // Liveness/readiness for docker-compose and uptime checks (README-SELF-HOST).
+  app.get("/api/health", async (_req, res) => {
+    let database: "ok" | "memory" | "error" = process.env.DATABASE_URL ? "ok" : "memory";
+    if (database === "ok") {
+      try { await storage.getUser(0); } catch { database = "error"; }
+    }
+    res.status(database === "error" ? 503 : 200).json({ status: database === "error" ? "degraded" : "ok", database, uptimeSeconds: Math.round(process.uptime()) });
+  });
+
   // Setup authentication routes
   setupAuth(app);
 
@@ -317,7 +328,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           }
 
           const experts = await storage.getConversationExperts(conversationId);
-          const testModel = devConfig.experts[0]?.model || "deepseek/deepseek-v4-flash:free";
+          const testModel = devConfig.experts[0]?.model || "nvidia/nemotron-3-super-120b-a12b:free";
 
           // Update all experts to use the test model
           const updatePromises = experts.map((expert) =>
@@ -756,7 +767,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       expertId: null,
       content,
       role: "user",
-      mentions: extractMentions(content, conversationExperts.map(expert => expert.role)),
+      mentions: extractMentions(content, conversationExperts.map(expert => expert.role), conversationExperts),
       answersQuestionId,
     };
     let storedMessage: Message;
@@ -829,7 +840,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       return res.status(401).json({ message: "Authentication required" });
     }
     if (!stripe) {
-      return res.status(500).json({ message: "Stripe integration not configured" });
+      { const r = billingUnavailable("Stripe integration not configured"); return res.status(r.status).json(r.body); }
     }
     try {
       const user = req.user;
@@ -848,7 +859,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       const priceId = process.env.STRIPE_PRICE_ID_PRO;
       if (!priceId) {
-        return res.status(500).json({ message: "Stripe Pro price ID not configured" });
+        { const r = billingUnavailable("Stripe Pro price ID not configured"); return res.status(r.status).json(r.body); }
       }
 
       const session = await stripe.checkout.sessions.create({
@@ -862,7 +873,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.json({ url: session.url });
     } catch (error: any) {
       console.error("Stripe checkout error:", error);
-      res.status(500).json({ message: error.message });
+      { const r = billingErrorResponse(error, "create-checkout-session"); res.status(r.status).json(r.body); }
     }
   });
 
@@ -872,7 +883,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       return res.status(401).json({ message: "Authentication required" });
     }
     if (!stripe) {
-      return res.status(500).json({ message: "Stripe integration not configured" });
+      { const r = billingUnavailable("Stripe integration not configured"); return res.status(r.status).json(r.body); }
     }
     try {
       const user = req.user;
@@ -887,7 +898,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.json({ message: "Subscription cancelled", tier: "free" });
     } catch (error: any) {
       console.error("Stripe cancel error:", error);
-      res.status(500).json({ message: error.message });
+      { const r = billingErrorResponse(error, "cancel-subscription"); res.status(r.status).json(r.body); }
     }
   });
 
@@ -898,7 +909,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
     
     if (!stripe) {
-      return res.status(500).json({ message: "Stripe integration not configured" });
+      { const r = billingUnavailable("Stripe integration not configured"); return res.status(r.status).json(r.body); }
     }
     
     try {
@@ -929,7 +940,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // Create subscription
       const PRICE_ID = process.env.STRIPE_PRICE_ID;
       if (!PRICE_ID) {
-        return res.status(500).json({ message: "Stripe price ID not configured" });
+        { const r = billingUnavailable("Stripe price ID not configured"); return res.status(r.status).json(r.body); }
       }
       
       const subscription = await stripe.subscriptions.create({
@@ -952,7 +963,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       });
     } catch (error: any) {
       console.error("Stripe error:", error);
-      res.status(500).json({ message: error.message });
+      { const r = billingErrorResponse(error, "create-subscription"); res.status(r.status).json(r.body); }
     }
   });
   
@@ -1137,7 +1148,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
         });
       }
       
-      const { name, role, model, avatarUrl } = req.body;
+      const { name, model } = req.body;
+      const role = typeof req.body.role === "string" ? req.body.role.trim().slice(0, 60) : "";
+      if (!role || /^(user|farmer)$/i.test(role)) {
+        return res.status(400).json({ message: "Choose a valid expert role." });
+      }
+      if (existingExperts.some(e => e.role.toLowerCase() === role.toLowerCase())) {
+        return res.status(409).json({ message: `A ${role} is already at the table.` });
+      }
+      const customInstructions = typeof req.body.customInstructions === "string" && req.body.customInstructions.trim()
+        ? req.body.customInstructions.trim().slice(0, 2000)
+        : null;
+      // Built-in roles always get the bundled avatar; custom roles get the custom badge.
+      const avatarUrl = catalogAvatar(role);
 
       // Check paid model restriction for free tier
       if (tier === "free" && isPaidModel(model)) {
@@ -1152,8 +1175,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
         name,
         role,
         model,
-        systemPrompt: generateSystemPrompt({ role } as any),
-        avatarUrl
+        systemPrompt: generateSystemPrompt({ role, customInstructions } as any),
+        avatarUrl,
+        customInstructions,
       };
       
       const createdExpert = await storage.createExpert(expert);

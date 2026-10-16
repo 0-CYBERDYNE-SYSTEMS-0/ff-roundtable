@@ -9,6 +9,87 @@ import fs from "fs";
 import axios from "axios";
 import { randomBytes } from "crypto";
 import { getProvider } from "./ai-providers";
+import { findCatalogExpert } from "@shared/expert-catalog";
+import { DELIVERABLE_PLACEHOLDER, pendingDeliverableFor, pendingDeliverableByMessage } from "./pending-deliverables";
+export { commitPendingDeliverable, discardPendingDeliverable } from "./pending-deliverables";
+import { enforceCitationIntegrity, stripMetaLines, undecorate, mergeDuplicateFarmerQuestions } from "./response-hygiene";
+import {
+  buildToolUsePrompt, buildToolPlanningPrompt, parseToolPlan, runToolCalls, formatToolResultsForPrompt,
+  toolCallLimitForTier, extractDeliverable, saveExpertDeliverable, filterChartArtifacts, type ToolRun,
+} from "./expert-tools";
+
+/** Expert tools are on by default; EXPERT_TOOLS=off disables them. Unit tests never hit the network. */
+export function expertToolsEnabled(): boolean {
+  return process.env.EXPERT_TOOLS !== "off" && !process.env.VITEST;
+}
+
+/** Paid OpenRouter web plugin only on explicit opt-in; free DuckDuckGo tools are the default. */
+function paidWebPluginEnabled(): boolean {
+  return process.env.OPENROUTER_WEB_PLUGIN === "true";
+}
+
+async function runExpertToolPhase(expert: Expert, question: string, userId?: number): Promise<ToolRun | null> {
+  if (!expertToolsEnabled() || expert.role === "Moderator" || expert.role === "File Creator") return null;
+  let tier: string | undefined;
+  try { tier = userId ? (await storage.getUser(userId))?.tier ?? undefined : undefined; } catch { tier = undefined; }
+  const limit = toolCallLimitForTier(tier);
+  let plan = "NONE";
+  try {
+    const planning = await callOpenRouterAPI([
+      { role: "system", content: buildToolPlanningPrompt(expert.role, question, limit) },
+      { role: "user", content: "List your tool calls now (or NONE)." },
+    ], expert.model, userId);
+    plan = planning.message.content ?? "NONE";
+  } catch (error) {
+    console.warn(`[TOOLS] planning failed for ${expert.role}: ${(error as Error).message}`);
+    return null;
+  }
+  const calls = parseToolPlan(plan, limit);
+  if (!calls.length) return null;
+  const run = await runToolCalls(calls);
+  console.log(`[TOOLS] ${expert.role}: ${calls.length} call(s), ${run.sources.length} source(s)${run.notes.length ? `, notes: ${run.notes.join("; ")}` : ""}`);
+  return run;
+}
+
+/** Saves an expert deliverable block and appends sources actually cited. Returns the farmer-facing text. */
+async function finalizeExpertTools(
+  expert: Expert,
+  content: string,
+  toolRun: ToolRun | null,
+  deliverable: ReturnType<typeof extractDeliverable>["deliverable"],
+  history: Message[] = [],
+): Promise<{ content: string; addition: string }> {
+  let text = content;
+  let addition = "";
+  const citation = enforceCitationIntegrity(text, toolRun?.sources ?? [], history.map(m => m.content));
+  if (citation.removedMarkers || citation.removedUrls) {
+    console.log(`[CITATIONS] ${expert.role}: removed ${citation.removedMarkers} invalid marker(s), ${citation.removedUrls} unverified URL(s)`);
+  }
+  text = citation.content;
+  let lastFarmer = -1;
+  history.forEach((m, i) => { if (m.role === "user") lastFarmer = i; });
+  const recent = history.slice(lastFarmer + 1)
+    .filter(m => m.role === "assistant" && m.expertRole && m.expertRole !== expert.role)
+    .map(m => ({ role: m.expertRole as string, content: m.content }));
+  const questions = mergeDuplicateFarmerQuestions(text, recent);
+  if (questions.merged) console.log(`[QUESTIONS] ${expert.role}: merged ${questions.merged} duplicate farmer question(s)`);
+  text = questions.content;
+  if (deliverable) {
+    // Saved only after the orchestrator accepts the turn (a discarded
+    // near-duplicate turn must not leave a document behind).
+    const line = `\n\n📄 ${DELIVERABLE_PLACEHOLDER}`;
+    text += line;
+    pendingDeliverableFor.set(expert, deliverable);
+  }
+  if (toolRun?.sources.length) {
+    const cited = toolRun.sources.filter(s => new RegExp(`\\b${s.id}\\b`).test(text) || text.includes(s.url));
+    if (cited.length && !/\n(?:\*\*)?Sources(?:\*\*)?:/i.test(text)) {
+      const block = `\n\n**Sources:**\n${cited.map(s => `- [${s.id}] [${s.title || s.url}](${s.url})`).join("\n")}`;
+      text += block; addition += block;
+    }
+  }
+  return { content: text, addition };
+}
 import { collectImageParts, isImageFile, MAX_IMAGE_PARTS, analyzedImageNote, makeAnalyzedBeforePredicate, type ImagePart } from "./image-context";
 
 const AI_REQUEST_TIMEOUT_MS = 120_000;
@@ -414,14 +495,15 @@ export function parseTrailingStanceLine(content: string): {
   }
   if (finalLineIndex < 0) return { content, stance: null };
 
-  const finalLine = lines[finalLineIndex].replace(/\r$/, "");
-  if (!/^[ \t]*STANCE:/.test(finalLine)) return { content, stance: null };
+  // Models sometimes bold/quote/bullet the line ("**STANCE: …**"); formatting must not hide it.
+  const finalLine = undecorate(lines[finalLineIndex].replace(/\r$/, ""));
+  if (!/^STANCE\s*:/i.test(finalLine)) return { content, stance: null };
 
   const lineStart = lines.slice(0, finalLineIndex).reduce(
     (length, line) => length + line.length + 1,
     0,
   );
-  const match = finalLine.match(/^[ \t]*STANCE:\s*(agree|disagree|conditional|abstain)\s*\|\s*([1-5])\s*\|\s*(.+?)\s*$/i);
+  const match = finalLine.match(/^STANCE\s*:\s*(agree|disagree|conditional|abstain)\s*\|\s*([1-5])\s*\|\s*(.+?)\s*$/i);
   const stanceValue = match?.[1]?.toLowerCase();
   const position = match?.[3]?.trim();
   const stance = match && position && STANCE_VALUES.includes(stanceValue as typeof STANCE_VALUES[number])
@@ -438,8 +520,12 @@ export function parseTrailingStanceLine(content: string): {
 function stripExpertStance(response: AIModelResponse, role: string): MessageStance | null {
   if (role === "Moderator") return null;
   const parsed = parseTrailingStanceLine(response.message.content);
-  response.message.content = parsed.content;
-  return parsed.stance;
+  // Any remaining metadata line (mid-message STANCE, tool-protocol lines) is
+  // removed too; a mid-message STANCE still counts if no trailing one existed.
+  const meta = stripMetaLines(parsed.content);
+  response.message.content = meta.content;
+  if (parsed.stance || !meta.stanceLine) return parsed.stance;
+  return parseTrailingStanceLine(meta.stanceLine).stance;
 }
 
 /**
@@ -447,7 +533,7 @@ function stripExpertStance(response: AIModelResponse, role: string): MessageStan
  * marker is released only if later non-whitespace content proves it was not
  * the final line, so structured metadata never flashes in the live response.
  */
-class TrailingStanceStreamFilter {
+export class TrailingStanceStreamFilter {
   private mode: "body" | "prefix" | "marker" | "after-marker" = "prefix";
   private held = "";
 
@@ -468,11 +554,11 @@ class TrailingStanceStreamFilter {
             output += char;
           }
         } else if (this.mode === "prefix") {
-          const indentationLength = this.held.match(/^[ \t]*/)?.[0].length ?? 0;
+          const indentationLength = this.held.match(/^[ \t>*_`#~-]*/)?.[0].length ?? 0;
           const markerProgress = this.held.length - indentationLength;
-          if (markerProgress === 0 && (char === " " || char === "\t")) {
+          if (markerProgress === 0 && /[ \t>*_`#~-]/.test(char)) {
             this.held += char;
-          } else if (char === marker[markerProgress]) {
+          } else if (char.toUpperCase() === marker[markerProgress]) {
             this.held += char;
             if (markerProgress + 1 === marker.length) this.mode = "marker";
           } else if (char === "\n") {
@@ -544,6 +630,8 @@ You are part of a team of experts: [${availableRoles?.join(', ') || 'various rol
       role => role !== expert.role && role !== "Moderator" && role !== "User" && role !== "Farmer",
     );
     const colleagues = colleagueRoles.length > 0 ? ` Colleagues (not you): [${colleagueRoles.join(", ")}].` : "";
+    basePrompt += `\n🎭 STAY IN ROLE: you are the ${expert.role} only. Answer from your specialty; when a point belongs to another specialty, hand it to that colleague with @[Role] instead of answering it yourself.\n`;
+    basePrompt += `\n🔁 READ THE TABLE FIRST: before writing, read each colleague's most recent message. Unless you are the first to speak on this farmer message, open with one sentence that names a colleague and builds on or disagrees with a specific point they made (e.g. "Building on the Soil Scientist's nitrate point…" / "I disagree with Pest Management that…"). Do not restate points already made — add something new or say plainly that you have nothing to add.\n`;
     basePrompt += `\n💬 CROSS-TALK: Build on or challenge colleagues by name ("I agree with X because…" / "I disagree with X on…").${colleagues} Tag @[Role] only when you need that specialty or want that expert to defend a point; never tag yourself or force a tag every turn. Add new information or an objection instead of repeating settled points.\n`;
   }
 
@@ -574,101 +662,9 @@ Keep responses concise: lead with the answer, then include only useful evidence,
 Clearly distinguish facts supplied by the farmer, fictional or example prices and inputs, calculations, and assumptions. Keep units with values, and do not present fictional inputs as farm facts. Avoid unqualified farm-specific prescriptions when evidence or required farm inputs are missing; state the uncertainty and what is needed.
 If you need a fact only the farmer can know, ask one concise, plain-language question on its own line beginning exactly "Farmer question:". Do not use an @[User] mention for that question. If useful, put a separate next line beginning "Assuming <reasonable assumption>" and continue with that qualified assumption without waiting for the farmer to answer.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-✨ CREATE VIBRANT, VISUALLY STUNNING INTERACTIVE DATA VISUALIZATIONS ✨
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DATA & VISUALS: never invent numbers. Tables and charts may only use numbers the farmer gave, the weather data provided, or sources retrieved this turn, and must say where each number came from. If you have no real data, explain in words instead of drawing a chart.
 
-When presenting data, trends, or insights, ALWAYS create visually striking, colorful interactive visualizations:
-
-📊 MULTI-LINE CHARTS (BEST for multiple metrics over time):
-\`\`\`chart
-{
-  "type": "line",
-  "data": [
-    {"time": "Jan", "yield": 45, "rainfall": 52, "temp": 38, "quality": 61},
-    {"time": "Feb", "yield": 52, "rainfall": 48, "temp": 55, "quality": 68},
-    {"time": "Mar", "yield": 68, "rainfall": 61, "temp": 62, "quality": 75},
-    {"time": "Apr", "yield": 73, "rainfall": 70, "temp": 68, "quality": 82}
-  ],
-  "lines": [
-    {"key": "yield", "color": "#10B981", "name": "Crop Yield"},
-    {"key": "rainfall", "color": "#3B82F6", "name": "Rainfall"},
-    {"key": "temp", "color": "#F59E0B", "name": "Temperature"},
-    {"key": "quality", "color": "#8B5CF6", "name": "Quality Index"}
-  ],
-  "title": "Seasonal Agricultural Trends"
-}
-\`\`\`
-
-📈 MULTI-AREA CHARTS (BEST for cumulative contributions or stacked trends):
-\`\`\`chart
-{
-  "type": "area",
-  "data": [
-    {"week": "W1", "organic": 120, "nitrogen": 80, "phosphorus": 60},
-    {"week": "W2", "organic": 150, "nitrogen": 95, "phosphorus": 78},
-    {"week": "W3", "organic": 180, "nitrogen": 110, "phosphorus": 95},
-    {"week": "W4", "organic": 210, "nitrogen": 130, "phosphorus": 115}
-  ],
-  "lines": [
-    {"key": "organic", "color": "#059669", "name": "Organic Matter"},
-    {"key": "nitrogen", "color": "#0284C7", "name": "Nitrogen (N)"},
-    {"key": "phosphorus", "color": "#DC2626", "name": "Phosphorus (P)"}
-  ],
-  "title": "Soil Nutrient Accumulation"
-}
-\`\`\`
-
-📊 MULTI-BAR CHARTS (BEST for comparing multiple metrics across categories):
-\`\`\`chart
-{
-  "type": "bar",
-  "data": [
-    {"region": "North", "corn": 2400, "wheat": 1800, "soy": 2200},
-    {"region": "South", "corn": 2100, "wheat": 2200, "soy": 1900},
-    {"region": "East", "corn": 2800, "wheat": 1600, "soy": 2600},
-    {"region": "West", "corn": 2200, "wheat": 1900, "soy": 2500}
-  ],
-  "bars": [
-    {"key": "corn", "color": "#FBBF24", "name": "Corn Yield"},
-    {"key": "wheat", "color": "#F97316", "name": "Wheat Yield"},
-    {"key": "soy", "color": "#84CC16", "name": "Soybean Yield"}
-  ],
-  "title": "Regional Yield Comparison"
-}
-\`\`\`
-
-📋 DYNAMIC, COLORFUL DATA TABLES - Use visual elements throughout:
-
-\`\`\`table
-| 🌱 Metric | 📊 Current | 🎯 Target | 📈 Trend | ✅ Status |
-| --------- | --------- | --------- | -------- | --------- |
-| **Performance** | 85% | 90% | ↑ +5% | ✓ Optimal |
-| **Efficiency** | 72 units | 80 units | → Stable | ⚠️ Monitor |
-| **Growth** | 12% | 15% | ↓ -1% | ✗ Action |
-| **Quality** | 94% | 95% | ↑ +3% | ✓ Optimal |
-\`\`\`
-
-🎨 VISUAL PRINCIPLES FOR MAXIMUM IMPACT:
-
-✓ Use VIBRANT, SATURATED COLORS: Emerald (#10B981), Blue (#3B82F6), Amber (#F59E0B), Violet (#8B5CF6)
-✓ Always include 3+ series when visualizing complex relationships
-✓ Use EMOJI INDICATORS (🌱, 📊, 🎯, 📈, ✅, ⚠️, ↑, ↓, →) in tables for quick visual parsing
-✓ Make headers BOLD and use varied row emphasis
-✓ Titles should be insight-driven (e.g., "Optimal Growth Detected" vs "Yield Data")
-✓ Provide legend identifying each metric or series
-
-For HTML content:
-\`\`\`html
-<div style="background: linear-gradient(135deg, #10b981 0%, #3b82f6 100%); padding: 24px; border-radius: 12px; color: white; font-family: sans-serif;">
-  <h2 style="margin-top: 0;">Insight Discovery</h2>
-  <p>Make your content visually stimulating and contextually rich!</p>
-</div>
-\`\`\`
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Success = Dynamic Data + Vibrant Visuals + Clear Expert Insights
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+${expert.role === "Moderator" ? "" : buildToolUsePrompt()}
 `;
 
   // Add role-specific instructions
@@ -726,7 +722,8 @@ Uploaded images are delivered to you directly as native vision input — describ
       G5: you may also end the roundtable — if the discussion has run its course (the farmer's question is answered, decisions are made, and further turns would only repeat the table), respond ONLY with 'Conclude' and the council will close with a final synthesis from you. If unsure, suggest 'RoundRobin'.`;
       break;
     default:
-      roleInstructions = `Provide insights based on your general agricultural knowledge.`;
+      roleInstructions = findCatalogExpert(expert.role)?.rolePrompt
+        ?? `You are a custom expert. Stay within the "${expert.role}" specialty described by the farmer's custom instructions; say when a question is outside it.`;
   }
 
   const stanceInstruction = expert.role === "Moderator" || expert.role === "File Creator"
@@ -1154,6 +1151,10 @@ export async function getExpertResponseStream(
    // With image parts present, the user message becomes a multimodal content
    // array. The 12k-char truncation applies to the TEXT part only — the
    // base64 image parts are appended verbatim, never truncated.
+   // Core tools: optional research phase (search / fetch) before answering.
+   const toolRun = await runExpertToolPhase(expert, referenceMessageContent, conversation?.userId);
+   if (toolRun) messages.push({ role: "system", content: formatToolResultsForPrompt(toolRun) });
+
    const userText = truncateForModel(referenceMessageContent);
    messages.push(
       imageParts.length > 0
@@ -1182,7 +1183,7 @@ export async function getExpertResponseStream(
           expert.model,
           streamFilter ? token => streamFilter!.push(token) : onToken,
           conversation?.userId,
-          true,
+          paidWebPluginEnabled(),
         );
         streamFilter?.finish();
         stance = stripExpertStance(response, expert.role);
@@ -1212,13 +1213,26 @@ export async function getExpertResponseStream(
     }
     
     requireNonEmptyAssistantContent(response);
-    const { artifacts, cleanContent } = extractArtifacts(response.message.content);
+    // Deliverable blocks are pulled out before artifact extraction so tables
+    // inside a document stay in the document.
+    const deliverableSplit = expert.role === "File Creator" || expert.role === "Moderator"
+      ? { deliverable: null, cleanContent: response.message.content }
+      : extractDeliverable(response.message.content);
+    const extracted = extractArtifacts(deliverableSplit.cleanContent);
+    const allowedChartUrls = toolRun?.sources.map(src => src.url) ?? [];
+    const { kept: artifacts, dropped: droppedCharts } = filterChartArtifacts(extracted.artifacts, allowedChartUrls);
+    if (droppedCharts) console.log(`[CHARTS] dropped ${droppedCharts} unsourced chart(s) from ${expert.role}`);
+    const finalized = expert.role === "File Creator" || expert.role === "Moderator"
+      ? { content: extracted.cleanContent, addition: "" }
+      : await finalizeExpertTools(expert, extracted.cleanContent, toolRun, deliverableSplit.deliverable, history);
+    if (finalized.addition) onToken(finalized.addition);
+    const cleanContent = finalized.content;
     const researchAnswer = expert.role === "Research Analyst"
       ? appendRetrievedCitationUrls(cleanContent, response.citations)
       : { content: cleanContent, addition: "" };
     if (researchAnswer.addition) onToken(researchAnswer.addition);
 
-    return {
+    const streamedMessage: InsertMessage = {
       conversationId: expert.conversationId,
       expertId: expert.id,
       userId: null,
@@ -1233,6 +1247,12 @@ export async function getExpertResponseStream(
       mentions: extractMentions(cleanContent, availableRoles),
       stance,
     };
+    const pendingDoc = pendingDeliverableFor.get(expert);
+    if (pendingDoc) {
+      pendingDeliverableFor.delete(expert);
+      pendingDeliverableByMessage.set(streamedMessage, { expert, deliverable: pendingDoc });
+    }
+    return streamedMessage;
 
   } catch (error) {
     console.error(`[STREAM] Response generation failed for expert ${expert.name}`);
@@ -1316,7 +1336,7 @@ export async function getExpertResponse(
       if (process.env.PERPLEXITY_API_KEY) {
         response = await callPerplexityAPI(referenceMessageContent, messages);
       } else {
-        response = await callOpenRouterAPI(messages, expert.model, conversation?.userId, true);
+        response = await callOpenRouterAPI(messages, expert.model, conversation?.userId, paidWebPluginEnabled());
       }
     } 
     else if (expert.role === "File Creator") {
@@ -1336,7 +1356,9 @@ export async function getExpertResponse(
     }
     
     requireNonEmptyAssistantContent(response);
-    const { artifacts, cleanContent } = extractArtifacts(response.message.content);
+    const extractedNonStream = extractArtifacts(response.message.content);
+    const { kept: artifacts } = filterChartArtifacts(extractedNonStream.artifacts, []);
+    const cleanContent = extractedNonStream.cleanContent;
     const researchAnswer = expert.role === "Research Analyst"
       ? appendRetrievedCitationUrls(cleanContent, response.citations)
       : { content: cleanContent, addition: "" };

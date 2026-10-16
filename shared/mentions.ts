@@ -10,6 +10,8 @@
  *    against the roster. "@soil" resolves to "Soil Scientist"; when several
  *    roles share the typed prefix the longest role wins (an exact match
  *    always beats a longer role).
+ *  - Display alias: `@<first role word> Expert` also resolves to that role
+ *    (for example, `@Pest Expert` resolves to "Pest Management").
  *
  * Mentions inside code fences ARE matched — stripping fences is not worth the
  * complexity; an expert tagging a colleague inside a code block is rare and
@@ -19,7 +21,7 @@
  */
 
 /** Maximal run of role-name-ish characters after a bare "@". */
-const BARE_RUN_RE = /^[A-Za-z0-9'’-]*(?:[ \t][A-Za-z0-9'’-]*)*/;
+const BARE_RUN_RE = /^[A-Za-z0-9'’&-]*(?:[ \t][A-Za-z0-9'’&-]*)*/;
 
 /** Collapse internal whitespace and lowercase for comparison. */
 function normalizeRole(role: string): string {
@@ -32,14 +34,32 @@ function normalizeRole(role: string): string {
  * appearance, deduped, and filtered to the roster. The reserved farmer token
  * is always returned as "User", even when that role is not in the roster.
  */
-export function extractMentions(content: string, knownRoles: string[]): string[] {
+export function extractMentions(
+  content: string,
+  knownRoles: string[],
+  nameAliases: Array<{ name: string; role: string }> = [],
+): string[] {
   if (!content) return [];
 
   // Lookup by normalized name; the first spelling in the roster wins on dupes.
   const roleByNorm = new Map<string, string>();
+  const aliasByNorm = new Map<string, string | null>();
   for (const role of knownRoles) {
     const norm = normalizeRole(role);
     if (norm && !roleByNorm.has(norm)) roleByNorm.set(norm, role);
+    const firstWord = norm.split(" ")[0];
+    if (firstWord && norm.includes(" ")) {
+      const alias = `${firstWord} expert`;
+      const existing = aliasByNorm.get(alias);
+      aliasByNorm.set(alias, existing === undefined || existing === role ? role : null);
+    }
+  }
+
+  // Expert display names ("@Dr. Soil", "@Grandpa Joe") resolve to their role.
+  const roleByName = new Map<string, string>();
+  for (const { name, role } of nameAliases) {
+    const norm = normalizeRole(name.replace(/[^A-Za-z0-9'’ -]/g, " "));
+    if (norm && roleByNorm.has(normalizeRole(role)) && !roleByNorm.has(norm)) roleByName.set(norm, roleByNorm.get(normalizeRole(role))!);
   }
 
   const found: string[] = [];
@@ -78,9 +98,14 @@ export function extractMentions(content: string, knownRoles: string[]): string[]
     const words = run.trim().split(/\s+/).filter(Boolean);
     for (let k = words.length; k >= 1; k--) {
       const typed = words.slice(0, k).join(" ").toLowerCase();
-      const exact = roleByNorm.get(typed);
+      const exact = roleByNorm.get(typed) ?? roleByName.get(typed);
       if (exact) {
         addRole(exact);
+        break;
+      }
+      const alias = aliasByNorm.get(typed);
+      if (alias) {
+        addRole(alias);
         break;
       }
       let best: string | null = null;

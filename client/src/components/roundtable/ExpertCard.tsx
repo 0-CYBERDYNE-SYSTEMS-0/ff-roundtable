@@ -1,3 +1,4 @@
+import { catalogAvatar } from "@shared/expert-catalog";
 import { useState, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -136,8 +137,9 @@ export default function ExpertCard({
       <div className="flex items-center mb-2">
         <div className="relative">
           <img 
-            src={expertData.avatarUrl} 
+            src={expertData.avatarUrl || catalogAvatar(expertData.role)} 
             alt={expertData.role} 
+            onError={(e) => { const img = e.currentTarget; const fallback = catalogAvatar(expertData.role); if (img.src !== fallback) img.src = fallback; }}
             className="w-12 h-12 rounded-full mr-3 object-cover border border-neutral-200"
           />
           {expertData.recommended && (
