@@ -439,7 +439,7 @@ export class LocalOpenAIProvider implements AIProvider {
   }
 
   private getActualModel(model: string): string {
-    return model.replace(/^local\//, '');
+    return resolveLocalModel(model);
   }
 
   private getHeaders(): Record<string, string> {
@@ -602,8 +602,23 @@ const localOpenAIProvider = new LocalOpenAIProvider();
  * Models prefixed with "local/" use the local OpenAI-compatible provider
  * (ollama, LM Studio, llama.cpp). All others use OpenRouter.
  */
+export function isLocalOnlyMode(): boolean {
+  return /^(1|true|yes)$/i.test(process.env.OLLAMA_ENABLED ?? "");
+}
+
+/**
+ * Map a requested model to the model name sent to the local server.
+ * In local-only mode (OLLAMA_ENABLED=true) every expert uses OLLAMA_MODEL
+ * (default "llama3"), so a self-hoster needs no paid keys at all.
+ */
+export function resolveLocalModel(model: string): string {
+  if (isLocalOnlyMode()) return process.env.OLLAMA_MODEL || "llama3";
+  const stripped = model.replace(/^local\//, '');
+  return stripped === "default" ? (process.env.OLLAMA_MODEL || "llama3") : stripped;
+}
+
 export function getProvider(modelId: string): AIProvider {
-  if (modelId.startsWith('local/')) {
+  if (isLocalOnlyMode() || modelId.startsWith('local/')) {
     return localOpenAIProvider;
   }
   return openRouterProvider;
