@@ -94,6 +94,15 @@ export async function assertPublicUrl(raw: string): Promise<URL> {
 }
 
 type FetchLike = typeof fetch;
+const MAX_PDF_BYTES = 8_000_000;
+
+/** Text of a PDF (extension bulletins are often PDFs). Empty string if none. */
+export async function extractPdfText(data: Uint8Array): Promise<string> {
+  const { extractText, getDocumentProxy } = await import("unpdf");
+  const pdf = await getDocumentProxy(data);
+  const { text } = await extractText(pdf, { mergePages: true });
+  return String(text ?? "").replace(/\s+/g, " ").trim();
+}
 
 export async function webSearch(query: string, fetchImpl: FetchLike = fetch): Promise<Array<{ title: string; url: string; snippet: string }>> {
   const res = await fetchImpl(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`, {
@@ -113,6 +122,13 @@ export async function fetchPage(rawUrl: string, fetchImpl: FetchLike = fetch): P
   });
   if (!res.ok) throw new Error(`fetch HTTP ${res.status}`);
   const type = res.headers.get("content-type") ?? "";
+  if (/application\/pdf/.test(type) || /\.pdf($|\?)/i.test(url.pathname)) {
+    const buf = new Uint8Array(await res.arrayBuffer());
+    if (buf.byteLength > MAX_PDF_BYTES) throw new Error(`PDF too large to read (${Math.round(buf.byteLength / 1e6)} MB)`);
+    const text = await extractPdfText(buf);
+    if (!text) throw new Error("PDF has no extractable text (scanned image?)");
+    return { title: url.pathname.split("/").pop() || url.hostname, url: url.toString(), text: text.slice(0, MAX_PAGE_CHARS) };
+  }
   if (!/text\/html|text\/plain|application\/xhtml/.test(type)) throw new Error(`unsupported content type ${type.split(";")[0] || "unknown"}`);
   const html = (await res.text()).slice(0, 400_000);
   const title = stripHtml(/<title[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1] ?? url.hostname).slice(0, 160);
@@ -161,7 +177,7 @@ title: <short descriptive title>
 ---
 <markdown content>
 \`\`\`
-Reusing the same title revises that document as a new version.
+Reusing the same title revises that document as a new version. You may only revise documents you wrote (or that the farmer explicitly asked you to change); otherwise your block is saved as a proposal for the owner.
 - Charts: only from numbers the farmer gave, the weather data provided, or the research results. Every chart JSON must include "title" (specific, e.g. "June rainfall vs. 30-yr normal, Ames IA") and "sources" (list of URLs from RESEARCH RESULTS, or "farmer" / "weather"). If you have no real data, do not make a chart. Never use example or illustrative numbers.`;
 }
 
@@ -209,8 +225,34 @@ export function deliverableIdForTitle(title: string): string {
   return `expert-${slug}`;
 }
 
+export type RevisionContext = {
+  /** The farmer's latest message: an explicit request to this expert is a handoff. */
+  farmerMessage?: { content: string; mentions?: string[] | null } | null;
+};
+
+function ownerName(file: { uploadedBy?: string | null }): string {
+  return (file.uploadedBy ?? "").replace(/^Expert:\s*/, "") || "another expert";
+}
+
+/**
+ * Ownership: the expert who wrote the current version owns it. Another expert
+ * may revise only on an explicit farmer handoff (the farmer's latest message
+ * @mentions that expert and asks for a revision/takeover).
+ */
+export function canRevise(
+  current: { uploadedBy?: string | null },
+  expert: { name: string; role: string },
+  context: RevisionContext = {},
+): boolean {
+  if (!current.uploadedBy || current.uploadedBy === `Expert: ${expert.name}`) return true;
+  const farmer = context.farmerMessage;
+  if (!farmer) return false;
+  const addressed = (farmer.mentions ?? []).some(m => m.toLowerCase() === expert.role.toLowerCase());
+  return addressed && /\b(revis|edit|updat|rewrit|take over|takeover|amend|add|change|fix)/i.test(farmer.content);
+}
+
 type DeliverableStore = {
-  getCurrentDeliverableFile(conversationId: number, deliverableId: string): Promise<{ id: number; version?: number | null } | undefined>;
+  getCurrentDeliverableFile(conversationId: number, deliverableId: string): Promise<{ id: number; version?: number | null; uploadedBy?: string | null } | undefined>;
   saveDeliverableVersion(file: any, request: any): Promise<{ file: { id: number; filename: string; version?: number | null }; created: boolean }>;
 };
 
@@ -220,9 +262,19 @@ export async function saveExpertDeliverable(
   expert: { name: string; role: string },
   deliverable: ParsedDeliverable,
   uploadsDir = path.join(process.cwd(), "uploads"),
-): Promise<{ id: number; filename: string; version: number; revised: boolean }> {
-  const deliverableId = deliverableIdForTitle(deliverable.title);
-  const current = await store.getCurrentDeliverableFile(conversationId, deliverableId);
+  context: RevisionContext = {},
+): Promise<{ id: number; filename: string; version: number; revised: boolean; title: string; proposalFor: { title: string; owner: string } | null }> {
+  let deliverableId = deliverableIdForTitle(deliverable.title);
+  let current = await store.getCurrentDeliverableFile(conversationId, deliverableId);
+  let proposalFor: { title: string; owner: string } | null = null;
+  if (current && !canRevise(current, expert, context)) {
+    // Not the author and no explicit handoff: save the change as a proposal
+    // the owner or the farmer can adopt, never overwrite someone else's doc.
+    proposalFor = { title: deliverable.title, owner: ownerName(current) };
+    deliverable = { ...deliverable, title: `${deliverable.title} (proposed by ${expert.role})` };
+    deliverableId = deliverableIdForTitle(deliverable.title);
+    current = await store.getCurrentDeliverableFile(conversationId, deliverableId);
+  }
   const filename = `${deliverableId.replace(/^expert-/, "")}.md`;
   const unique = `${randomBytes(8).toString("hex")}-${filename}`;
   await fs.promises.mkdir(uploadsDir, { recursive: true });
@@ -240,7 +292,7 @@ export async function saveExpertDeliverable(
         constraints: { format: "markdown" },
       },
     );
-    return { id: saved.file.id, filename: saved.file.filename, version: saved.file.version ?? 1, revised: Boolean(current) };
+    return { id: saved.file.id, filename: saved.file.filename, version: saved.file.version ?? 1, revised: Boolean(current), title: deliverable.title, proposalFor };
   } catch (error) {
     await fs.promises.rm(filePath, { force: true }).catch(() => undefined);
     throw error;

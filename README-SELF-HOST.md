@@ -145,6 +145,23 @@ What these do:
 
 ---
 
+### Timestamps look shifted by several hours (instances created before Oct 16, 2026)
+
+The app now pins every database session to UTC. Older builds wrote `now()` in the Postgres server's own `TimeZone`, so rows written then are off by your UTC offset (for example 12:28 PT showed as 5:28 AM). New rows are correct. To repair old rows once, using your server's former zone and the time you upgraded:
+
+```sql
+-- check first: SHOW timezone;  (e.g. America/Los_Angeles)
+BEGIN;
+UPDATE messages SET timestamp   = (timestamp   AT TIME ZONE 'America/Los_Angeles') AT TIME ZONE 'UTC' WHERE timestamp   < '2026-10-16 19:45';
+UPDATE files    SET uploaded_at = (uploaded_at AT TIME ZONE 'America/Los_Angeles') AT TIME ZONE 'UTC' WHERE uploaded_at < '2026-10-16 19:45';
+-- repeat for other tables with created_at columns (conversations, insights, open_questions) if you care about them
+COMMIT;
+```
+
+Skip this if your Postgres server already ran in UTC (the default in the Docker image).
+
+---
+
 ## HTTPS / TLS Setup
 
 Do **not** expose port 5001 directly to the internet without a reverse proxy. Use **Caddy** (easiest) or **nginx**.

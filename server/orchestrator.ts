@@ -1907,7 +1907,7 @@ export class InteractionOrchestrator {
                         broadcastFn(this.conversationId, { type: "expert_stream_done", expertId: currentExpert.id });
                         discardPendingDeliverable(expertResponse);
                     } else {
-                        await commitPendingDeliverable(expertResponse);
+                        await commitPendingDeliverable(expertResponse, { farmerMessage: state.lastUserMessage ?? null });
                         storedExpertMessage = await storage.createMessage(expertResponse);
                         expertResponseFailed = !isRealExpertHistoryMessage(storedExpertMessage);
                         if (!expertResponseFailed) fairnessFor(getConversationState(this.conversationId)?.sequenceExpertContents).speakers.push(currentExpert.id);
