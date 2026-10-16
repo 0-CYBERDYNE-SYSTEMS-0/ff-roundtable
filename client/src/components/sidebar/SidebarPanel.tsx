@@ -398,7 +398,7 @@ export default function SidebarPanel({
                           <span className="block text-sm truncate max-w-[160px] font-medium text-neutral-700">{file.filename}</span>
                           {file.deliverableId && file.version != null && (
                             <span className="block text-xs text-neutral-500">
-                              v{file.version} · {file.supersededAt ? "Superseded" : "Current"} · {new Date(file.uploadedAt ?? Date.now()).toLocaleString()}
+                              v{file.version} · {file.supersededAt ? "Superseded" : "Current"} · {new Date(file.uploadedAt ?? Date.now()).toLocaleString(undefined, { dateStyle: "short", timeStyle: "short", timeZoneName: "short" })}
                             </span>
                           )}
                         </div>

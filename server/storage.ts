@@ -612,6 +612,10 @@ export class PostgresStorage implements IStorage {
     this.pool = new Pool({
       connectionString: databaseUrl,
       max: 10,
+      // Columns are `timestamp without time zone` and are read back as UTC.
+      // Pin the session to UTC so defaultNow() writes UTC, whatever the
+      // Postgres server's own TimeZone is (a PT server shifted times by 7h).
+      options: "-c timezone=UTC",
     });
 
     this.db = drizzle(this.pool, {

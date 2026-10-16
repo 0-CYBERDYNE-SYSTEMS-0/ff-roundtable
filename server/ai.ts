@@ -10,6 +10,7 @@ import axios from "axios";
 import { randomBytes } from "crypto";
 import { getProvider } from "./ai-providers";
 import { findCatalogExpert } from "@shared/expert-catalog";
+import { enforceCitationIntegrity, stripMetaLines, undecorate, mergeDuplicateFarmerQuestions } from "./response-hygiene";
 import {
   buildToolUsePrompt, buildToolPlanningPrompt, parseToolPlan, runToolCalls, formatToolResultsForPrompt,
   toolCallLimitForTier, extractDeliverable, saveExpertDeliverable, filterChartArtifacts, type ToolRun,
@@ -54,9 +55,23 @@ async function finalizeExpertTools(
   content: string,
   toolRun: ToolRun | null,
   deliverable: ReturnType<typeof extractDeliverable>["deliverable"],
+  history: Message[] = [],
 ): Promise<{ content: string; addition: string }> {
   let text = content;
   let addition = "";
+  const citation = enforceCitationIntegrity(text, toolRun?.sources ?? [], history.map(m => m.content));
+  if (citation.removedMarkers || citation.removedUrls) {
+    console.log(`[CITATIONS] ${expert.role}: removed ${citation.removedMarkers} invalid marker(s), ${citation.removedUrls} unverified URL(s)`);
+  }
+  text = citation.content;
+  let lastFarmer = -1;
+  history.forEach((m, i) => { if (m.role === "user") lastFarmer = i; });
+  const recent = history.slice(lastFarmer + 1)
+    .filter(m => m.role === "assistant" && m.expertRole && m.expertRole !== expert.role)
+    .map(m => ({ role: m.expertRole as string, content: m.content }));
+  const questions = mergeDuplicateFarmerQuestions(text, recent);
+  if (questions.merged) console.log(`[QUESTIONS] ${expert.role}: merged ${questions.merged} duplicate farmer question(s)`);
+  text = questions.content;
   if (deliverable) {
     try {
       const saved = await saveExpertDeliverable(storage as any, expert.conversationId, expert, deliverable);
@@ -482,14 +497,15 @@ export function parseTrailingStanceLine(content: string): {
   }
   if (finalLineIndex < 0) return { content, stance: null };
 
-  const finalLine = lines[finalLineIndex].replace(/\r$/, "");
-  if (!/^[ \t]*STANCE:/.test(finalLine)) return { content, stance: null };
+  // Models sometimes bold/quote/bullet the line ("**STANCE: …**"); formatting must not hide it.
+  const finalLine = undecorate(lines[finalLineIndex].replace(/\r$/, ""));
+  if (!/^STANCE\s*:/i.test(finalLine)) return { content, stance: null };
 
   const lineStart = lines.slice(0, finalLineIndex).reduce(
     (length, line) => length + line.length + 1,
     0,
   );
-  const match = finalLine.match(/^[ \t]*STANCE:\s*(agree|disagree|conditional|abstain)\s*\|\s*([1-5])\s*\|\s*(.+?)\s*$/i);
+  const match = finalLine.match(/^STANCE\s*:\s*(agree|disagree|conditional|abstain)\s*\|\s*([1-5])\s*\|\s*(.+?)\s*$/i);
   const stanceValue = match?.[1]?.toLowerCase();
   const position = match?.[3]?.trim();
   const stance = match && position && STANCE_VALUES.includes(stanceValue as typeof STANCE_VALUES[number])
@@ -506,8 +522,12 @@ export function parseTrailingStanceLine(content: string): {
 function stripExpertStance(response: AIModelResponse, role: string): MessageStance | null {
   if (role === "Moderator") return null;
   const parsed = parseTrailingStanceLine(response.message.content);
-  response.message.content = parsed.content;
-  return parsed.stance;
+  // Any remaining metadata line (mid-message STANCE, tool-protocol lines) is
+  // removed too; a mid-message STANCE still counts if no trailing one existed.
+  const meta = stripMetaLines(parsed.content);
+  response.message.content = meta.content;
+  if (parsed.stance || !meta.stanceLine) return parsed.stance;
+  return parseTrailingStanceLine(meta.stanceLine).stance;
 }
 
 /**
@@ -515,7 +535,7 @@ function stripExpertStance(response: AIModelResponse, role: string): MessageStan
  * marker is released only if later non-whitespace content proves it was not
  * the final line, so structured metadata never flashes in the live response.
  */
-class TrailingStanceStreamFilter {
+export class TrailingStanceStreamFilter {
   private mode: "body" | "prefix" | "marker" | "after-marker" = "prefix";
   private held = "";
 
@@ -536,11 +556,11 @@ class TrailingStanceStreamFilter {
             output += char;
           }
         } else if (this.mode === "prefix") {
-          const indentationLength = this.held.match(/^[ \t]*/)?.[0].length ?? 0;
+          const indentationLength = this.held.match(/^[ \t>*_`#~-]*/)?.[0].length ?? 0;
           const markerProgress = this.held.length - indentationLength;
-          if (markerProgress === 0 && (char === " " || char === "\t")) {
+          if (markerProgress === 0 && /[ \t>*_`#~-]/.test(char)) {
             this.held += char;
-          } else if (char === marker[markerProgress]) {
+          } else if (char.toUpperCase() === marker[markerProgress]) {
             this.held += char;
             if (markerProgress + 1 === marker.length) this.mode = "marker";
           } else if (char === "\n") {
@@ -1206,7 +1226,7 @@ export async function getExpertResponseStream(
     if (droppedCharts) console.log(`[CHARTS] dropped ${droppedCharts} unsourced chart(s) from ${expert.role}`);
     const finalized = expert.role === "File Creator" || expert.role === "Moderator"
       ? { content: extracted.cleanContent, addition: "" }
-      : await finalizeExpertTools(expert, extracted.cleanContent, toolRun, deliverableSplit.deliverable);
+      : await finalizeExpertTools(expert, extracted.cleanContent, toolRun, deliverableSplit.deliverable, history);
     if (finalized.addition) onToken(finalized.addition);
     const cleanContent = finalized.content;
     const researchAnswer = expert.role === "Research Analyst"
