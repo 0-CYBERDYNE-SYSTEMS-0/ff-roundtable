@@ -10,6 +10,8 @@ import axios from "axios";
 import { randomBytes } from "crypto";
 import { getProvider } from "./ai-providers";
 import { findCatalogExpert } from "@shared/expert-catalog";
+import { DELIVERABLE_PLACEHOLDER, pendingDeliverableFor, pendingDeliverableByMessage } from "./pending-deliverables";
+export { commitPendingDeliverable, discardPendingDeliverable } from "./pending-deliverables";
 import { enforceCitationIntegrity, stripMetaLines, undecorate, mergeDuplicateFarmerQuestions } from "./response-hygiene";
 import {
   buildToolUsePrompt, buildToolPlanningPrompt, parseToolPlan, runToolCalls, formatToolResultsForPrompt,
@@ -47,37 +49,6 @@ async function runExpertToolPhase(expert: Expert, question: string, userId?: num
   const run = await runToolCalls(calls);
   console.log(`[TOOLS] ${expert.role}: ${calls.length} call(s), ${run.sources.length} source(s)${run.notes.length ? `, notes: ${run.notes.join("; ")}` : ""}`);
   return run;
-}
-
-const DELIVERABLE_PLACEHOLDER = "{{deliverable}}";
-const pendingDeliverableFor = new WeakMap<object, NonNullable<ReturnType<typeof extractDeliverable>["deliverable"]>>();
-const pendingDeliverableByMessage = new WeakMap<object, { expert: Expert; deliverable: NonNullable<ReturnType<typeof extractDeliverable>["deliverable"]> }>();
-
-/**
- * Called by the orchestrator once a turn is accepted (not a duplicate):
- * saves the expert's deliverable and fills in the version line.
- */
-export async function commitPendingDeliverable(message: InsertMessage): Promise<void> {
-  const pending = pendingDeliverableByMessage.get(message);
-  if (!pending) return;
-  pendingDeliverableByMessage.delete(message);
-  const { expert, deliverable } = pending;
-  let line: string;
-  try {
-    const saved = await saveExpertDeliverable(storage as any, expert.conversationId, expert, deliverable);
-    line = `${saved.revised ? "Updated" : "Created"} deliverable **${deliverable.title}** (v${saved.version}) — open it in the Files tab.`;
-  } catch (error) {
-    console.warn(`[TOOLS] deliverable save failed for ${expert.role}: ${(error as Error).message}`);
-    line = "(The document could not be saved this time.)";
-  }
-  message.content = message.content.replace(DELIVERABLE_PLACEHOLDER, line);
-}
-
-/** Drops a pending deliverable without saving (turn discarded). */
-export function discardPendingDeliverable(message: InsertMessage): void {
-  const pending = pendingDeliverableByMessage.get(message);
-  pendingDeliverableByMessage.delete(message);
-  if (pending) console.log(`[TOOLS] discarded unsaved deliverable "${pending.deliverable.title}" from ${pending.expert.role}`);
 }
 
 /** Saves an expert deliverable block and appends sources actually cited. Returns the farmer-facing text. */
