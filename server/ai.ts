@@ -49,6 +49,37 @@ async function runExpertToolPhase(expert: Expert, question: string, userId?: num
   return run;
 }
 
+const DELIVERABLE_PLACEHOLDER = "{{deliverable}}";
+const pendingDeliverableFor = new WeakMap<object, NonNullable<ReturnType<typeof extractDeliverable>["deliverable"]>>();
+const pendingDeliverableByMessage = new WeakMap<object, { expert: Expert; deliverable: NonNullable<ReturnType<typeof extractDeliverable>["deliverable"]> }>();
+
+/**
+ * Called by the orchestrator once a turn is accepted (not a duplicate):
+ * saves the expert's deliverable and fills in the version line.
+ */
+export async function commitPendingDeliverable(message: InsertMessage): Promise<void> {
+  const pending = pendingDeliverableByMessage.get(message);
+  if (!pending) return;
+  pendingDeliverableByMessage.delete(message);
+  const { expert, deliverable } = pending;
+  let line: string;
+  try {
+    const saved = await saveExpertDeliverable(storage as any, expert.conversationId, expert, deliverable);
+    line = `${saved.revised ? "Updated" : "Created"} deliverable **${deliverable.title}** (v${saved.version}) — open it in the Files tab.`;
+  } catch (error) {
+    console.warn(`[TOOLS] deliverable save failed for ${expert.role}: ${(error as Error).message}`);
+    line = "(The document could not be saved this time.)";
+  }
+  message.content = message.content.replace(DELIVERABLE_PLACEHOLDER, line);
+}
+
+/** Drops a pending deliverable without saving (turn discarded). */
+export function discardPendingDeliverable(message: InsertMessage): void {
+  const pending = pendingDeliverableByMessage.get(message);
+  pendingDeliverableByMessage.delete(message);
+  if (pending) console.log(`[TOOLS] discarded unsaved deliverable "${pending.deliverable.title}" from ${pending.expert.role}`);
+}
+
 /** Saves an expert deliverable block and appends sources actually cited. Returns the farmer-facing text. */
 async function finalizeExpertTools(
   expert: Expert,
@@ -73,15 +104,11 @@ async function finalizeExpertTools(
   if (questions.merged) console.log(`[QUESTIONS] ${expert.role}: merged ${questions.merged} duplicate farmer question(s)`);
   text = questions.content;
   if (deliverable) {
-    try {
-      const saved = await saveExpertDeliverable(storage as any, expert.conversationId, expert, deliverable);
-      const line = `\n\n📄 ${saved.revised ? "Updated" : "Created"} deliverable **${deliverable.title}** (v${saved.version}) — open it in the Files tab.`;
-      text += line; addition += line;
-    } catch (error) {
-      console.warn(`[TOOLS] deliverable save failed for ${expert.role}: ${(error as Error).message}`);
-      const line = "\n\n(The document could not be saved this time.)";
-      text += line; addition += line;
-    }
+    // Saved only after the orchestrator accepts the turn (a discarded
+    // near-duplicate turn must not leave a document behind).
+    const line = `\n\n📄 ${DELIVERABLE_PLACEHOLDER}`;
+    text += line;
+    pendingDeliverableFor.set(expert, deliverable);
   }
   if (toolRun?.sources.length) {
     const cited = toolRun.sources.filter(s => new RegExp(`\\b${s.id}\\b`).test(text) || text.includes(s.url));
@@ -1234,7 +1261,7 @@ export async function getExpertResponseStream(
       : { content: cleanContent, addition: "" };
     if (researchAnswer.addition) onToken(researchAnswer.addition);
 
-    return {
+    const streamedMessage: InsertMessage = {
       conversationId: expert.conversationId,
       expertId: expert.id,
       userId: null,
@@ -1249,6 +1276,12 @@ export async function getExpertResponseStream(
       mentions: extractMentions(cleanContent, availableRoles),
       stance,
     };
+    const pendingDoc = pendingDeliverableFor.get(expert);
+    if (pendingDoc) {
+      pendingDeliverableFor.delete(expert);
+      pendingDeliverableByMessage.set(streamedMessage, { expert, deliverable: pendingDoc });
+    }
+    return streamedMessage;
 
   } catch (error) {
     console.error(`[STREAM] Response generation failed for expert ${expert.name}`);

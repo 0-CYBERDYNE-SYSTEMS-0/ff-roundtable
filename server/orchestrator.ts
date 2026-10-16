@@ -1,5 +1,5 @@
 import { storage } from "./storage";
-import { getExpertResponse, getExpertResponseStream, generateInsights, getModeratorNextSpeakerSuggestion, generateClosingSynthesis, resolveAuxModel } from "./ai";
+import { commitPendingDeliverable, discardPendingDeliverable, getExpertResponse, getExpertResponseStream, generateInsights, getModeratorNextSpeakerSuggestion, generateClosingSynthesis, resolveAuxModel } from "./ai";
 import type { DeliverableGenerationRequest, ModeratorContext } from "./ai";
 import { isNearDuplicate, shouldStopForRedundancy, REDUNDANCY_STOP_SIMILARITY_THRESHOLD } from "./text-similarity";
 import { enforceTurnFairness } from "./turn-fairness";
@@ -1904,7 +1904,9 @@ export class InteractionOrchestrator {
                         turnFairness.retired.add(currentExpert.id);
                         console.warn(`Orchestrator: discarded near-duplicate answer from ${currentExpert.role} in conversation ${this.conversationId}; retiring it until the farmer speaks.`);
                         broadcastFn(this.conversationId, { type: "expert_stream_done", expertId: currentExpert.id });
+                        discardPendingDeliverable(expertResponse);
                     } else {
+                        await commitPendingDeliverable(expertResponse);
                         storedExpertMessage = await storage.createMessage(expertResponse);
                         expertResponseFailed = !isRealExpertHistoryMessage(storedExpertMessage);
                         if (!expertResponseFailed) fairnessFor(getConversationState(this.conversationId)?.sequenceExpertContents).speakers.push(currentExpert.id);
