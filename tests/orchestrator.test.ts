@@ -1178,9 +1178,11 @@ describe("Orchestrator", () => {
 
       await waitFor(800);
 
-      // Three round-robin responses plus one redundant response; routing
-      // stops before the six-turn autonomous budget.
-      expect(assistantTurns(conversationId)).toBe(4);
+      // Three round-robin responses persist. The repeats are generated but
+      // discarded as near-duplicates (never stored), retiring each repeater,
+      // so routing stops well before the six-turn autonomous budget.
+      expect(assistantTurns(conversationId)).toBe(3);
+      expect(mockGetExpertResponseStream.mock.calls.length).toBeGreaterThanOrEqual(4);
 
       const state = getConversationState(conversationId);
       expect(state!.mode).toBe("idle");
@@ -2751,7 +2753,9 @@ describe("G4 mention mechanics", () => {
         await releaseNextTurn();
         await waitForTurns(2);
 
-        expect(turnNames()).toEqual(["Alice", "Alice"]);
+        // Turn fairness: the dissenter's follow-up waits until every expert
+        // has spoken; nobody answers twice in a row.
+        expect(turnNames()).toEqual(["Alice", "Bob"]);
         expect(getConversationState(conversationId)!.totalAutonomousTurnsTaken).toBeLessThan(
           getConversationState(conversationId)!.maxAutonomousTurns,
         );
@@ -2793,9 +2797,9 @@ describe("G4 mention mechanics", () => {
         }
         await waitForEvent("concluding");
 
-        // Bob's first dissent earns one explicit follow-up before normal
-        // round-robin resumes; both later complete cycles keep the same camps.
-        expect(turnNames()).toEqual(["Alice", "Bob", "Bob", "Carol", "Alice", "Bob", "Carol", "Alice"]);
+        // Everyone speaks once first; Bob's dissent then earns the next
+        // follow-up (never back-to-back), and later cycles keep the same camps.
+        expect(turnNames()).toEqual(["Alice", "Bob", "Carol", "Bob", "Carol", "Alice", "Bob", "Carol"]);
         expect(getConversationState(conversationId)!.totalAutonomousTurnsTaken).toBe(8);
         expect(getConversationState(conversationId)!.stableSplitCycleCount).toBe(2);
         expect(mockGenerateClosingSynthesis.mock.calls.filter(([cid]) => cid === conversationId)).toHaveLength(1);

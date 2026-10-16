@@ -50,6 +50,15 @@ export function trigramJaccard(a: string, b: string): number {
   return intersection / (ga.size + gb.size - intersection);
 }
 
+/** True when `content` is at least `threshold` similar to any prior message. */
+export function isNearDuplicate(
+  content: string,
+  priors: string[],
+  threshold: number = 0.6,
+): boolean {
+  return priors.some(prior => trigramJaccard(content, prior) >= threshold);
+}
+
 /**
  * Autonomous turns whose new message exceeds this similarity against any prior
  * expert message are treated as redundant and stop the sequence early.

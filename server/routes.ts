@@ -767,7 +767,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       expertId: null,
       content,
       role: "user",
-      mentions: extractMentions(content, conversationExperts.map(expert => expert.role)),
+      mentions: extractMentions(content, conversationExperts.map(expert => expert.role), conversationExperts),
       answersQuestionId,
     };
     let storedMessage: Message;
@@ -1150,7 +1150,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       
       const { name, model } = req.body;
       const role = typeof req.body.role === "string" ? req.body.role.trim().slice(0, 60) : "";
-      if (!role || /^(moderator|user|farmer)$/i.test(role)) {
+      if (!role || /^(user|farmer)$/i.test(role)) {
         return res.status(400).json({ message: "Choose a valid expert role." });
       }
       if (existingExperts.some(e => e.role.toLowerCase() === role.toLowerCase())) {

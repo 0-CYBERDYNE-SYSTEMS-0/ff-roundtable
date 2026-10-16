@@ -180,7 +180,7 @@ describe("Billing System E2E", () => {
       expect(res.status).toBe(401);
     });
 
-    it("returns 500 when Stripe customer creation fails (edge case)", async () => {
+    it("returns a friendly 502 when Stripe customer creation fails (edge case)", async () => {
       // When STRIPE_SECRET_KEY is set but the underlying Stripe API fails
       // the module-level stripe is still active, but customer.create fails
       const agent = request.agent(app);
@@ -191,11 +191,12 @@ describe("Billing System E2E", () => {
       );
 
       const res = await agent.post("/api/create-subscription");
-      expect(res.status).toBe(500);
-      expect(res.body.message).toContain("Stripe connection refused");
+      expect(res.status).toBe(502);
+      expect(res.body.code).toBe("BILLING_ERROR");
+      expect(res.body.message).not.toContain("Stripe connection refused");
     });
 
-    it("returns 500 when price ID is missing in environment", async () => {
+    it("returns a friendly 503 when price ID is missing in environment", async () => {
       const originalPriceId = process.env.STRIPE_PRICE_ID;
       delete process.env.STRIPE_PRICE_ID;
 
@@ -215,8 +216,9 @@ describe("Billing System E2E", () => {
       // Restore after request
       process.env.STRIPE_PRICE_ID = originalPriceId;
 
-      expect(res.status).toBe(500);
-      expect(res.body.message).toContain("price ID");
+      expect(res.status).toBe(503);
+      expect(res.body.code).toBe("BILLING_UNAVAILABLE");
+      expect(res.body.message).not.toContain("price ID");
     });
 
     it("creates subscription for new user (happy path)", async () => {
@@ -290,8 +292,8 @@ describe("Billing System E2E", () => {
       );
 
       const res = await agent.post("/api/create-subscription");
-      expect(res.status).toBe(500);
-      expect(res.body.message).toContain("Card declined");
+      expect(res.status).toBe(502);
+      expect(res.body.message).not.toContain("Card declined");
     });
   });
 
