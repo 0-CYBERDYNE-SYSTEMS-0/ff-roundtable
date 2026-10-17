@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useAuth } from "@/hooks/use-auth";
 import { useIsMobile } from "@/hooks/use-mobile";
 import Header from "@/components/layout/Header";
@@ -15,7 +15,7 @@ import FarmProfileModal from "@/components/farm/FarmProfileModal";
 import { useWebSocket, sendWebSocketSubscription, sendWebSocketUnsubscription } from "@/lib/websocket-utils";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { ZapIcon, ZapOffIcon, Menu, PauseIcon, PlayIcon, ScrollText, XIcon } from "lucide-react";
+import { ZapIcon, ZapOffIcon, Menu, PauseIcon, PlayIcon, ScrollText, XIcon, ChevronLeft, ChevronRight } from "lucide-react";
 import { parseNewCommand } from "@/lib/new-command";
 
 // G9 quiet console: per-event chatter is gated behind a debug flag so the
@@ -37,6 +37,16 @@ type InteractionMode =
     | "paused" 
     | "autonomous";
 
+const DEFAULT_LEFT_SIDEBAR_WIDTH = 288;
+const MIN_LEFT_SIDEBAR_WIDTH = 288;
+const MAX_LEFT_SIDEBAR_WIDTH = 400;
+const COLLAPSED_SIDEBAR_RAIL_WIDTH = 40;
+
+function getMaxLeftSidebarWidth() {
+  const viewportWidth = typeof window === "undefined" ? MAX_LEFT_SIDEBAR_WIDTH : window.innerWidth;
+  return Math.max(MIN_LEFT_SIDEBAR_WIDTH, Math.min(MAX_LEFT_SIDEBAR_WIDTH, Math.floor(viewportWidth * 0.3)));
+}
+
 export default function HomePage() {
   const { user } = useAuth();
   const { toast } = useToast();
@@ -47,6 +57,65 @@ export default function HomePage() {
   const [showFarmProfileModal, setShowFarmProfileModal] = useState(false);
   const [farmProfileModalDismissed, setFarmProfileModalDismissed] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [isLeftSidebarCollapsed, setIsLeftSidebarCollapsed] = useState(false);
+  const [leftSidebarWidth, setLeftSidebarWidth] = useState(() => Math.min(DEFAULT_LEFT_SIDEBAR_WIDTH, getMaxLeftSidebarWidth()));
+  const [maxLeftSidebarWidth, setMaxLeftSidebarWidth] = useState(() => getMaxLeftSidebarWidth());
+  const [isResizingLeftSidebar, setIsResizingLeftSidebar] = useState(false);
+  const leftSidebarResizeRef = useRef<{ startX: number; startWidth: number } | null>(null);
+  const sidebarDrawerRef = useRef<HTMLDivElement>(null);
+  const sidebarToggleRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    const updateSidebarMaxWidth = () => {
+      const maxWidth = getMaxLeftSidebarWidth();
+      setMaxLeftSidebarWidth(maxWidth);
+      setLeftSidebarWidth((width) => Math.min(width, maxWidth));
+    };
+    window.addEventListener("resize", updateSidebarMaxWidth);
+    return () => window.removeEventListener("resize", updateSidebarMaxWidth);
+  }, []);
+
+  const handleLeftSidebarResizeStart = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (isMobile) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    leftSidebarResizeRef.current = { startX: event.clientX, startWidth: leftSidebarWidth };
+    setIsResizingLeftSidebar(true);
+  };
+
+  const handleLeftSidebarResizeMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    const resize = leftSidebarResizeRef.current;
+    if (!resize) return;
+    const width = resize.startWidth + event.clientX - resize.startX;
+    setLeftSidebarWidth(Math.max(MIN_LEFT_SIDEBAR_WIDTH, Math.min(maxLeftSidebarWidth, width)));
+  };
+
+  const stopLeftSidebarResize = () => {
+    leftSidebarResizeRef.current = null;
+    setIsResizingLeftSidebar(false);
+  };
+
+  const handleLeftSidebarResizeKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+      event.preventDefault();
+      const delta = event.key === "ArrowRight" ? 16 : -16;
+      setLeftSidebarWidth((width) => Math.max(MIN_LEFT_SIDEBAR_WIDTH, Math.min(maxLeftSidebarWidth, width + delta)));
+    } else if (event.key === "Home" || event.key === "End") {
+      event.preventDefault();
+      setLeftSidebarWidth(event.key === "Home" ? MIN_LEFT_SIDEBAR_WIDTH : maxLeftSidebarWidth);
+    }
+  };
+
+  useEffect(() => {
+    const drawer = sidebarDrawerRef.current;
+    if (!drawer) return;
+    if (isMobile && !sidebarOpen) {
+      drawer.setAttribute("inert", "");
+      if (drawer.contains(document.activeElement)) sidebarToggleRef.current?.focus();
+    } else {
+      drawer.removeAttribute("inert");
+    }
+  }, [isMobile, sidebarOpen]);
   
   // Add state for interaction control
   const [interactionMode, setInteractionMode] = useState<InteractionMode>("idle");
@@ -991,32 +1060,76 @@ export default function HomePage() {
     <div className="flex flex-col h-screen">
       <Header />
       
-      <div className="flex-1 flex overflow-hidden relative">
+      <div className="flex-1 flex min-h-0 overflow-hidden relative">
         {/* Left Sidebar - hidden on mobile unless toggled */}
-        <div className={`${isMobile ? 'absolute inset-y-0 left-0 z-30 transition-transform duration-300' : ''} ${isMobile && !sidebarOpen ? '-translate-x-full' : ''}`}>
-          <SidebarPanel
-            conversations={conversations || []}
-            insights={insights || []}
-            files={files || []}
-            onStartNewSession={handleStartNewSession}
-            onExportMarkdown={exportMarkdown}
-            onExportIcs={exportIcs}
-            canExportIcs={hasSchedulableSource}
-            onFileUpload={handleFileUpload}
-            onSelectConversation={handleSelectConversation}
-            activeConversationId={activeConversation}
-            onRefreshInsights={() => generateInsightsMutation.mutate()}
-            isLoadingInsights={generateInsightsMutation.isPending}
-            isLoadingConversations={isLoadingConversations}
-            conversationsError={conversationsError}
-            isLoadingInsightsData={isLoadingInsights}
-            insightsError={insightsError}
-            isLoadingFiles={isLoadingFiles}
-            filesError={filesError}
-            isStartingNewSession={createConversationMutation.isPending}
-            isUploading={uploadFileMutation.isPending}
-            experts={experts || []}
-          />
+        <div
+          ref={sidebarDrawerRef}
+          id="left-sidebar-drawer"
+          className={`relative h-full min-h-0 shrink-0 ${isMobile ? 'absolute inset-y-0 left-0 z-30 transition-transform duration-300' : ''} ${isMobile && !sidebarOpen ? '-translate-x-full' : ''}`}
+          style={{ width: isMobile ? DEFAULT_LEFT_SIDEBAR_WIDTH : isLeftSidebarCollapsed ? COLLAPSED_SIDEBAR_RAIL_WIDTH : leftSidebarWidth }}
+          aria-hidden={isMobile && !sidebarOpen}
+        >
+          {!isMobile && isLeftSidebarCollapsed ? (
+            <div className="flex h-full justify-center border-r border-farm-tan/30 bg-white">
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="mt-2 h-9 w-9 shrink-0"
+                aria-label="Expand left sidebar"
+                aria-controls="left-sidebar-drawer"
+                aria-expanded={false}
+                title="Expand left sidebar"
+                onClick={() => setIsLeftSidebarCollapsed(false)}
+              >
+                <ChevronRight className="h-4 w-4" />
+              </Button>
+            </div>
+          ) : (
+            <SidebarPanel
+              conversations={conversations || []}
+              insights={insights || []}
+              files={files || []}
+              onStartNewSession={handleStartNewSession}
+              onExportMarkdown={exportMarkdown}
+              onExportIcs={exportIcs}
+              canExportIcs={hasSchedulableSource}
+              onFileUpload={handleFileUpload}
+              onSelectConversation={handleSelectConversation}
+              activeConversationId={activeConversation}
+              onRefreshInsights={() => generateInsightsMutation.mutate()}
+              isLoadingInsights={generateInsightsMutation.isPending}
+              isLoadingConversations={isLoadingConversations}
+              conversationsError={conversationsError}
+              isLoadingInsightsData={isLoadingInsights}
+              insightsError={insightsError}
+              isLoadingFiles={isLoadingFiles}
+              filesError={filesError}
+              isStartingNewSession={createConversationMutation.isPending}
+              isUploading={uploadFileMutation.isPending}
+              experts={experts || []}
+              onCollapse={!isMobile ? () => setIsLeftSidebarCollapsed(true) : undefined}
+            />
+          )}
+          {!isMobile && !isLeftSidebarCollapsed && (
+            <div
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="Resize left sidebar"
+              aria-controls="left-sidebar-drawer"
+              aria-valuemin={MIN_LEFT_SIDEBAR_WIDTH}
+              aria-valuemax={maxLeftSidebarWidth}
+              aria-valuenow={leftSidebarWidth}
+              tabIndex={0}
+              onPointerDown={handleLeftSidebarResizeStart}
+              onPointerMove={handleLeftSidebarResizeMove}
+              onPointerUp={stopLeftSidebarResize}
+              onPointerCancel={stopLeftSidebarResize}
+              onKeyDown={handleLeftSidebarResizeKeyDown}
+              className={`absolute -right-1 top-0 z-20 h-full w-2 cursor-col-resize touch-none select-none transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-farm-blue hover:bg-farm-blue/30 ${isResizingLeftSidebar ? "bg-farm-blue/50" : "bg-transparent"}`}
+              title="Drag or use the arrow keys to resize the left sidebar"
+            />
+          )}
         </div>
 
         {/* Mobile sidebar overlay */}
@@ -1067,9 +1180,12 @@ export default function HomePage() {
                            <Button
                              variant="ghost" 
                              size="icon"
+                             ref={sidebarToggleRef}
                              className="md:hidden"
                              onClick={() => setSidebarOpen(!sidebarOpen)}
                              aria-label="Toggle sidebar"
+                             aria-expanded={sidebarOpen}
+                             aria-controls="left-sidebar-drawer"
                            >
                              <Menu className="h-5 w-5" />
                            </Button>
