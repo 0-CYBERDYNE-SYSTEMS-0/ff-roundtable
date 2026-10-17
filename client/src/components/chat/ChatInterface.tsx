@@ -233,6 +233,7 @@ export default function ChatInterface({
     layoutWidth - (isCompactLayout ? 0 : expertsCollapsed ? 48 : 256) - minimumChatWidth,
   );
   const effectiveRightSidebarWidth = Math.min(rightSidebarWidth, maximumRightSidebarWidth);
+  const isRightSidebarVisible = !isMobile && layoutWidth >= 556;
 
   useEffect(() => {
     const element = layoutRef.current;
@@ -557,7 +558,7 @@ export default function ChatInterface({
           </div>
           <div className="bg-gradient-to-br from-farm-powder/30 to-farm-tan/20 border border-farm-tan/30 rounded-xl p-4 max-w-[min(85%,calc(100%_-_52px))] shadow-sm">
             <p className="text-base font-semibold text-farm-blue mb-2">Moderator</p>
-            <div className="markdown-content text-sm mt-1 text-neutral-700 leading-relaxed">
+            <div className="markdown-content [overflow-wrap:anywhere] text-sm mt-1 text-neutral-700 leading-relaxed">
               <p className="mb-2">Welcome to Farm Friend Roundtable! Your agricultural experts are ready to assist you. Here's who's at the table:</p>
               <ul className="list-disc list-inside space-y-1 mb-2">
                 {experts.map(expert => (
@@ -611,7 +612,7 @@ export default function ChatInterface({
   };
 
   return (
-    <div ref={layoutRef} className="relative w-full min-w-0 min-h-0 flex h-full overflow-hidden">
+    <div ref={layoutRef} className="relative z-10 isolate w-full min-w-0 min-h-0 flex h-full overflow-hidden">
       {/* Left Sidebar - Experts List */}
       <div
         id="expert-panel"
@@ -799,7 +800,7 @@ export default function ChatInterface({
                     <div key={message.id} className="flex items-start mb-4 justify-end">
                       <div className="bg-gradient-to-br from-farm-blue to-farm-dark-green text-white rounded-xl p-4 max-w-[min(85%,calc(100%_-_52px))] shadow-md">
                         <MentionChips mentions={message.mentions} experts={experts} className="mb-2" />
-                        <div className="markdown-content prose-sm prose-invert leading-relaxed">
+                        <div className="markdown-content [overflow-wrap:anywhere] prose-sm prose-invert leading-relaxed">
                           {renderMessageBody(message.content)}
                         </div>
                       </div>
@@ -833,9 +834,9 @@ export default function ChatInterface({
                       </div>
                       <div className="max-w-[min(85%,calc(100%_-_52px))] space-y-2">
                         <div className={`${getExpertBubbleColor(expert?.id ?? 0)} ${message.isSynthesis ? "border-amber-300/70 bg-amber-50/70 shadow-md" : ""} rounded-xl p-4 border shadow-sm`}>
-                          <div className="flex items-center justify-between gap-2 mb-2">
-                            <div className="flex items-center gap-2 min-w-0">
-                              <p className="text-sm font-semibold text-farm-blue">{speakerName} <span className="text-neutral-600 font-normal">({speakerRole})</span></p>
+                          <div className="flex flex-wrap items-start justify-between gap-2 mb-2">
+                            <div className="flex min-w-0 flex-wrap items-center gap-2">
+                              <p className="min-w-0 break-words text-sm font-semibold text-farm-blue">{speakerName} <span className="text-neutral-600 font-normal">({speakerRole})</span></p>
                               {/* G5: the Moderator's closing synthesis of the roundtable */}
                               {message.isSynthesis && (
                                 <span className="inline-flex items-center gap-1 rounded-full border border-amber-300/60 bg-amber-100 px-2 py-0.5 text-xs font-medium leading-none text-amber-800 flex-shrink-0">
@@ -856,12 +857,12 @@ export default function ChatInterface({
                               <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-amber-900">
                                 Council verdict
                               </h3>
-                              <div className="markdown-content text-sm leading-relaxed text-neutral-700">
+                              <div className="markdown-content [overflow-wrap:anywhere] text-sm leading-relaxed text-neutral-700">
                                 {renderMessageBody(message.content, true)}
                               </div>
                             </section>
                           ) : (
-                            <div className="markdown-content text-sm leading-relaxed text-neutral-700">
+                            <div className="markdown-content [overflow-wrap:anywhere] text-sm leading-relaxed text-neutral-700">
                               {renderMessageBody(message.content)}
                             </div>
                           )}
@@ -917,7 +918,7 @@ export default function ChatInterface({
                       </p>
                       {expert && <ModelBadge modelId={expert.model} size="sm" />}
                     </div>
-                    <div className="markdown-content text-sm leading-relaxed text-neutral-700">
+                    <div className="markdown-content [overflow-wrap:anywhere] text-sm leading-relaxed text-neutral-700">
                       {stream.content ? (
                         renderMessageBody(stream.content)
                       ) : (
@@ -1060,7 +1061,7 @@ export default function ChatInterface({
           aria-label={showMobileExpertPanel ? "Hide experts" : "Show experts"}
           aria-expanded={showMobileExpertPanel}
           aria-controls="expert-panel"
-          style={{ right: `${isMobile ? 16 : effectiveRightSidebarWidth + 16}px` }}
+          style={{ right: `${isRightSidebarVisible ? effectiveRightSidebarWidth + 16 : 16}px` }}
         >
           <Users className="h-5 w-5" />
         </Button>
@@ -1068,7 +1069,7 @@ export default function ChatInterface({
 
       {/* Right Sidebar - Resizable */}
       <div
-        className="flex-shrink-0 bg-white h-full overflow-hidden hidden md:block"
+        className={`flex-shrink-0 bg-white h-full overflow-hidden ${isRightSidebarVisible ? "block" : "hidden"}`}
         style={{ width: `${effectiveRightSidebarWidth}px` }}
       >
         <ConversationSidebar
