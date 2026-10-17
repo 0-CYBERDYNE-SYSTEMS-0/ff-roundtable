@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useAuth } from "@/hooks/use-auth";
 import { useIsMobile } from "@/hooks/use-mobile";
 import Header from "@/components/layout/Header";
@@ -47,6 +47,19 @@ export default function HomePage() {
   const [showFarmProfileModal, setShowFarmProfileModal] = useState(false);
   const [farmProfileModalDismissed, setFarmProfileModalDismissed] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const sidebarDrawerRef = useRef<HTMLDivElement>(null);
+  const sidebarToggleRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    const drawer = sidebarDrawerRef.current;
+    if (!drawer) return;
+    if (isMobile && !sidebarOpen) {
+      drawer.setAttribute("inert", "");
+      if (drawer.contains(document.activeElement)) sidebarToggleRef.current?.focus();
+    } else {
+      drawer.removeAttribute("inert");
+    }
+  }, [isMobile, sidebarOpen]);
   
   // Add state for interaction control
   const [interactionMode, setInteractionMode] = useState<InteractionMode>("idle");
@@ -991,9 +1004,14 @@ export default function HomePage() {
     <div className="flex flex-col h-screen">
       <Header />
       
-      <div className="flex-1 flex overflow-hidden relative">
+      <div className="flex-1 flex min-h-0 overflow-hidden relative">
         {/* Left Sidebar - hidden on mobile unless toggled */}
-        <div className={`${isMobile ? 'absolute inset-y-0 left-0 z-30 transition-transform duration-300' : ''} ${isMobile && !sidebarOpen ? '-translate-x-full' : ''}`}>
+        <div
+          ref={sidebarDrawerRef}
+          id="left-sidebar-drawer"
+          className={`h-full min-h-0 shrink-0 ${isMobile ? 'absolute inset-y-0 left-0 z-30 transition-transform duration-300' : ''} ${isMobile && !sidebarOpen ? '-translate-x-full' : ''}`}
+          aria-hidden={isMobile && !sidebarOpen}
+        >
           <SidebarPanel
             conversations={conversations || []}
             insights={insights || []}
@@ -1067,9 +1085,12 @@ export default function HomePage() {
                            <Button
                              variant="ghost" 
                              size="icon"
+                             ref={sidebarToggleRef}
                              className="md:hidden"
                              onClick={() => setSidebarOpen(!sidebarOpen)}
                              aria-label="Toggle sidebar"
+                             aria-expanded={sidebarOpen}
+                             aria-controls="left-sidebar-drawer"
                            >
                              <Menu className="h-5 w-5" />
                            </Button>

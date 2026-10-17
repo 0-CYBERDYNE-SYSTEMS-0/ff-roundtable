@@ -153,10 +153,10 @@ export default function SidebarPanel({
   };
   
   return (
-    <aside className="w-72 bg-white bg-gradient-to-b from-farm-powder/5 to-white border-r border-farm-tan/30 flex flex-col z-10 shadow-lg">
-      <div className="flex flex-col h-full">
+    <aside className="w-72 h-full min-h-0 overflow-hidden bg-white bg-gradient-to-b from-farm-powder/5 to-white border-r border-farm-tan/30 flex flex-col z-10 shadow-lg">
+      <div className="flex flex-col h-full min-h-0">
         {/* Session Controls */}
-        <div className="p-4 border-b border-farm-tan/30">
+        <div className="shrink-0 p-4 border-b border-farm-tan/30 [@media(max-height:500px)]:max-h-[45vh] [@media(max-height:500px)]:overflow-y-auto">
           <h2 className="font-serif font-bold text-lg mb-3 text-farm-blue">Current Session</h2>
           <Button
             className="w-full bg-gradient-to-r from-farm-green to-farm-dark-green hover:from-farm-dark-green hover:to-farm-green text-white rounded-lg px-4 py-2.5 flex items-center justify-center mb-2 shadow-md hover:shadow-lg transition-all duration-200 font-semibold"
@@ -219,7 +219,7 @@ export default function SidebarPanel({
         </div>
 
         {/* Tabs */}
-        <div className="flex border-b border-farm-tan/30 bg-white">
+        <div className="flex shrink-0 border-b border-farm-tan/30 bg-white">
           <button
             type="button"
             role="tab"
@@ -250,7 +250,7 @@ export default function SidebarPanel({
         </div>
         
         {/* Tab Content */}
-        <ScrollArea className="flex-1 p-4">
+        <ScrollArea className="flex-1 min-h-0 p-4">
           {activeTab === 'conversations' && (
             <div>
               <div className="flex justify-between items-center mb-4">
@@ -422,7 +422,7 @@ export default function SidebarPanel({
         </ScrollArea>
         
         {/* Version Info */}
-        <div className="p-4 text-xs text-neutral-600 mt-auto border-t border-farm-tan/30 bg-gradient-to-br from-farm-powder/10 to-farm-tan/10">
+        <div className="shrink-0 p-4 text-xs text-neutral-600 mt-auto border-t border-farm-tan/30 bg-gradient-to-br from-farm-powder/10 to-farm-tan/10 [@media(max-height:500px)]:hidden">
           <p className="font-semibold text-farm-blue">Farm Friend Roundtable v1.0.0</p>
           <p className="mt-1">© 2026 Farm Friend Technologies</p>
         </div>

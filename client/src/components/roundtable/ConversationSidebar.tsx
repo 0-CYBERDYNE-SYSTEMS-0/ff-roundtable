@@ -36,6 +36,7 @@ export default function ConversationSidebar({
   const [isResizing, setIsResizing] = useState(false);
   const [startX, setStartX] = useState(0);
   const [startWidth, setStartWidth] = useState(currentWidth);
+  const compactTabs = currentWidth <= 340;
 
   // Extract artifacts from messages
   useEffect(() => {
@@ -208,14 +209,14 @@ export default function ConversationSidebar({
     <div className="h-full flex flex-col relative w-full">
       <Tabs defaultValue="insights" className="w-full h-full flex flex-col">
         <div className="border-b border-neutral-200 px-4 flex-shrink-0">
-          <TabsList className="mb-[-1px]">
-            <TabsTrigger value="insights" onClick={() => setActiveTab('insights')}>
+          <TabsList className={`mb-[-1px] ${compactTabs ? "grid w-full grid-cols-3" : ""}`}>
+            <TabsTrigger value="insights" onClick={() => setActiveTab('insights')} className={compactTabs ? "min-w-0 w-full px-1 text-[11px] whitespace-nowrap" : undefined}>
               Insights
             </TabsTrigger>
-            <TabsTrigger value="artifacts" onClick={() => setActiveTab('artifacts')}>
+            <TabsTrigger value="artifacts" onClick={() => setActiveTab('artifacts')} className={compactTabs ? "min-w-0 w-full px-1 text-[11px] whitespace-nowrap" : undefined}>
               Artifacts ({allArtifacts.length})
             </TabsTrigger>
-            <TabsTrigger value="visualizations" onClick={() => setActiveTab('visualizations')}>
+            <TabsTrigger value="visualizations" onClick={() => setActiveTab('visualizations')} className={compactTabs ? "min-w-0 w-full px-1 text-[11px] whitespace-nowrap" : undefined}>
               Visualizations
             </TabsTrigger>
           </TabsList>

@@ -222,6 +222,28 @@ export default function ChatInterface({
   const [mentionHighlight, setMentionHighlight] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const caretPosRef = useRef(0);
+  const layoutRef = useRef<HTMLDivElement>(null);
+  const [layoutWidth, setLayoutWidth] = useState(() =>
+    typeof window === "undefined" ? 0 : window.innerWidth - (isMobile ? 0 : 288),
+  );
+  const isCompactLayout = isMobile || layoutWidth < 876;
+  const minimumChatWidth = layoutWidth < 600 ? 256 : 320;
+  const maximumRightSidebarWidth = Math.max(
+    300,
+    layoutWidth - (isCompactLayout ? 0 : expertsCollapsed ? 48 : 256) - minimumChatWidth,
+  );
+  const effectiveRightSidebarWidth = Math.min(rightSidebarWidth, maximumRightSidebarWidth);
+
+  useEffect(() => {
+    const element = layoutRef.current;
+    if (!element) return;
+
+    const updateWidth = () => setLayoutWidth(element.clientWidth);
+    updateWidth();
+    const observer = new ResizeObserver(updateWidth);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
 
   // Track whether the user is reading near the bottom so streaming tokens
   // don't yank the viewport down while they scroll back through history.
@@ -533,7 +555,7 @@ export default function ChatInterface({
               <span className="material-icons text-lg">smart_toy</span>
             </div>
           </div>
-          <div className="bg-gradient-to-br from-farm-powder/30 to-farm-tan/20 border border-farm-tan/30 rounded-xl p-4 max-w-[85%] shadow-sm">
+          <div className="bg-gradient-to-br from-farm-powder/30 to-farm-tan/20 border border-farm-tan/30 rounded-xl p-4 max-w-[min(85%,calc(100%_-_52px))] shadow-sm">
             <p className="text-base font-semibold text-farm-blue mb-2">Moderator</p>
             <div className="markdown-content text-sm mt-1 text-neutral-700 leading-relaxed">
               <p className="mb-2">Welcome to Farm Friend Roundtable! Your agricultural experts are ready to assist you. Here's who's at the table:</p>
@@ -565,7 +587,7 @@ export default function ChatInterface({
                 <AvatarFallback className="bg-farm-green text-white font-semibold">{expert.name.charAt(0)}</AvatarFallback>
               </Avatar>
             </div>
-            <div className="bg-farm-powder/20 border border-farm-tan/30 rounded-xl p-4 max-w-[85%] relative overflow-hidden shadow-sm">
+            <div className="bg-farm-powder/20 border border-farm-tan/30 rounded-xl p-4 max-w-[min(85%,calc(100%_-_52px))] relative overflow-hidden shadow-sm">
               <div className="flex items-center justify-between mb-2">
                 <p className="text-sm font-semibold text-farm-blue">{expert.name} <span className="text-neutral-600 font-normal">({expert.role})</span></p>
                 <ModelBadge modelId={expert.model} size="sm" />
@@ -589,10 +611,14 @@ export default function ChatInterface({
   };
 
   return (
-    <div className="relative w-full flex h-full overflow-hidden">
+    <div ref={layoutRef} className="relative w-full min-w-0 min-h-0 flex h-full overflow-hidden">
       {/* Left Sidebar - Experts List */}
-      <div className={`${isMobile ? 'absolute inset-y-0 left-0 z-30 shadow-xl' : ''} flex-shrink-0 bg-gradient-to-b from-farm-powder/30 to-white border-r border-neutral-200 transition-all duration-300 md:flex ${isMobile && !showMobileExpertPanel ? 'hidden' : ''} ${expertsCollapsed ? 'w-12' : 'w-64'}`}>
-        <div className="h-full flex flex-col">
+      <div
+        id="expert-panel"
+        className={`${isCompactLayout ? `absolute inset-y-0 left-0 z-30 shadow-xl ${showMobileExpertPanel ? 'flex' : 'hidden'}` : 'flex-shrink-0 flex'} bg-gradient-to-b from-farm-powder/30 to-white border-r border-neutral-200 transition-all duration-300 ${expertsCollapsed ? 'w-12' : 'w-64'}`}
+        aria-hidden={isCompactLayout && !showMobileExpertPanel}
+      >
+        <div className="h-full w-full min-w-0 flex flex-col">
           <div className="p-3 border-b border-neutral-200 flex items-center justify-between">
             {!expertsCollapsed && <h3 className="font-semibold text-farm-blue text-sm">Expert Panel</h3>}
             <button
@@ -610,7 +636,7 @@ export default function ChatInterface({
           </div>
 
           {!expertsCollapsed && (
-            <ScrollArea className="flex-1 p-3">
+            <ScrollArea className="flex-1 min-w-0 p-3">
               <div className="space-y-2">
                 {experts.map((expert) => (
                   <button
@@ -683,7 +709,7 @@ export default function ChatInterface({
         </div>
       </div>
 
-      {isMobile && showMobileExpertPanel && (
+      {isCompactLayout && showMobileExpertPanel && (
         <div
           className="absolute inset-0 z-20 bg-black/40"
           aria-hidden="true"
@@ -745,7 +771,7 @@ export default function ChatInterface({
       {/* Main Chat Area */}
       <div className="flex-1 flex flex-col h-full bg-white border-r border-neutral-200 min-w-0">
         {/* Chat Messages */}
-        <ScrollArea ref={scrollAreaRef} className="flex-1 p-4">
+        <ScrollArea ref={scrollAreaRef} className="flex-1 min-w-0 min-h-0 p-4">
           {isLoadingMessages && (
             <div role="status" className="flex items-center justify-center gap-2 py-8 text-sm text-neutral-500">
               <Loader2 className="h-4 w-4 animate-spin" />
@@ -771,7 +797,7 @@ export default function ChatInterface({
                 if (message.userId && !message.expertId) {
                   return (
                     <div key={message.id} className="flex items-start mb-4 justify-end">
-                      <div className="bg-gradient-to-br from-farm-blue to-farm-dark-green text-white rounded-xl p-4 max-w-[85%] shadow-md">
+                      <div className="bg-gradient-to-br from-farm-blue to-farm-dark-green text-white rounded-xl p-4 max-w-[min(85%,calc(100%_-_52px))] shadow-md">
                         <MentionChips mentions={message.mentions} experts={experts} className="mb-2" />
                         <div className="markdown-content prose-sm prose-invert leading-relaxed">
                           {renderMessageBody(message.content)}
@@ -805,7 +831,7 @@ export default function ChatInterface({
                           <AvatarFallback className="bg-farm-green text-white font-semibold">{speakerName.charAt(0)}</AvatarFallback>
                         </Avatar>
                       </div>
-                      <div className="max-w-[85%] space-y-2">
+                      <div className="max-w-[min(85%,calc(100%_-_52px))] space-y-2">
                         <div className={`${getExpertBubbleColor(expert?.id ?? 0)} ${message.isSynthesis ? "border-amber-300/70 bg-amber-50/70 shadow-md" : ""} rounded-xl p-4 border shadow-sm`}>
                           <div className="flex items-center justify-between gap-2 mb-2">
                             <div className="flex items-center gap-2 min-w-0">
@@ -883,7 +909,7 @@ export default function ChatInterface({
                     </span>
                   </div>
                 </div>
-                <div className="max-w-[85%] space-y-2">
+                <div className="max-w-[min(85%,calc(100%_-_52px))] space-y-2">
                   <div className={`${getExpertBubbleColor(expert?.id ?? 0)} rounded-xl p-4 border shadow-sm`}>
                     <div className="flex items-center justify-between mb-2">
                       <p className="text-sm font-semibold text-farm-blue">
@@ -1024,15 +1050,17 @@ export default function ChatInterface({
         
       </div>
 
-      {/* Floating button to toggle expert panel on mobile */}
-      {isMobile && (
+      {/* Floating button to toggle the compact expert panel */}
+      {isCompactLayout && (
         <Button
-          className="fixed bottom-20 right-4 z-20 rounded-full w-12 h-12 shadow-lg bg-farm-blue hover:bg-farm-dark-green text-white"
+          className="fixed bottom-20 z-40 rounded-full w-12 h-12 shadow-lg bg-farm-blue hover:bg-farm-dark-green text-white"
           size="icon"
           onClick={() => setShowMobileExpertPanel(!showMobileExpertPanel)}
           title={showMobileExpertPanel ? "Hide experts" : "Show experts"}
           aria-label={showMobileExpertPanel ? "Hide experts" : "Show experts"}
           aria-expanded={showMobileExpertPanel}
+          aria-controls="expert-panel"
+          style={{ right: `${isMobile ? 16 : effectiveRightSidebarWidth + 16}px` }}
         >
           <Users className="h-5 w-5" />
         </Button>
@@ -1041,7 +1069,7 @@ export default function ChatInterface({
       {/* Right Sidebar - Resizable */}
       <div
         className="flex-shrink-0 bg-white h-full overflow-hidden hidden md:block"
-        style={{ width: `${rightSidebarWidth}px` }}
+        style={{ width: `${effectiveRightSidebarWidth}px` }}
       >
         <ConversationSidebar
           messages={messages}
@@ -1049,7 +1077,7 @@ export default function ChatInterface({
           insights={insights}
           visualizations={visualizations}
           onWidthChange={setRightSidebarWidth}
-          currentWidth={rightSidebarWidth}
+          currentWidth={effectiveRightSidebarWidth}
         />
       </div>
 
