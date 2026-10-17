@@ -2,7 +2,7 @@ import { formatLocalDateTime } from "@/lib/format-local-time";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Plus, RefreshCw, Download, Upload, FileDown, FileText, Image, ArrowRight, CalendarDays, ChevronDown } from "lucide-react";
+import { Plus, RefreshCw, Download, Upload, FileDown, FileText, Image, ArrowRight, CalendarDays, ChevronDown, ChevronLeft } from "lucide-react";
 import { Insight, File as FileSchema, Conversation, Expert } from "@shared/schema";
 import { addDays, format } from "date-fns";
 
@@ -36,6 +36,7 @@ interface SidebarPanelProps {
   onStartNewSession: () => void;
   onExportMarkdown: () => void;
   onExportIcs: (start: string) => void;
+  onCollapse?: () => void;
   canExportIcs?: boolean;
   onFileUpload: (file: File) => void;
   onSelectConversation: (id: number) => void;
@@ -60,6 +61,7 @@ export default function SidebarPanel({
   onStartNewSession,
   onExportMarkdown,
   onExportIcs,
+  onCollapse,
   canExportIcs = true,
   onFileUpload,
   onSelectConversation,
@@ -163,7 +165,24 @@ export default function SidebarPanel({
       <div className="flex flex-col h-full min-h-0">
         {/* Session Controls */}
         <div className="shrink-0 p-4 border-b border-farm-tan/30 [@media(max-height:500px)]:max-h-[45vh] [@media(max-height:500px)]:overflow-y-auto">
-          <h2 className="font-serif font-bold text-lg mb-3 text-farm-blue">Current Session</h2>
+          <div className="mb-3 flex items-center justify-between gap-2">
+            <h2 className="font-serif font-bold text-lg text-farm-blue">Current Session</h2>
+            {onCollapse && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8 shrink-0"
+                aria-label="Collapse left sidebar"
+                aria-controls="left-sidebar-drawer"
+                aria-expanded={true}
+                title="Collapse left sidebar"
+                onClick={onCollapse}
+              >
+                <ChevronLeft className="h-4 w-4" />
+              </Button>
+            )}
+          </div>
           <Button
             className="w-full bg-gradient-to-r from-farm-green to-farm-dark-green hover:from-farm-dark-green hover:to-farm-green text-white rounded-lg px-4 py-2.5 flex items-center justify-center mb-2 shadow-md hover:shadow-lg transition-all duration-200 font-semibold"
             onClick={onStartNewSession}

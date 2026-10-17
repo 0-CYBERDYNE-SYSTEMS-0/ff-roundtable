@@ -15,7 +15,7 @@ import FarmProfileModal from "@/components/farm/FarmProfileModal";
 import { useWebSocket, sendWebSocketSubscription, sendWebSocketUnsubscription } from "@/lib/websocket-utils";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { ZapIcon, ZapOffIcon, Menu, PauseIcon, PlayIcon, ScrollText, XIcon } from "lucide-react";
+import { ZapIcon, ZapOffIcon, Menu, PauseIcon, PlayIcon, ScrollText, XIcon, ChevronLeft, ChevronRight } from "lucide-react";
 import { parseNewCommand } from "@/lib/new-command";
 
 // G9 quiet console: per-event chatter is gated behind a debug flag so the
@@ -38,8 +38,9 @@ type InteractionMode =
     | "autonomous";
 
 const DEFAULT_LEFT_SIDEBAR_WIDTH = 288;
-const MIN_LEFT_SIDEBAR_WIDTH = 192;
-const MAX_LEFT_SIDEBAR_WIDTH = 320;
+const MIN_LEFT_SIDEBAR_WIDTH = 288;
+const MAX_LEFT_SIDEBAR_WIDTH = 400;
+const COLLAPSED_SIDEBAR_RAIL_WIDTH = 40;
 
 function getMaxLeftSidebarWidth() {
   const viewportWidth = typeof window === "undefined" ? MAX_LEFT_SIDEBAR_WIDTH : window.innerWidth;
@@ -56,6 +57,7 @@ export default function HomePage() {
   const [showFarmProfileModal, setShowFarmProfileModal] = useState(false);
   const [farmProfileModalDismissed, setFarmProfileModalDismissed] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [isLeftSidebarCollapsed, setIsLeftSidebarCollapsed] = useState(false);
   const [leftSidebarWidth, setLeftSidebarWidth] = useState(() => Math.min(DEFAULT_LEFT_SIDEBAR_WIDTH, getMaxLeftSidebarWidth()));
   const [maxLeftSidebarWidth, setMaxLeftSidebarWidth] = useState(() => getMaxLeftSidebarWidth());
   const [isResizingLeftSidebar, setIsResizingLeftSidebar] = useState(false);
@@ -1064,33 +1066,52 @@ export default function HomePage() {
           ref={sidebarDrawerRef}
           id="left-sidebar-drawer"
           className={`relative h-full min-h-0 shrink-0 ${isMobile ? 'absolute inset-y-0 left-0 z-30 transition-transform duration-300' : ''} ${isMobile && !sidebarOpen ? '-translate-x-full' : ''}`}
-          style={{ width: isMobile ? DEFAULT_LEFT_SIDEBAR_WIDTH : leftSidebarWidth }}
+          style={{ width: isMobile ? DEFAULT_LEFT_SIDEBAR_WIDTH : isLeftSidebarCollapsed ? COLLAPSED_SIDEBAR_RAIL_WIDTH : leftSidebarWidth }}
           aria-hidden={isMobile && !sidebarOpen}
         >
-          <SidebarPanel
-            conversations={conversations || []}
-            insights={insights || []}
-            files={files || []}
-            onStartNewSession={handleStartNewSession}
-            onExportMarkdown={exportMarkdown}
-            onExportIcs={exportIcs}
-            canExportIcs={hasSchedulableSource}
-            onFileUpload={handleFileUpload}
-            onSelectConversation={handleSelectConversation}
-            activeConversationId={activeConversation}
-            onRefreshInsights={() => generateInsightsMutation.mutate()}
-            isLoadingInsights={generateInsightsMutation.isPending}
-            isLoadingConversations={isLoadingConversations}
-            conversationsError={conversationsError}
-            isLoadingInsightsData={isLoadingInsights}
-            insightsError={insightsError}
-            isLoadingFiles={isLoadingFiles}
-            filesError={filesError}
-            isStartingNewSession={createConversationMutation.isPending}
-            isUploading={uploadFileMutation.isPending}
-            experts={experts || []}
-          />
-          {!isMobile && (
+          {!isMobile && isLeftSidebarCollapsed ? (
+            <div className="flex h-full justify-center border-r border-farm-tan/30 bg-white">
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="mt-2 h-9 w-9 shrink-0"
+                aria-label="Expand left sidebar"
+                aria-controls="left-sidebar-drawer"
+                aria-expanded={false}
+                title="Expand left sidebar"
+                onClick={() => setIsLeftSidebarCollapsed(false)}
+              >
+                <ChevronRight className="h-4 w-4" />
+              </Button>
+            </div>
+          ) : (
+            <SidebarPanel
+              conversations={conversations || []}
+              insights={insights || []}
+              files={files || []}
+              onStartNewSession={handleStartNewSession}
+              onExportMarkdown={exportMarkdown}
+              onExportIcs={exportIcs}
+              canExportIcs={hasSchedulableSource}
+              onFileUpload={handleFileUpload}
+              onSelectConversation={handleSelectConversation}
+              activeConversationId={activeConversation}
+              onRefreshInsights={() => generateInsightsMutation.mutate()}
+              isLoadingInsights={generateInsightsMutation.isPending}
+              isLoadingConversations={isLoadingConversations}
+              conversationsError={conversationsError}
+              isLoadingInsightsData={isLoadingInsights}
+              insightsError={insightsError}
+              isLoadingFiles={isLoadingFiles}
+              filesError={filesError}
+              isStartingNewSession={createConversationMutation.isPending}
+              isUploading={uploadFileMutation.isPending}
+              experts={experts || []}
+              onCollapse={!isMobile ? () => setIsLeftSidebarCollapsed(true) : undefined}
+            />
+          )}
+          {!isMobile && !isLeftSidebarCollapsed && (
             <div
               role="separator"
               aria-orientation="vertical"

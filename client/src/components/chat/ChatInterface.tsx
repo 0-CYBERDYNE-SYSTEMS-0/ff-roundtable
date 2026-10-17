@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { AtSign, Paperclip, Send, Loader2, Users, ScrollText } from "lucide-react";
+import { AtSign, Paperclip, Send, Loader2, Users, ScrollText, ChevronLeft } from "lucide-react";
 import { Message, Expert, User, OpenQuestion } from "@shared/schema";
 import { format } from "date-fns";
 import ReactMarkdown from "react-markdown";
@@ -196,6 +196,7 @@ export default function ChatInterface({
   const [messageContent, setMessageContent] = useState("");
   const [expertsCollapsed, setExpertsCollapsed] = useState(false);
   const [rightSidebarWidth, setRightSidebarWidth] = useState(400);
+  const [isRightSidebarCollapsed, setIsRightSidebarCollapsed] = useState(false);
   const [selectedExpert, setSelectedExpert] = useState<Expert | null>(null);
   const [isExpertModalOpen, setIsExpertModalOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -1061,7 +1062,7 @@ export default function ChatInterface({
           aria-label={showMobileExpertPanel ? "Hide experts" : "Show experts"}
           aria-expanded={showMobileExpertPanel}
           aria-controls="expert-panel"
-          style={{ right: `${isRightSidebarVisible ? effectiveRightSidebarWidth + 16 : 16}px` }}
+          style={{ right: `${isRightSidebarVisible ? (isRightSidebarCollapsed ? 40 : effectiveRightSidebarWidth) + 16 : 16}px` }}
         >
           <Users className="h-5 w-5" />
         </Button>
@@ -1069,17 +1070,37 @@ export default function ChatInterface({
 
       {/* Right Sidebar - Resizable */}
       <div
-        className={`flex-shrink-0 bg-white h-full overflow-hidden ${isRightSidebarVisible ? "block" : "hidden"}`}
-        style={{ width: `${effectiveRightSidebarWidth}px` }}
+        id="right-sidebar-panel"
+        className={`flex-shrink-0 h-full overflow-hidden ${isRightSidebarVisible ? "block" : "hidden"} ${isRightSidebarCollapsed ? "border-l border-neutral-200 bg-white" : "bg-white"}`}
+        style={{ width: `${isRightSidebarCollapsed ? 40 : effectiveRightSidebarWidth}px` }}
       >
-        <ConversationSidebar
-          messages={messages}
-          experts={experts}
-          insights={insights}
-          visualizations={visualizations}
-          onWidthChange={setRightSidebarWidth}
-          currentWidth={effectiveRightSidebarWidth}
-        />
+        {isRightSidebarCollapsed ? (
+          <div className="flex h-full justify-center">
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="mt-2 h-9 w-9 shrink-0"
+              aria-label="Expand right sidebar"
+              aria-controls="right-sidebar-panel"
+              aria-expanded={false}
+              title="Expand right sidebar"
+              onClick={() => setIsRightSidebarCollapsed(false)}
+            >
+              <ChevronLeft className="h-4 w-4" />
+            </Button>
+          </div>
+        ) : (
+          <ConversationSidebar
+            messages={messages}
+            experts={experts}
+            insights={insights}
+            visualizations={visualizations}
+            onWidthChange={setRightSidebarWidth}
+            onCollapse={() => setIsRightSidebarCollapsed(true)}
+            currentWidth={effectiveRightSidebarWidth}
+          />
+        )}
       </div>
 
       {/* Expert Settings Modal */}
