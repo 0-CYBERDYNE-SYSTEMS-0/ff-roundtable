@@ -37,6 +37,15 @@ type InteractionMode =
     | "paused" 
     | "autonomous";
 
+const DEFAULT_LEFT_SIDEBAR_WIDTH = 288;
+const MIN_LEFT_SIDEBAR_WIDTH = 192;
+const MAX_LEFT_SIDEBAR_WIDTH = 320;
+
+function getMaxLeftSidebarWidth() {
+  const viewportWidth = typeof window === "undefined" ? MAX_LEFT_SIDEBAR_WIDTH : window.innerWidth;
+  return Math.max(MIN_LEFT_SIDEBAR_WIDTH, Math.min(MAX_LEFT_SIDEBAR_WIDTH, Math.floor(viewportWidth * 0.3)));
+}
+
 export default function HomePage() {
   const { user } = useAuth();
   const { toast } = useToast();
@@ -47,8 +56,53 @@ export default function HomePage() {
   const [showFarmProfileModal, setShowFarmProfileModal] = useState(false);
   const [farmProfileModalDismissed, setFarmProfileModalDismissed] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [leftSidebarWidth, setLeftSidebarWidth] = useState(() => Math.min(DEFAULT_LEFT_SIDEBAR_WIDTH, getMaxLeftSidebarWidth()));
+  const [maxLeftSidebarWidth, setMaxLeftSidebarWidth] = useState(() => getMaxLeftSidebarWidth());
+  const [isResizingLeftSidebar, setIsResizingLeftSidebar] = useState(false);
+  const leftSidebarResizeRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const sidebarDrawerRef = useRef<HTMLDivElement>(null);
   const sidebarToggleRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    const updateSidebarMaxWidth = () => {
+      const maxWidth = getMaxLeftSidebarWidth();
+      setMaxLeftSidebarWidth(maxWidth);
+      setLeftSidebarWidth((width) => Math.min(width, maxWidth));
+    };
+    window.addEventListener("resize", updateSidebarMaxWidth);
+    return () => window.removeEventListener("resize", updateSidebarMaxWidth);
+  }, []);
+
+  const handleLeftSidebarResizeStart = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (isMobile) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    leftSidebarResizeRef.current = { startX: event.clientX, startWidth: leftSidebarWidth };
+    setIsResizingLeftSidebar(true);
+  };
+
+  const handleLeftSidebarResizeMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    const resize = leftSidebarResizeRef.current;
+    if (!resize) return;
+    const width = resize.startWidth + event.clientX - resize.startX;
+    setLeftSidebarWidth(Math.max(MIN_LEFT_SIDEBAR_WIDTH, Math.min(maxLeftSidebarWidth, width)));
+  };
+
+  const stopLeftSidebarResize = () => {
+    leftSidebarResizeRef.current = null;
+    setIsResizingLeftSidebar(false);
+  };
+
+  const handleLeftSidebarResizeKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+      event.preventDefault();
+      const delta = event.key === "ArrowRight" ? 16 : -16;
+      setLeftSidebarWidth((width) => Math.max(MIN_LEFT_SIDEBAR_WIDTH, Math.min(maxLeftSidebarWidth, width + delta)));
+    } else if (event.key === "Home" || event.key === "End") {
+      event.preventDefault();
+      setLeftSidebarWidth(event.key === "Home" ? MIN_LEFT_SIDEBAR_WIDTH : maxLeftSidebarWidth);
+    }
+  };
 
   useEffect(() => {
     const drawer = sidebarDrawerRef.current;
@@ -1009,7 +1063,8 @@ export default function HomePage() {
         <div
           ref={sidebarDrawerRef}
           id="left-sidebar-drawer"
-          className={`h-full min-h-0 shrink-0 ${isMobile ? 'absolute inset-y-0 left-0 z-30 transition-transform duration-300' : ''} ${isMobile && !sidebarOpen ? '-translate-x-full' : ''}`}
+          className={`relative h-full min-h-0 shrink-0 ${isMobile ? 'absolute inset-y-0 left-0 z-30 transition-transform duration-300' : ''} ${isMobile && !sidebarOpen ? '-translate-x-full' : ''}`}
+          style={{ width: isMobile ? DEFAULT_LEFT_SIDEBAR_WIDTH : leftSidebarWidth }}
           aria-hidden={isMobile && !sidebarOpen}
         >
           <SidebarPanel
@@ -1035,6 +1090,25 @@ export default function HomePage() {
             isUploading={uploadFileMutation.isPending}
             experts={experts || []}
           />
+          {!isMobile && (
+            <div
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="Resize left sidebar"
+              aria-controls="left-sidebar-drawer"
+              aria-valuemin={MIN_LEFT_SIDEBAR_WIDTH}
+              aria-valuemax={maxLeftSidebarWidth}
+              aria-valuenow={leftSidebarWidth}
+              tabIndex={0}
+              onPointerDown={handleLeftSidebarResizeStart}
+              onPointerMove={handleLeftSidebarResizeMove}
+              onPointerUp={stopLeftSidebarResize}
+              onPointerCancel={stopLeftSidebarResize}
+              onKeyDown={handleLeftSidebarResizeKeyDown}
+              className={`absolute -right-1 top-0 z-20 h-full w-2 cursor-col-resize touch-none select-none transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-farm-blue hover:bg-farm-blue/30 ${isResizingLeftSidebar ? "bg-farm-blue/50" : "bg-transparent"}`}
+              title="Drag or use the arrow keys to resize the left sidebar"
+            />
+          )}
         </div>
 
         {/* Mobile sidebar overlay */}
