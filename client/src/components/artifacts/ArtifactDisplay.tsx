@@ -6,6 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { LineChart, Line, BarChart, Bar, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from "recharts";
 import DOMPurify from "isomorphic-dompurify";
 import { cn } from "@/lib/utils";
+import VegaChart from "./VegaChart";
 
 interface ArtifactDisplayProps {
   artifact: Artifact;
@@ -163,6 +164,7 @@ export default function ArtifactDisplay({ artifact }: ArtifactDisplayProps) {
       case "chart":
         try {
           const chartData = JSON.parse(artifact.content);
+          if (chartData.type === "vega-lite") return <VegaChart content={artifact.content} />;
           if (!chartData.data || !Array.isArray(chartData.data) || chartData.data.length === 0) {
             return <div className="text-sm text-neutral-600">No chart data available</div>;
           }

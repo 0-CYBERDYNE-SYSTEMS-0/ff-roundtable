@@ -57,6 +57,7 @@ vi.mock("../server/storage", () => ({
 
 vi.mock("../server/ai", () => ({
   getExpertResponseStream: mockGetExpertResponseStream,
+  isRetryableExpertProviderFailure: () => false,
   generateInsights: mockGenerateInsights,
   getModeratorNextSpeakerSuggestion: mockGetModeratorNextSpeakerSuggestion,
   generateClosingSynthesis: mockGenerateClosingSynthesis,
@@ -407,6 +408,21 @@ describe("G9 prior-decisions injection", () => {
         (m) => m.role === "system" && String(m.content).includes("PRIOR DECISIONS"),
       ),
     ).toBe(false);
+    expect(messages[messages.length - 1].role).toBe("user");
+  });
+
+  it("adds the bounded retry instruction as system context (streaming path)", async () => {
+    const conversationId = nextConvId();
+    const expert = createMockExpert(1, "Alice", "Agronomist", conversationId);
+    mockGetConversationInsights.mockResolvedValue([]);
+    const retryInstruction = "Answer concisely (no more than 180 words).";
+
+    await realAi.getExpertResponseStream(
+      expert, [], "Question", [], ["Agronomist"], () => {}, undefined, retryInstruction,
+    );
+
+    const messages = mockProviderChatStream.mock.calls[0][0] as import("../server/ai").AIMessage[];
+    expect(messages[messages.length - 2]).toEqual({ role: "system", content: retryInstruction });
     expect(messages[messages.length - 1].role).toBe("user");
   });
 

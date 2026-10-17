@@ -14,9 +14,7 @@ export function maxOutputTokens(): number {
 // Free OpenRouter models come and go; when a :free model is requested,
 // OpenRouter's `models` array lets it fall through to these (verified live 2026-10-16).
 export const FREE_MODEL_FALLBACKS = [
-  "nvidia/nemotron-3-super-120b-a12b:free",
-  "nvidia/nemotron-3.5-super-vl:free",
-  "google/gemma-4-31b-it:free",
+  "dots-studio/dots-3-note-preview:free",
 ];
 export function modelRouting(model: string): { model: string; models?: string[] } {
   if (!model.endsWith(":free")) return { model };
@@ -49,6 +47,7 @@ export type OpenRouterUsageSnapshot = {
     requestId: string;
     generationId?: string;
     model: string;
+    responseModel?: string;
     provider?: string;
     elapsedMs: number;
     result: "success" | "failed";
@@ -156,7 +155,7 @@ export class OpenRouterProvider implements AIProvider {
     attempt: OpenRouterAttempt,
     result: "success" | "failed",
     usage?: unknown,
-    metadata: { generationId?: string; provider?: string; errorCode?: number } = {},
+    metadata: { generationId?: string; responseModel?: string; provider?: string; errorCode?: number } = {},
   ): void {
     if (attempt.settled) return;
     attempt.settled = true;
@@ -173,6 +172,7 @@ export class OpenRouterProvider implements AIProvider {
       requestId: attempt.id,
       ...(metadata.generationId ? { generationId: metadata.generationId } : {}),
       model: attempt.model,
+      ...(metadata.responseModel ? { responseModel: metadata.responseModel } : {}),
       ...(metadata.provider ? { provider: metadata.provider } : {}),
       elapsedMs: Date.now() - attempt.startedAt,
       result,
@@ -275,7 +275,7 @@ export class OpenRouterProvider implements AIProvider {
         throw new Error(OUTPUT_LIMIT_ERROR);
       }
 
-      this.settleAttempt(attempt, "success", usage, { generationId, provider });
+      this.settleAttempt(attempt, "success", usage, { generationId, responseModel, provider });
       return {
         message: data.choices[0].message,
         ...(Array.isArray(data.citations) ? { citations: data.citations.filter((value: unknown): value is string => typeof value === "string") } : {}),
@@ -288,6 +288,7 @@ export class OpenRouterProvider implements AIProvider {
       const status = typeof (error as any)?.statusCode === "number" ? (error as any).statusCode : undefined;
       this.settleAttempt(attempt, "failed", requestStarted ? usage : { cost: 0 }, {
         generationId,
+        responseModel,
         provider,
         errorCode: status,
       });
@@ -405,7 +406,7 @@ export class OpenRouterProvider implements AIProvider {
         throw new Error(OUTPUT_LIMIT_ERROR);
       }
 
-      this.settleAttempt(attempt, "success", usage, { generationId, provider });
+      this.settleAttempt(attempt, "success", usage, { generationId, responseModel, provider });
 
       return {
         message: { role: "assistant", content: fullContent },
@@ -418,6 +419,7 @@ export class OpenRouterProvider implements AIProvider {
       const status = typeof (error as any)?.statusCode === "number" ? (error as any).statusCode : undefined;
       this.settleAttempt(attempt, "failed", requestStarted ? usage : { cost: 0 }, {
         generationId,
+        responseModel,
         provider,
         errorCode: status,
       });

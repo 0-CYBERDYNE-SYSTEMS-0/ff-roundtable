@@ -46,6 +46,7 @@ vi.mock("../server/storage", () => ({
 
 vi.mock("../server/ai", () => ({
   getExpertResponseStream: mockGetExpertResponseStream,
+  isRetryableExpertProviderFailure: () => false,
   generateInsights: mockGenerateInsights,
   getModeratorNextSpeakerSuggestion: mockGetModeratorNextSpeakerSuggestion,
   generateClosingSynthesis: mockGenerateClosingSynthesis,

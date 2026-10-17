@@ -141,6 +141,19 @@ describe("generateSystemPrompt charter injection", () => {
     expect(prompt.indexOf("📜 COUNCIL CHARTER")).toBeLessThan(prompt.indexOf("🌾 FARMER CONTEXT"));
   });
 
+  it("requires named cross-talk to reuse two concrete domain terms without repeating a recommendation", () => {
+    const prompt = generateSystemPrompt(expert, roles);
+    expect(prompt).toContain("make your first sentence follow this format");
+    expect(prompt).toContain("the colleague's full role name, copying every word exactly from the Colleagues list");
+    expect(prompt).toContain("two distinct domain terms of five or more letters");
+    expect(prompt).toContain("do not shorten or paraphrase it");
+    expect(prompt).toContain("verbatim from that colleague's latest substantive message");
+    expect(prompt).toContain("verify the exact full role name and both terms appear literally");
+    expect(prompt).toContain("do not fabricate cross-talk");
+    expect(prompt).toContain("no more than 180 words");
+    expect(prompt).toContain("Do not repeat their action step, calculation, or farmer question");
+  });
+
   it("trims the charter content in the prompt", () => {
     const prompt = generateSystemPrompt(expert, roles, undefined, undefined, `  ${CHARTER}  `);
     expect(prompt).toContain(`\n${CHARTER}\n`);
@@ -611,6 +624,24 @@ describe("getModeratorNextSpeakerSuggestion charter awareness", () => {
       expect(suggestion).toBeNull();
     },
   );
+
+  it("falls back cleanly when the Moderator response content is null", async () => {
+    const convo = await storage.createConversation({ userId: 1, title: "Empty Moderator response" });
+    mockProviderChat.mockResolvedValueOnce({ message: { role: "assistant", content: null } });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    try {
+      const suggestion = await getModeratorNextSpeakerSuggestion(
+        createMockModerator(null, convo.id),
+        [],
+        ["Soil Scientist", "Crop Specialist"],
+      );
+      expect(suggestion).toBeNull();
+      expect(errorSpy).not.toHaveBeenCalled();
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
 
   it("stays charter-free when the conversation has no charter", async () => {
     const convo = await storage.createConversation({ userId: 1, title: "Unchartered" });

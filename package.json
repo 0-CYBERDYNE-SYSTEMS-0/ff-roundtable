@@ -68,6 +68,7 @@
     "express-session": "^1.18.1",
     "framer-motion": "^11.13.1",
     "helmet": "^8.2.0",
+    "ical.js": "^2.2.1",
     "input-otp": "^1.2.4",
     "isomorphic-dompurify": "^2.30.0",
     "lucide-react": "^0.453.0",
@@ -92,6 +93,10 @@
     "three": "^0.175.0",
     "unpdf": "^1.9.0",
     "vaul": "^1.1.0",
+    "vega": "^6.4.0",
+    "vega-embed": "^7.3.0",
+    "vega-interpreter": "^2.3.2",
+    "vega-lite": "^6.5.0",
     "wouter": "^3.3.5",
     "ws": "^8.18.0",
     "zod": "^3.23.8",
@@ -130,5 +135,8 @@
   },
   "optionalDependencies": {
     "bufferutil": "^4.0.8"
+  },
+  "engines": {
+    "node": ">=24.0.0"
   }
 }

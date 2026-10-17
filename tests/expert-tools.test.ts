@@ -3,12 +3,12 @@ import os from "os";
 import path from "path";
 import { describe, expect, it, vi } from "vitest";
 import {
-  parseToolPlan, parseDuckDuckGoResults, runToolCalls, formatToolResultsForPrompt, assertPublicUrl,
-  extractDeliverable, saveExpertDeliverable, validateChartArtifact, filterChartArtifacts, toolCallLimitForTier,
+  parseToolPlan, parseDuckDuckGoResults, runToolCalls, formatToolResultsForPrompt, assertPublicUrl, buildToolPlanningPrompt,
+  extractDeliverable, saveExpertDeliverable, validateChartArtifact, filterChartArtifacts, toolCallLimitForTier, buildToolUsePrompt,
   MAX_TOOL_CALLS_PER_TURN,
 } from "../server/expert-tools";
 
-const DDG = `<a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fcrops.extension.iastate.edu%2Fnitrogen&amp;rut=x">Nitrogen <b>deficiency</b></a> ... <a class="result__snippet" href="#">Lower leaves yellow in a V</a>`;
+const DDG = `<a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2F93.184.216.34%2Fnitrogen&amp;rut=x">Nitrogen <b>deficiency</b></a> ... <a class="result__snippet" href="#">Lower leaves yellow in a V</a>`;
 
 describe("tool planning", () => {
   it("parses SEARCH/FETCH lines, caps the count, ignores chatter", () => {
@@ -20,21 +20,60 @@ describe("tool planning", () => {
     ]);
     expect(parseToolPlan("NONE", 3)).toEqual([]);
   });
+  it("requires authoritative research for higher-stakes decisions without overriding farmer-provided prices", () => {
+    const prompt = buildToolPlanningPrompt("Grain Marketing Advisor", "Store or hedge these soybeans?", 2);
+    expect(prompt).toContain("do not reply NONE merely because you know the general advice");
+    expect(prompt).toContain("marketing or hedging");
+    expect(prompt).toContain("Never search for or contradict a price or condition supplied by the farmer");
+  });
+  it("requires authoritative sources for numeric soil and crop recommendations", () => {
+    const prompt = buildToolPlanningPrompt("Soil Scientist", "What liming rate follows from these soil-test results?", 2);
+    expect(prompt).toContain("soil-fertility, liming, fertilizer/nutrient-application");
+    expect(prompt).toContain("especially numeric rates, thresholds, or yield claims");
+    expect(prompt).toContain("Use farmer-provided soil tests, acres, yields, prices, and field conditions exactly as supplied");
+  });
   it("tier caps: free 2, paid up to MAX", () => {
     expect(toolCallLimitForTier("free")).toBe(2);
     expect(toolCallLimitForTier("pro")).toBe(MAX_TOOL_CALLS_PER_TURN);
   });
 });
 
+describe("research citation guidance", () => {
+  it("requires claim-level support from fetched source text", () => {
+    const prompt = buildToolUsePrompt();
+    expect(prompt).toContain("a citation supports only what the fetched page states");
+    expect(prompt).toContain("Split separate claims into separate sentences");
+    expect(prompt).toContain("Every cited number must appear in the fetched text");
+    expect(prompt).toContain("qualify, omit, or say you could not verify it");
+  });
+});
+
 describe("search + fetch", () => {
   it("decodes DuckDuckGo redirect links", () => {
-    expect(parseDuckDuckGoResults(DDG)).toEqual([{ url: "https://crops.extension.iastate.edu/nitrogen", title: "Nitrogen deficiency", snippet: "Lower leaves yellow in a V" }]);
+    expect(parseDuckDuckGoResults(DDG)).toEqual([{ url: "https://93.184.216.34/nitrogen", title: "Nitrogen deficiency", snippet: "Lower leaves yellow in a V" }]);
   });
-  it("numbers sources and degrades gracefully on failure", async () => {
-    const ok = vi.fn(async () => new Response(DDG, { status: 200 })) as any;
+  it("numbers only fetched pages as citable sources", async () => {
+    const ok = vi.fn()
+      .mockResolvedValueOnce(new Response(DDG, { status: 200 }))
+      .mockResolvedValueOnce(new Response("<html><title>Nitrogen basics</title><p>Lower leaves yellow in a V.</p></html>", {
+        status: 200, headers: { "content-type": "text/html" },
+      })) as any;
     const run = await runToolCalls([{ tool: "search", query: "x" }], ok);
-    expect(run.sources[0].id).toBe("S1");
-    expect(formatToolResultsForPrompt(run)).toContain("[S1] Nitrogen deficiency — https://crops.extension.iastate.edu/nitrogen");
+    expect(run.sources[0]).toMatchObject({
+      id: "S1", title: "Nitrogen basics", url: "https://93.184.216.34/nitrogen",
+      snippet: "Nitrogen basics Lower leaves yellow in a V.",
+    });
+    expect(formatToolResultsForPrompt(run)).toContain("[S1] Nitrogen basics — https://93.184.216.34/nitrogen");
+    expect(formatToolResultsForPrompt(run)).toContain("MANDATORY CITATION CONTRACT");
+    expect(ok).toHaveBeenCalledTimes(2);
+
+    const inaccessible = vi.fn()
+      .mockResolvedValueOnce(new Response(DDG, { status: 200 }))
+      .mockResolvedValueOnce(new Response("denied", { status: 403 })) as any;
+    const noPage = await runToolCalls([{ tool: "search", query: "x" }], inaccessible);
+    expect(noPage.sources).toEqual([]);
+    expect(noPage.notes.join(" ")).toMatch(/no fetchable source/);
+
     const down = vi.fn(async () => { throw new Error("offline"); }) as any;
     const failed = await runToolCalls([{ tool: "search", query: "x" }], down);
     expect(failed.sources).toEqual([]);

@@ -3,7 +3,7 @@ import { billingErrorResponse, billingUnavailable } from "./billing-errors";
 import type { Express, Request, Response } from "express";
 import express from "express";
 import { createServer, type Server } from "http";
-import { storage } from "./storage";
+import { storage, DeliverableConflictError } from "./storage";
 import { setupAuth } from "./auth";
 import { callOpenRouterAPI, callPerplexityAPI, generateSystemPrompt, getExpertResponse, generateInsights } from "./ai";
 import { processMessageTurnBased, InteractionOrchestrator, getConversationState, getFarmerFileIntent, persistAutonomySettings, restorePausedFromSnapshot } from "./orchestrator";
@@ -18,6 +18,8 @@ import { InsertConversation, InsertExpert, InsertMessage, Message, type File, in
 import { z } from "zod";
 import { extractMentions } from "@shared/mentions";
 import { buildVCalendar } from "@shared/ics";
+import { calendarEventsSchema, type CalendarDraft } from "@shared/calendar-draft";
+import { inspectCalendar } from "./calendar-files";
 import { extractScheduleRows, parseIsoDate, nextMondayFrom, resolveRowStartDate, buildRowSummary } from "@shared/schedule-extract";
 import { generateComprehensiveMarkdown } from './export-utils';
 import { getWeatherForFarm, formatWeatherContext } from './weather';
@@ -1659,6 +1661,88 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error: any) {
       console.error("Export error:", error);
       res.status(500).json({ message: error.message });
+    }
+  });
+
+  // Reviewed calendars use the existing versioned-file store in both storage backends.
+  const calendarRequestSchema = z.object({
+    events: calendarEventsSchema,
+    expectedCurrentFileId: z.number().int().positive().nullable(),
+    sourceFileId: z.number().int().positive().optional(),
+  });
+
+  app.get("/api/protected/conversations/:id/calendar", async (req, res) => {
+    try {
+      const conversationId = Number(req.params.id);
+      const conversation = await storage.getConversation(conversationId);
+      if (!conversation || conversation.userId !== req.user!.id) return res.status(404).json({ message: "Conversation not found" });
+      let sourceFileId = req.query.fileId === undefined ? undefined : Number(req.query.fileId);
+      if (sourceFileId !== undefined && (!Number.isSafeInteger(sourceFileId) || sourceFileId <= 0)) return res.status(422).json({ message: "Invalid calendar file" });
+      let source = sourceFileId === undefined ? undefined : await storage.getFileById(sourceFileId);
+      if (sourceFileId !== undefined && (!source || source.conversationId !== conversationId || !source.filename.toLowerCase().endsWith(".ics"))) return res.status(404).json({ message: "Calendar not found" });
+      const reviewed = sourceFileId === undefined ? await storage.getCurrentDeliverableFile(conversationId, "farmer-calendar") : undefined;
+      if (sourceFileId === undefined && !reviewed) {
+        source = (await storage.getConversationFiles(conversationId))
+          .filter(file => !file.supersededAt && file.uploadedBy.toLowerCase() !== "user" && file.filename.toLowerCase().endsWith(".ics"))
+          .sort((a, b) => (b.uploadedAt?.getTime() ?? 0) - (a.uploadedAt?.getTime() ?? 0) || b.id - a.id)[0];
+        sourceFileId = source?.id;
+      }
+      const deliverableId = source?.deliverableId?.startsWith("farmer-calendar") ? source.deliverableId : `farmer-calendar${sourceFileId ? `-${sourceFileId}` : ""}`;
+      const current = reviewed ?? await storage.getCurrentDeliverableFile(conversationId, deliverableId);
+      const saved = current ?? source;
+      if (saved) {
+        const filePath = getStoredUploadPath(saved);
+        if (!filePath) return res.status(404).json({ message: "Calendar file unavailable" });
+        const inspected = inspectCalendar(await fs.promises.readFile(filePath, "utf8"));
+        const draft: CalendarDraft = { ...inspected, calendarName: conversation.title ?? "Roundtable", currentFileId: current?.id ?? null, sourceFileId, version: current?.version ?? null };
+        return res.json(draft);
+      }
+      const anchor = typeof req.query.start === "string" ? parseIsoDate(req.query.start) : nextMondayFrom(new Date());
+      if (!anchor) return res.status(422).json({ message: "Invalid start date" });
+      const rows = extractScheduleRows(await storage.getConversationMessages(conversationId), await storage.getConversationFiles(conversationId));
+      if (!rows.length) return res.status(422).json({ message: "No schedulable items found. Ask the council for a dated plan first." });
+      const draft: CalendarDraft = {
+        events: rows.map((row, index) => ({ uid: `${conversationId}-${index}@farmfriend-roundtable`, summary: buildRowSummary(row), startDate: resolveRowStartDate(row, anchor), description: row.description })),
+        calendarName: conversation.title ?? "Roundtable", currentFileId: null, version: null,
+      };
+      return res.json(draft);
+    } catch {
+      return res.status(422).json({ message: "This calendar could not be opened. Check that it is a valid ICS file with event start dates." });
+    }
+  });
+
+  app.put("/api/protected/conversations/:id/calendar", async (req, res) => {
+    let filePath: string | undefined;
+    try {
+      const conversationId = Number(req.params.id);
+      const conversation = await storage.getConversation(conversationId);
+      if (!conversation || conversation.userId !== req.user!.id) return res.status(404).json({ message: "Conversation not found" });
+      const parsed = calendarRequestSchema.safeParse(req.body);
+      if (!parsed.success) return res.status(422).json({ message: "Calendar requires 1–200 events with unique IDs, titles up to 75 characters, valid dates, and descriptions up to 4,000 characters." });
+      const { events, expectedCurrentFileId, sourceFileId } = parsed.data;
+      const source = sourceFileId ? await storage.getFileById(sourceFileId) : undefined;
+      if (sourceFileId && (!source || source.conversationId !== conversationId || !source.filename.toLowerCase().endsWith(".ics"))) return res.status(404).json({ message: "Calendar not found" });
+      const deliverableId = source?.deliverableId?.startsWith("farmer-calendar") ? source.deliverableId : `farmer-calendar${sourceFileId ? `-${sourceFileId}` : ""}`;
+      const current = await storage.getCurrentDeliverableFile(conversationId, deliverableId);
+      if ((current?.id ?? null) !== expectedCurrentFileId) return res.status(409).json({ message: "A newer calendar revision exists. Close and reopen the preview before saving." });
+      const filename = "reviewed-calendar.ics";
+      const diskName = `${randomBytes(16).toString("hex")}-${filename}`;
+      filePath = path.join(process.cwd(), "uploads", diskName);
+      await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+      await fs.promises.writeFile(filePath, buildVCalendar(events, conversation.title ?? "Roundtable"), "utf8");
+      const saved = await storage.saveDeliverableVersion({ conversationId, filename, fileUrl: `/uploads/${diskName}`, fileType: "text/calendar", uploadedBy: "Farmer" }, {
+        deliverableId, generationRequestId: randomBytes(16).toString("hex"), mode: current ? "revise" : "create", expectedCurrentFileId: current?.id, constraints: { format: "ics" },
+      });
+      if (!saved.created) {
+        await fs.promises.unlink(filePath);
+        filePath = undefined;
+        return res.status(409).json({ message: "A newer calendar revision exists. Close and reopen the preview before saving." });
+      }
+      filePath = undefined;
+      return res.json({ currentFileId: saved.file.id, version: saved.file.version, downloadUrl: authorizedFileDownloadUrl(saved.file) });
+    } catch (error) {
+      if (filePath) await fs.promises.unlink(filePath).catch(() => {});
+      return res.status(error instanceof DeliverableConflictError ? 409 : 500).json({ message: error instanceof DeliverableConflictError ? "A newer calendar revision exists. Close and reopen the preview before saving." : "Calendar could not be saved." });
     }
   });
 

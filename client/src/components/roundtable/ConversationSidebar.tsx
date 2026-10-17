@@ -3,7 +3,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Message, Expert, Artifact } from "@shared/schema";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { BarChart, LineChart, Map, PieChart, Table, Code } from 'lucide-react';
+import { BarChart, LineChart, Map, PieChart, Table, Code, ChevronRight } from 'lucide-react';
 import ArtifactDisplay from "../artifacts/ArtifactDisplay";
 
 interface ConversationSidebarProps {
@@ -12,6 +12,7 @@ interface ConversationSidebarProps {
   insights: any[];
   visualizations: any[];
   onWidthChange: (width: number) => void;
+  onCollapse: () => void;
   currentWidth: number;
 }
 
@@ -28,6 +29,7 @@ export default function ConversationSidebar({
   insights,
   visualizations,
   onWidthChange,
+  onCollapse,
   currentWidth
 }: ConversationSidebarProps) {
   const [activeTab, setActiveTab] = useState('insights');
@@ -36,6 +38,7 @@ export default function ConversationSidebar({
   const [isResizing, setIsResizing] = useState(false);
   const [startX, setStartX] = useState(0);
   const [startWidth, setStartWidth] = useState(currentWidth);
+  const compactTabs = currentWidth <= 340;
 
   // Extract artifacts from messages
   useEffect(() => {
@@ -207,18 +210,29 @@ export default function ConversationSidebar({
   return (
     <div className="h-full flex flex-col relative w-full">
       <Tabs defaultValue="insights" className="w-full h-full flex flex-col">
-        <div className="border-b border-neutral-200 px-4 flex-shrink-0">
-          <TabsList className="mb-[-1px]">
-            <TabsTrigger value="insights" onClick={() => setActiveTab('insights')}>
+        <div className="border-b border-neutral-200 px-3 flex flex-shrink-0 items-center gap-2">
+          <TabsList className={`mb-[-1px] min-w-0 flex-1 ${compactTabs ? "grid w-full grid-cols-3" : ""}`}>
+            <TabsTrigger value="insights" onClick={() => setActiveTab('insights')} className={compactTabs ? "min-w-0 w-full px-1 text-[11px] whitespace-nowrap" : undefined}>
               Insights
             </TabsTrigger>
-            <TabsTrigger value="artifacts" onClick={() => setActiveTab('artifacts')}>
+            <TabsTrigger value="artifacts" onClick={() => setActiveTab('artifacts')} className={compactTabs ? "min-w-0 w-full px-1 text-[11px] whitespace-nowrap" : undefined}>
               Artifacts ({allArtifacts.length})
             </TabsTrigger>
-            <TabsTrigger value="visualizations" onClick={() => setActiveTab('visualizations')}>
+            <TabsTrigger value="visualizations" onClick={() => setActiveTab('visualizations')} className={compactTabs ? "min-w-0 w-full px-1 text-[11px] whitespace-nowrap" : undefined}>
               Visualizations
             </TabsTrigger>
           </TabsList>
+          <button
+            type="button"
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-neutral-600 hover:bg-neutral-100 hover:text-farm-blue focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-farm-blue"
+            aria-label="Collapse right sidebar"
+            aria-controls="right-sidebar-panel"
+            aria-expanded={true}
+            title="Collapse right sidebar"
+            onClick={onCollapse}
+          >
+            <ChevronRight className="h-4 w-4" />
+          </button>
         </div>
 
         <TabsContent value="insights" className="flex-1 mt-0 min-h-0">

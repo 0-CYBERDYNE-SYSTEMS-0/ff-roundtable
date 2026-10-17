@@ -8,6 +8,7 @@
  */
 
 import fs from "fs";
+import { parseIsoDate } from "./calendar-date";
 import path from "path";
 import type { Artifact, File, Message } from "./schema";
 import { addDaysIso } from "./ics";
@@ -48,8 +49,6 @@ function stripCellDecorations(cell: string): string {
 /** Hard cap on exported events. */
 export const MAX_SCHEDULE_ROWS = 60;
 
-/** Max characters of description accumulated after a .md event line. */
-const MD_DESCRIPTION_MAX_CHARS = 200;
 
 /**
  * Parse a week cell in one of the anchored forms "W1", "Week 2", "3" (and the
@@ -68,19 +67,7 @@ export function parseWeekCell(cell: string): number | undefined {
  * Strict ISO calendar-date validation. Rejects garbage, out-of-range dates
  * ("2026-02-30") and non-padded forms ("2026-3-1").
  */
-export function parseIsoDate(value: string): string | undefined {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return undefined;
-  const [y, m, d] = value.split("-").map(Number);
-  const dt = new Date(Date.UTC(y, m - 1, d));
-  if (
-    dt.getUTCFullYear() !== y ||
-    dt.getUTCMonth() !== m - 1 ||
-    dt.getUTCDate() !== d
-  ) {
-    return undefined;
-  }
-  return value;
-}
+export { parseIsoDate } from "./calendar-date";
 
 /**
  * Convention: "next Monday" is the first Monday STRICTLY AFTER today's UTC
@@ -165,11 +152,16 @@ function extractFromTable(artifact: Artifact, rows: ScheduleRow[]): void {
     // UI renders the artifact itself — this is the export path only).
     const description = row
       .filter((_, i) => i !== weekCol && i !== dateCol)
-      .map((cell) => stripMarkdownToText(cell))
+      .map((cell) => calendarNotesText(cell))
       .filter((cell) => cell.length > 0)
       .join(" — ");
     rows.push({ weekIndex, date, title, description });
   }
+}
+
+/** Calendar notes keep resource URLs while removing Markdown decoration. */
+function calendarNotesText(text: string): string {
+  return stripMarkdownToText(text.replace(/\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)/g, "$1 ($2)"));
 }
 
 // ── chart / json artifacts ───────────────────────────────────────────────────
@@ -202,7 +194,7 @@ function extractFromArrayData(data: Record<string, unknown>[], title: string, ro
     if (date === undefined && weekIndex === undefined) continue;
     const description = keys
       .filter((k) => k !== weekKey && k !== dateKey)
-      .map((k) => `${k}: ${stripMarkdownToText(String(entry[k] ?? ""))}`)
+      .map((k) => `${k}: ${calendarNotesText(String(entry[k] ?? ""))}`)
       .join("; ");
     rows.push({ weekIndex, date, title, description });
   }
@@ -217,7 +209,7 @@ function extractFromMarkdown(content: string, sourceTitle: string, rows: Schedul
   let current: ScheduleRow | null = null;
 
   const flush = () => {
-    if (current) rows.push(current);
+    if (current) rows.push({ ...current, description: current.description.trimEnd() });
     current = null;
   };
 
@@ -231,7 +223,7 @@ function extractFromMarkdown(content: string, sourceTitle: string, rows: Schedul
       // Rest of the line (after the week prefix / date) describes the event.
       // Stripped to plaintext while emphasis pairs are still intact, then the
       // leftover separator/prefix junk is trimmed.
-      const rest = stripMarkdownToText(
+      const rest = calendarNotesText(
         weekMatch ? trimmed.slice(weekMatch[0].length) : trimmed.replace(ISO_DATE_RE, ""),
       )
         .replace(/^[\s—–:*\-]+/, "")
@@ -253,13 +245,12 @@ function extractFromMarkdown(content: string, sourceTitle: string, rows: Schedul
       continue;
     }
 
+    if (current && !trimmed && current.description && !current.description.endsWith("\n")) current.description += "\n";
     if (current && trimmed) {
-      const line = stripMarkdownToText(trimmed);
+      const line = calendarNotesText(trimmed);
       if (line) {
         const sep = current.description ? "\n" : "";
-        if (current.description.length + sep.length + line.length <= MD_DESCRIPTION_MAX_CHARS) {
-          current.description += sep + line;
-        }
+        current.description += sep + line;
       }
     }
   }
@@ -308,7 +299,10 @@ export function extractScheduleRows(
         extractFromTable(artifact, rows);
       } else if (artifact.type === "chart" || artifact.type === "json") {
         try {
-          const data = extractObjectArray(JSON.parse(artifact.content));
+          const parsed = JSON.parse(artifact.content);
+          // Visualization observations are not tasks, even when they have dates.
+          if (parsed?.type === "vega-lite") continue;
+          const data = extractObjectArray(parsed);
           extractFromArrayData(data, artifact.title || "Schedule", rows);
         } catch {
           // Not valid JSON — skip silently.
