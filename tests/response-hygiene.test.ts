@@ -1,14 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { enforceCitationIntegrity, stripMetaLines, mergeDuplicateFarmerQuestions, questionsOverlap } from "../server/response-hygiene";
+import { enforceCitationIntegrity, stripMetaLines, mergeDuplicateFarmerQuestions, questionsOverlap, removeRepeatedExpertSentences } from "../server/response-hygiene";
 import { parseTrailingStanceLine } from "../server/ai";
 
 describe("citation integrity", () => {
   const src = [{ id: "S1", url: "https://crops.extension.iastate.edu/a" }, { id: "S2", url: "https://www.ers.usda.gov/b" }];
   it("keeps markers retrieved this turn and strips invented ones (live case: [S9] with 0 sources)", () => {
     const r = enforceCitationIntegrity("Drying costs [S9] vary; basis trends (S1) and S2/S4 matter [S1, S7].", src, []);
-    expect(r.content).toBe("Drying costs vary; basis trends (S1) and S2/ matter [S1].".replace("S2/ ", "S2 "));
+    expect(r.content).toBe("Drying costs vary; basis trends ([S1](https://crops.extension.iastate.edu/a)) and [S2](https://www.ers.usda.gov/b) matter [S1](https://crops.extension.iastate.edu/a).");
     expect(r.content).not.toMatch(/S9|S7|S4/);
     expect(r.removedMarkers).toBe(3);
+  });
+  it("binds a marker to its own retrieved URL, not a different allowed URL", () => {
+    const r = enforceCitationIntegrity("Basis data [S1](https://www.ers.usda.gov/b) and [S2].", src, []);
+    expect(r.content).toBe("Basis data [S1](https://crops.extension.iastate.edu/a) and [S2](https://www.ers.usda.gov/b).");
+    expect(r.removedUrls).toBe(1);
   });
   it("strips every marker when nothing was retrieved", () => {
     expect(enforceCitationIntegrity("See [S1] and S3.", [], []).content).toBe("See and.".replace("and.", "and."));
@@ -23,8 +28,9 @@ describe("citation integrity", () => {
     expect(r.content).not.toMatch(/made\.up|ghost\.example/);
     expect(r.removedUrls).toBe(2);
   });
-  it("does not touch words like 'S10 rule' unless they are source markers", () => {
-    expect(enforceCitationIntegrity("Use SS304 steel and S1.", src, []).content).toBe("Use SS304 steel and S1.");
+  it("does not touch words like 'S10 rule' while linking an actual source marker", () => {
+    expect(enforceCitationIntegrity("Use SS304 steel and S10 rule, with [S1].", src, []).content)
+      .toBe("Use SS304 steel and S10 rule, with [S1](https://crops.extension.iastate.edu/a).");
   });
 });
 
@@ -66,6 +72,19 @@ describe("overlapping farmer questions", () => {
   it("keeps a new question", () => {
     const r = mergeDuplicateFarmerQuestions("Farmer question: What moisture is the corn at harvest?", [{ role: "Commodity Marketing Advisor", content: commodity }]);
     expect(r.merged).toBe(0);
+  });
+});
+
+describe("repeated expert sentences", () => {
+  it("removes cross-turn sentences meeting the quality-check similarity threshold and keeps new cited content", () => {
+    const prior = "Apply lime this fall to allow reaction time before planting.";
+    const current = "Spread lime this fall to allow reaction time before planting.\n\nA third option is to sample the low-yielding zone separately [S1](https://example.org/research).";
+    const result = removeRepeatedExpertSentences(current, [prior]);
+
+    expect(result.removed).toBe(1);
+    expect(result.content).not.toContain("Spread lime this fall");
+    expect(result.content).toContain("A third option is to sample the low-yielding zone separately");
+    expect(result.content).toContain("[S1](https://example.org/research)");
   });
 });
 

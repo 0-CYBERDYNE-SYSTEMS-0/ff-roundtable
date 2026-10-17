@@ -12,7 +12,7 @@ import { getProvider } from "./ai-providers";
 import { findCatalogExpert } from "@shared/expert-catalog";
 import { DELIVERABLE_PLACEHOLDER, pendingDeliverableFor, pendingDeliverableByMessage } from "./pending-deliverables";
 export { commitPendingDeliverable, discardPendingDeliverable } from "./pending-deliverables";
-import { enforceCitationIntegrity, stripMetaLines, undecorate, mergeDuplicateFarmerQuestions } from "./response-hygiene";
+import { enforceCitationIntegrity, stripMetaLines, undecorate, mergeDuplicateFarmerQuestions, removeRepeatedExpertSentences } from "./response-hygiene";
 import {
   buildToolUsePrompt, buildToolPlanningPrompt, parseToolPlan, runToolCalls, formatToolResultsForPrompt,
   toolCallLimitForTier, extractDeliverable, saveExpertDeliverable, filterChartArtifacts, type ToolRun,
@@ -51,6 +51,12 @@ async function runExpertToolPhase(expert: Expert, question: string, userId?: num
   return run;
 }
 
+function stripModelSourcesSection(content: string): string {
+  const lines = content.split("\n");
+  const sourcesIndex = lines.findIndex(line => /^\s*(?:\*\*)?Sources(?:\*\*)?:.*$/i.test(line));
+  return sourcesIndex < 0 ? content : lines.slice(0, sourcesIndex).join("\n").trimEnd();
+}
+
 /** Saves an expert deliverable block and appends sources actually cited. Returns the farmer-facing text. */
 async function finalizeExpertTools(
   expert: Expert,
@@ -59,7 +65,7 @@ async function finalizeExpertTools(
   deliverable: ReturnType<typeof extractDeliverable>["deliverable"],
   history: Message[] = [],
 ): Promise<{ content: string; addition: string }> {
-  let text = content;
+  let text = stripModelSourcesSection(content);
   let addition = "";
   const citation = enforceCitationIntegrity(text, toolRun?.sources ?? [], history.map(m => m.content));
   if (citation.removedMarkers || citation.removedUrls) {
@@ -68,12 +74,16 @@ async function finalizeExpertTools(
   text = citation.content;
   let lastFarmer = -1;
   history.forEach((m, i) => { if (m.role === "user") lastFarmer = i; });
-  const recent = history.slice(lastFarmer + 1)
-    .filter(m => m.role === "assistant" && m.expertRole && m.expertRole !== expert.role)
+  const recentExperts = history.slice(lastFarmer + 1)
+    .filter(m => m.role === "assistant" && m.expertRole);
+  const recent = recentExperts
+    .filter(m => m.expertRole !== expert.role)
     .map(m => ({ role: m.expertRole as string, content: m.content }));
   const questions = mergeDuplicateFarmerQuestions(text, recent);
   if (questions.merged) console.log(`[QUESTIONS] ${expert.role}: merged ${questions.merged} duplicate farmer question(s)`);
-  text = questions.content;
+  const unique = removeRepeatedExpertSentences(questions.content, recentExperts.map(m => m.content));
+  if (unique.removed) console.log(`[REDUNDANCY] ${expert.role}: removed ${unique.removed} repeated sentence(s)`);
+  text = unique.content;
   if (deliverable) {
     // Saved only after the orchestrator accepts the turn (a discarded
     // near-duplicate turn must not leave a document behind).
@@ -82,9 +92,9 @@ async function finalizeExpertTools(
     pendingDeliverableFor.set(expert, deliverable);
   }
   if (toolRun?.sources.length) {
-    const cited = toolRun.sources.filter(s => new RegExp(`\\b${s.id}\\b`).test(text) || text.includes(s.url));
-    if (cited.length && !/\n(?:\*\*)?Sources(?:\*\*)?:/i.test(text)) {
-      const block = `\n\n**Sources:**\n${cited.map(s => `- [${s.id}] [${s.title || s.url}](${s.url})`).join("\n")}`;
+    const cited = toolRun.sources.filter(s => text.includes(`[${s.id.toUpperCase()}]`) || text.includes(s.url));
+    if (cited.length) {
+      const block = `\n\n**Verified sources:**\n${cited.map(s => `- [${s.id}] [${s.title || s.url}](${s.url})`).join("\n")}`;
       text += block; addition += block;
     }
   }
@@ -631,7 +641,7 @@ You are part of a team of experts: [${availableRoles?.join(', ') || 'various rol
     );
     const colleagues = colleagueRoles.length > 0 ? ` Colleagues (not you): [${colleagueRoles.join(", ")}].` : "";
     basePrompt += `\n🎭 STAY IN ROLE: you are the ${expert.role} only. Answer from your specialty; when a point belongs to another specialty, hand it to that colleague with @[Role] instead of answering it yourself.\n`;
-    basePrompt += `\n🔁 READ THE TABLE FIRST: before writing, read each colleague's most recent message. Unless you are the first to speak on this farmer message, open with one sentence that names a colleague and builds on or disagrees with a specific point they made (e.g. "Building on the Soil Scientist's nitrate point…" / "I disagree with Pest Management that…"). Do not restate points already made — add something new or say plainly that you have nothing to add.\n`;
+    basePrompt += `\n🔁 READ THE TABLE FIRST: before writing, read each colleague's most recent message. Unless you are the first to speak on this farmer message, open with one sentence that names a colleague and builds on or disagrees with a specific point they made (e.g. "Building on the Soil Scientist's buffer-capacity point…" / "I disagree with Pest Management that…"). In that sentence, use the colleague's full role name and carry forward at least two specific domain terms of five or more letters from their latest message; then add a distinct fact, qualification, trade-off, or handoff. Do not repeat their action step, calculation, or farmer question; if you have nothing new to add, say so plainly rather than padding.\n`;
     basePrompt += `\n💬 CROSS-TALK: Build on or challenge colleagues by name ("I agree with X because…" / "I disagree with X on…").${colleagues} Tag @[Role] only when you need that specialty or want that expert to defend a point; never tag yourself or force a tag every turn. Add new information or an objection instead of repeating settled points.\n`;
   }
 
@@ -1213,6 +1223,7 @@ export async function getExpertResponseStream(
     }
     
     requireNonEmptyAssistantContent(response);
+    console.info(`[MODEL_RESPONSE] ${JSON.stringify({ conversationId: expert.conversationId, role: expert.role, requestedModel: expert.model, actualModel: response.providerModel ?? expert.model })}`);
     // Deliverable blocks are pulled out before artifact extraction so tables
     // inside a document stay in the document.
     const deliverableSplit = expert.role === "File Creator" || expert.role === "Moderator"

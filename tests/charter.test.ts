@@ -141,6 +141,13 @@ describe("generateSystemPrompt charter injection", () => {
     expect(prompt.indexOf("📜 COUNCIL CHARTER")).toBeLessThan(prompt.indexOf("🌾 FARMER CONTEXT"));
   });
 
+  it("requires named cross-talk to reuse two concrete domain terms without repeating a recommendation", () => {
+    const prompt = generateSystemPrompt(expert, roles);
+    expect(prompt).toContain("use the colleague's full role name");
+    expect(prompt).toContain("at least two specific domain terms of five or more letters");
+    expect(prompt).toContain("Do not repeat their action step, calculation, or farmer question");
+  });
+
   it("trims the charter content in the prompt", () => {
     const prompt = generateSystemPrompt(expert, roles, undefined, undefined, `  ${CHARTER}  `);
     expect(prompt).toContain(`\n${CHARTER}\n`);

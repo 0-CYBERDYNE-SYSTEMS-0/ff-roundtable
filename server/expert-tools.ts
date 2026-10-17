@@ -34,6 +34,7 @@ Reply with at most ${limit} lines, each exactly one of:
 SEARCH: <short web search query within your specialty>
 FETCH: <https URL you already know is authoritative, e.g. a university extension page>
 or reply with the single word NONE if the farmer's facts and your expertise are enough.
+Prefer SEARCH when you need a source but are unsure the exact URL is reachable; search results are fetched before they can be cited. Use FETCH only for a stable URL you know is relevant.
 No other text.
 
 Farmer's question / latest discussion:
@@ -144,10 +145,19 @@ export async function runToolCalls(calls: ToolCall[], fetchImpl: FetchLike = fet
       if (call.tool === "search") {
         const results = await webSearch(call.query, fetchImpl);
         if (!results.length) notes.push(`Search "${call.query}" returned no results.`);
+        let verified = results.some(r => sources.some(s => s.url === r.url));
         for (const r of results) {
-          if (sources.some(s => s.url === r.url)) continue;
-          sources.push({ id: `S${sources.length + 1}`, ...r });
+          if (sources.some(s => s.url === r.url)) { verified = true; break; }
+          try {
+            const page = await fetchPage(r.url, fetchImpl);
+            sources.push({ id: `S${sources.length + 1}`, title: page.title || r.title, url: page.url, snippet: page.text });
+            verified = true;
+            break;
+          } catch (error) {
+            notes.push(`Search result ${r.url} could not be fetched: ${(error as Error).message}`);
+          }
         }
+        if (results.length && !verified) notes.push(`Search "${call.query}" returned no fetchable source; do not cite its snippets.`);
       } else {
         const page = await fetchPage(call.url, fetchImpl);
         sources.push({ id: `S${sources.length + 1}`, title: page.title, url: page.url, snippet: page.text });
@@ -161,7 +171,10 @@ export async function runToolCalls(calls: ToolCall[], fetchImpl: FetchLike = fet
 
 export function formatToolResultsForPrompt(run: ToolRun): string {
   if (!run.calls.length) return "";
-  const lines = ["🔎 RESEARCH RESULTS (fetched this turn; cite as [S1] etc. with the URL):"];
+  const lines = [
+    "🔎 RESEARCH RESULTS (fetched this turn; cite each source inline as [S1](URL)):",
+    "MANDATORY CITATION CONTRACT: If a fetched result directly supports a relevant fact, include at least one concise sentence using only that fact and cite it inline in that same sentence as [S1](URL); do not only add a source list. For a cited sentence, every numeric value must appear in the fetched text—never compute or combine figures in a cited claim. Preserve the source's scope and caveats; put any calculation in a separate sentence and label it as your calculation. If nothing supports a claim, omit or qualify it.",
+  ];
   for (const s of run.sources) lines.push(`[${s.id}] ${s.title} — ${s.url}\n${s.snippet}`);
   if (!run.sources.length) lines.push("No sources could be retrieved. Say that you could not verify current information; do not invent citations.");
   for (const n of run.notes) lines.push(`(note: ${n})`);
@@ -170,7 +183,8 @@ export function formatToolResultsForPrompt(run: ToolRun): string {
 
 export function buildToolUsePrompt(): string {
   return `🧰 YOUR TOOLS (stay inside your specialty):
-- Sources: if RESEARCH RESULTS are provided, cite them inline as [S1](URL). Never cite a URL that is not listed there or given by the farmer.
+- Sources: if RESEARCH RESULTS include relevant fetched pages, cite supported claims inline as [S1](URL) in the same sentence. Never cite a URL that is not listed there or given by the farmer, or cite a page only because it covers the same topic.
+- Citation accuracy: a citation supports only what the fetched page states. Keep each cited sentence within the source's scope; do not append inference, estimates, or unrelated conclusions. Every cited number must appear in the fetched text; never compute a total, average, or range inside a cited claim. Split separate claims into separate sentences and cite each from its own supporting source. If evidence does not support a detail, qualify, omit, or say you could not verify it.
 - Deliverables: to create or revise a document for the farmer (plan, checklist, budget, SOP), add ONE block at the end:
 \`\`\`deliverable
 title: <short descriptive title>

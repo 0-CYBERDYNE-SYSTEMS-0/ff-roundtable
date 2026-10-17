@@ -181,6 +181,64 @@ export function canConcludeWithStanceEvidence(
         currentSignature === stableSplitSignature;
 }
 
+const MINIMUM_AUTONOMOUS_TURNS_PER_EXPERT_BEFORE_CONCLUSION = 2;
+
+function countPostQuestionTurnsByExpert(
+    history: Message[],
+    activeExperts: Expert[],
+    questionMessageId: number | null,
+): Map<number, number> {
+    const turnsByExpert = new Map(activeExperts.map(expert => [expert.id, 0]));
+    for (const message of history) {
+        if (message.expertId === null || (questionMessageId !== null && message.id <= questionMessageId)) continue;
+        if (turnsByExpert.has(message.expertId)) {
+            turnsByExpert.set(message.expertId, (turnsByExpert.get(message.expertId) ?? 0) + 1);
+        }
+    }
+    return turnsByExpert;
+}
+
+/** Find the next role still owed a contribution, preserving roster order. */
+export function nextExpertNeedingMinimumTurns(
+    history: Message[],
+    activeExperts: Expert[],
+    questionMessageId: number | null,
+    currentExpertIndex: number,
+    minimumTurnsPerExpert = MINIMUM_AUTONOMOUS_TURNS_PER_EXPERT_BEFORE_CONCLUSION,
+): string | null {
+    if (!Number.isInteger(minimumTurnsPerExpert) || minimumTurnsPerExpert < 1 || activeExperts.length === 0) {
+        return null;
+    }
+
+    const turnsByExpert = countPostQuestionTurnsByExpert(history, activeExperts, questionMessageId);
+    for (let offset = 1; offset <= activeExperts.length; offset++) {
+        const index = ((currentExpertIndex + offset) % activeExperts.length + activeExperts.length) % activeExperts.length;
+        const expert = activeExperts[index];
+        if ((turnsByExpert.get(expert.id) ?? 0) < minimumTurnsPerExpert) return expert.role;
+    }
+    return null;
+}
+
+/** A natural conclusion must give each speakable role two chances to contribute. */
+export function haveAllExpertsSpokenMinimumTurns(
+    history: Message[],
+    activeExperts: Expert[],
+    questionMessageId: number | null,
+    minimumTurnsPerExpert = MINIMUM_AUTONOMOUS_TURNS_PER_EXPERT_BEFORE_CONCLUSION,
+): boolean {
+    if (!Number.isInteger(minimumTurnsPerExpert) || minimumTurnsPerExpert < 1 || activeExperts.length === 0) {
+        return false;
+    }
+
+    return nextExpertNeedingMinimumTurns(
+        history,
+        activeExperts,
+        questionMessageId,
+        -1,
+        minimumTurnsPerExpert,
+    ) === null;
+}
+
 function resetStanceEvidence(userMessage: Message, activeExperts: Expert[]) {
     return {
         stanceQuestionMessageId: Number.isInteger(userMessage.id) ? userMessage.id : null,
@@ -1578,6 +1636,28 @@ export class InteractionOrchestrator {
                 );
                 if (forcedDissenter && !state.pendingUserMessage) {
                     suggestedRole = forcedDissenter;
+                } else if (
+                    state.totalAutonomousTurnsTaken < state.maxAutonomousTurns &&
+                    !state.pendingUserMessage &&
+                    !haveAllExpertsSpokenMinimumTurns(
+                        history,
+                        state.activeExperts,
+                        state.stanceQuestionMessageId,
+                    )) {
+                    // Keep the roster balanced before honoring any repeated
+                    // Moderator pick or natural conclusion, not only Conclude.
+                    const owedRole = nextExpertNeedingMinimumTurns(
+                        history,
+                        state.activeExperts,
+                        state.stanceQuestionMessageId,
+                        state.currentExpertIndex,
+                    );
+                    if (owedRole) {
+                        if (suggestedRole !== owedRole) {
+                            debugLog(`Orchestrator: minimum-turn routing override ${suggestedRole ?? "none"} -> ${owedRole} for ${this.conversationId}`);
+                        }
+                        suggestedRole = owedRole;
+                    }
                 } else if (suggestedRole === "Conclude" && !canConcludeWithStanceEvidence(
                     state.stanceLedger,
                     state.totalAutonomousTurnsTaken,
@@ -1901,12 +1981,31 @@ export class InteractionOrchestrator {
                         ...(getConversationState(this.conversationId)?.sequenceExpertContents ?? []),
                     ];
                     if (state.mode === "autonomous" && !isFileCreatorRole(currentExpert.role) && isNearDuplicate(expertResponse.content, priorContents)) {
-                        discardedDuplicate = true;
-                        turnFairness.retired.add(currentExpert.id);
-                        console.warn(`Orchestrator: discarded near-duplicate answer from ${currentExpert.role} in conversation ${this.conversationId}; retiring it until the farmer speaks.`);
-                        broadcastFn(this.conversationId, { type: "expert_stream_done", expertId: currentExpert.id });
-                        discardPendingDeliverable(expertResponse);
-                    } else {
+                        const turnsByExpert = countPostQuestionTurnsByExpert(
+                            history,
+                            state.activeExperts,
+                            state.stanceQuestionMessageId,
+                        );
+                        const stillOwedMinimumTurn = (turnsByExpert.get(currentExpert.id) ?? 0) <
+                            MINIMUM_AUTONOMOUS_TURNS_PER_EXPERT_BEFORE_CONCLUSION;
+                        if (stillOwedMinimumTurn) {
+                            // Preserve the minimum opportunity without repeating
+                            // the duplicated claims or their deliverables.
+                            expertResponse.content = "I don't have a distinct, evidence-supported point to add beyond the recommendations already shared, so I won't repeat them.";
+                            expertResponse.artifacts = [];
+                            expertResponse.mentions = [];
+                            expertResponse.stance = null;
+                            console.warn(`Orchestrator: replaced near-duplicate answer from ${currentExpert.role} in conversation ${this.conversationId} with a non-repeating minimum-turn response.`);
+                            discardPendingDeliverable(expertResponse);
+                        } else {
+                            discardedDuplicate = true;
+                            turnFairness.retired.add(currentExpert.id);
+                            console.warn(`Orchestrator: discarded near-duplicate answer from ${currentExpert.role} in conversation ${this.conversationId}; retiring it until the farmer speaks.`);
+                            broadcastFn(this.conversationId, { type: "expert_stream_done", expertId: currentExpert.id });
+                            discardPendingDeliverable(expertResponse);
+                        }
+                    }
+                    if (!discardedDuplicate) {
                         await commitPendingDeliverable(expertResponse, { farmerMessage: state.lastUserMessage ?? null });
                         storedExpertMessage = await storage.createMessage(expertResponse);
                         expertResponseFailed = !isRealExpertHistoryMessage(storedExpertMessage);
@@ -2007,9 +2106,16 @@ export class InteractionOrchestrator {
                             postTurnState.sequenceExpertContents,
                             REDUNDANCY_STOP_SIMILARITY_THRESHOLD
                         );
-                        if (decision.stop) {
+                        const minimumTurnsSatisfied = haveAllExpertsSpokenMinimumTurns(
+                            [...history, storedExpertMessage],
+                            postTurnState.activeExperts,
+                            postTurnState.stanceQuestionMessageId,
+                        );
+                        if (decision.stop && minimumTurnsSatisfied) {
                             redundancyStopDetected = true;
                             console.log(`Orchestrator: Redundancy early-stop for ${this.conversationId} — turn from ${currentExpert.name} is ${Math.round(decision.maxSimilarity * 100)}% similar to a prior expert message in this sequence (threshold ${REDUNDANCY_STOP_SIMILARITY_THRESHOLD}). Ending the autonomous sequence early.`);
+                        } else if (decision.stop) {
+                            console.log(`Orchestrator: deferring redundancy early-stop for ${this.conversationId} until every active expert receives the minimum turns.`);
                         }
                     }
                     postTurnState.sequenceExpertContents.push(storedExpertMessage.content);

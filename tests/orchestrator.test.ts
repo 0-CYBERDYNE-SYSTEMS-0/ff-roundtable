@@ -78,6 +78,8 @@ import {
   isStanceLedgerConverged,
   getStableStanceSplitSignature,
   canConcludeWithStanceEvidence,
+  haveAllExpertsSpokenMinimumTurns,
+  nextExpertNeedingMinimumTurns,
 } from "../server/orchestrator";
 import type { Expert, Message, MessageStance } from "../shared/schema";
 
@@ -1131,11 +1133,14 @@ describe("Orchestrator", () => {
         messages.push(stored);
         return Promise.resolve(stored);
       });
-      return (conversationId: number) =>
-        messages.filter((m) => m.conversationId === conversationId && m.role === "assistant").length;
+      return Object.assign(
+        (conversationId: number) =>
+          messages.filter((m) => m.conversationId === conversationId && m.role === "assistant").length,
+        { messagesFor: (conversationId: number) => messages.filter((m) => m.conversationId === conversationId && m.role === "assistant") },
+      );
     }
 
-    it("stops direct autonomous routing early on a near-identical repeat", async () => {
+    it("preserves minimum turns with a non-repeating response when an owed expert repeats", async () => {
       const conversationId = nextConvId();
       // Experts bound to THIS conversation: the mock returns
       // expert.conversationId, so leftover chains from earlier tests (whose
@@ -1154,8 +1159,8 @@ describe("Orchestrator", () => {
       };
 
       mockGetExpertResponseStream.mockImplementation(async (expert: Expert) => {
-        // Turn four repeats Alice's first reply with only its final word
-        // changed (0.875 similarity), exercising the existing early stop.
+        // Turns after the first roster repeat Alice's first reply with only its
+        // final word changed (0.875 similarity), exercising duplicate pruning.
         const content =
           assistantTurns(conversationId) >= 3
             ? "Lime this field at two tons per acre and retest the soil in autumn"
@@ -1178,11 +1183,18 @@ describe("Orchestrator", () => {
 
       await waitFor(800);
 
-      // Three round-robin responses persist. The repeats are generated but
-      // discarded as near-duplicates (never stored), retiring each repeater,
-      // so routing stops well before the six-turn autonomous budget.
-      expect(assistantTurns(conversationId)).toBe(3);
-      expect(mockGetExpertResponseStream.mock.calls.length).toBeGreaterThanOrEqual(4);
+      // An owed expert's duplicate is replaced by a truthful, non-repeating
+      // fallback so the minimum roster count remains reachable.
+      const persisted = assistantTurns.messagesFor(conversationId);
+      const turnsByExpert = persisted.reduce<Record<string, number>>((counts, message) => {
+        const name = message.expertName ?? "unknown";
+        counts[name] = (counts[name] ?? 0) + 1;
+        return counts;
+      }, {});
+      expect(persisted.length).toBeGreaterThanOrEqual(6);
+      expect(["Alice", "Bob", "Carol"].every(name => (turnsByExpert[name] ?? 0) >= 2)).toBe(true);
+      expect(persisted.some(message => message.content.includes("I don't have a distinct, evidence-supported point"))).toBe(true);
+      expect(mockGetExpertResponseStream.mock.calls.filter(([expert]) => expert.conversationId === conversationId).length).toBeGreaterThanOrEqual(6);
 
       const state = getConversationState(conversationId);
       expect(state!.mode).toBe("idle");
@@ -2721,6 +2733,98 @@ describe("G4 mention mechanics", () => {
         expect(isStanceLedgerConverged({ Agronomist: null })).toBe(false);
       });
 
+      it("requires two post-question contributions from every speakable expert", () => {
+        const roster = [
+          createMockExpert(1, "Alice", "Agronomist"),
+          createMockExpert(2, "Bob", "Soil Scientist"),
+        ];
+        const firstRound = [
+          createMockMessage(2, "First answer from Alice", "assistant", 1),
+          createMockMessage(3, "First answer from Bob", "assistant", 2),
+        ];
+        expect(haveAllExpertsSpokenMinimumTurns(firstRound, roster, 1)).toBe(false);
+        expect(haveAllExpertsSpokenMinimumTurns([
+          createMockMessage(1, "Old answer", "assistant", 1),
+          ...firstRound,
+          createMockMessage(4, "Second answer from Alice", "assistant", 1),
+          createMockMessage(5, "Second answer from Bob", "assistant", 2),
+        ], roster, 1)).toBe(true);
+        expect(haveAllExpertsSpokenMinimumTurns([
+          ...firstRound,
+          createMockMessage(4, "Second answer from Alice", "assistant", 1),
+        ], roster, 1)).toBe(false);
+      });
+
+      it("routes a deferred conclusion to the next expert still owed a contribution", () => {
+        const roster = [
+          createMockExpert(1, "Alice", "Agronomist"),
+          createMockExpert(2, "Bob", "Soil Scientist"),
+          createMockExpert(3, "Carol", "Farm Finance Advisor"),
+        ];
+        const history = [
+          createMockMessage(2, "Alice first", "assistant", 1),
+          createMockMessage(3, "Bob first", "assistant", 2),
+          createMockMessage(4, "Carol first", "assistant", 3),
+          createMockMessage(5, "Alice second", "assistant", 1),
+        ];
+
+        expect(nextExpertNeedingMinimumTurns(history, roster, 1, 0)).toBe("Soil Scientist");
+        expect(nextExpertNeedingMinimumTurns(history, roster, 1, 1)).toBe("Farm Finance Advisor");
+        expect(nextExpertNeedingMinimumTurns([
+          ...history,
+          createMockMessage(6, "Bob second", "assistant", 2),
+          createMockMessage(7, "Carol second", "assistant", 3),
+        ], roster, 1, 1)).toBeNull();
+      });
+
+      it("defers an early Conclude until every expert has taken two turns", async () => {
+        const conversationId = nextConvId();
+        const { waitForTurns, releaseNextTurn, addUserMessageToHistory, turnNames, waitForEvent } =
+          setupGatedModeratorConversation(conversationId, true, () => stance("agree"));
+        mockGetModeratorNextSpeakerSuggestion.mockResolvedValue("Conclude");
+        mockSynthesisTurn(conversationId);
+
+        const userMessage = createMockMessage(1, "Resolve the plan with input from every expert.");
+        addUserMessageToHistory(userMessage);
+        await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn);
+
+        for (let turn = 1; turn <= 6; turn++) {
+          await waitForTurns(turn);
+          await releaseNextTurn();
+        }
+        await waitForEvent("concluding");
+
+        expect(turnNames()).toEqual(["Alice", "Bob", "Carol", "Alice", "Bob", "Carol"]);
+        expect(mockGenerateClosingSynthesis.mock.calls.filter(([cid]) => cid === conversationId)).toHaveLength(1);
+        await waitForMode(conversationId, "idle");
+      });
+
+      it("overrides repeated Moderator picks until every expert has two turns", async () => {
+        const conversationId = nextConvId();
+        const { waitForTurns, releaseNextTurn, addUserMessageToHistory, turnNames, waitForEvent } =
+          setupGatedModeratorConversation(conversationId, true, () => stance("agree"));
+        let suggestionCount = 0;
+        mockGetModeratorNextSpeakerSuggestion.mockImplementation(async () => {
+          suggestionCount += 1;
+          return suggestionCount < 6 ? "Alice" : "Conclude";
+        });
+        mockSynthesisTurn(conversationId);
+
+        const userMessage = createMockMessage(1, "Give every expert two chances to contribute.");
+        addUserMessageToHistory(userMessage);
+        await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn);
+
+        for (let turn = 1; turn <= 6; turn++) {
+          await waitForTurns(turn);
+          await releaseNextTurn();
+        }
+        await waitForEvent("concluding");
+
+        expect(turnNames()).toEqual(["Alice", "Bob", "Carol", "Alice", "Bob", "Carol"]);
+        expect(mockGenerateClosingSynthesis.mock.calls.filter(([cid]) => cid === conversationId)).toHaveLength(1);
+        await waitForMode(conversationId, "idle");
+      });
+
       it("allows a stable split only after two matching cycles and the 80% threshold, or at the hard cap", () => {
         const split = {
           Agronomist: stance("agree"),
@@ -2888,8 +2992,12 @@ describe("G4 mention mechanics", () => {
       expect(turnNames()).toEqual(["Alice"]);
       await releaseNextTurn();
 
-      // The Moderator concludes after the active experts finish; only the
-      // synthesis streams under the Moderator identity.
+      // Conclude is deferred until each speakable role has two contributions;
+      // only the synthesis streams under the Moderator identity.
+      for (let turn = 2; turn <= 6; turn++) {
+        await waitForTurns(turn);
+        await releaseNextTurn();
+      }
       await waitForEvent("concluding");
       await waitForMode(conversationId, "idle");
 
@@ -2904,7 +3012,7 @@ describe("G4 mention mechanics", () => {
       const startsBeforeConcluding = allEvents
         .slice(0, concludingIdx)
         .filter((e) => e.type === "expert_stream_start");
-      expect(startsBeforeConcluding).toHaveLength(1); // active expert only
+      expect(startsBeforeConcluding).toHaveLength(6); // two complete roster cycles
       const synthesisStart = allEvents
         .slice(concludingIdx + 1)
         .find((e) => e.type === "expert_stream_start");
@@ -2941,9 +3049,9 @@ describe("G4 mention mechanics", () => {
         model: "test/configured-moderator-model",
       });
 
-      // ...the selected active expert ran (no forced roll-call)...
-      expect(turnNames()).toEqual(["Alice"]);
-      expect(assistantCount()).toBe(2); // 1 expert turn + 1 synthesis
+      // ...all active experts receive two turns before synthesis...
+      expect(turnNames()).toEqual(["Alice", "Bob", "Carol", "Alice", "Bob", "Carol"]);
+      expect(assistantCount()).toBe(7); // 6 expert turns + 1 synthesis
 
       // ...and the sequence ended through the natural-end cleanup.
       const state = getConversationState(conversationId)!;
@@ -2974,7 +3082,7 @@ describe("G4 mention mechanics", () => {
         .mockResolvedValueOnce("Agronomist")
         .mockResolvedValue("Conclude");
       mockSynthesisTurn(conversationId);
-      new InteractionOrchestrator(conversationId).enableAutonomous(2);
+      new InteractionOrchestrator(conversationId).enableAutonomous(6);
 
       expect(roster.some((expert) => expert.role === "Moderator")).toBe(false);
 
@@ -2987,16 +3095,17 @@ describe("G4 mention mechanics", () => {
         broadcastFn,
       );
 
-      // The synthetic Moderator selects one active expert, then concludes
-      // without appearing as an ordinary expert turn.
-      await waitForTurns(1);
-      expect(turnNames()).toEqual(["Alice"]);
-      await releaseNextTurn();
+      // The synthetic Moderator selects an active expert, then its early
+      // conclusions are deferred through two complete roster cycles.
+      for (let turn = 1; turn <= 6; turn++) {
+        await waitForTurns(turn);
+        await releaseNextTurn();
+      }
       await waitForMode(conversationId, "idle");
 
-      expect(turnNames()).toEqual(["Alice"]);
+      expect(turnNames()).toEqual(["Alice", "Bob", "Carol", "Alice", "Bob", "Carol"]);
       expect(turnNames()).not.toContain("Moderator");
-      expect(mockGetModeratorNextSpeakerSuggestion).toHaveBeenCalledTimes(2);
+      expect(mockGetModeratorNextSpeakerSuggestion).toHaveBeenCalledTimes(7);
       expect(mockGetModeratorNextSpeakerSuggestion.mock.calls.flat()).toContainEqual(
         expect.objectContaining({
           id: null,
@@ -3028,7 +3137,7 @@ describe("G4 mention mechanics", () => {
       });
       expect(events().find((event) => event.type === "expert_stream_start" && event.expertRole === "Moderator"))
         .toMatchObject({ expertId: null, expertRole: "Moderator" });
-      expect(assistantCount()).toBe(2); // 1 active turn + 1 synthesis
+      expect(assistantCount()).toBe(7); // 6 active turns + 1 synthesis
 
       await drainToIdle();
       expect(getConversationState(conversationId)!.mode).toBe("idle");
@@ -3043,10 +3152,10 @@ describe("G4 mention mechanics", () => {
       mockGetModeratorNextSpeakerSuggestion
         .mockResolvedValueOnce("Agronomist")
         .mockResolvedValue("Conclude");
-      new InteractionOrchestrator(conversationId).enableAutonomous(2);
+      new InteractionOrchestrator(conversationId).enableAutonomous(6);
 
-      // Snapshot the budget at the moment the synthesis streams: one real
-      // autonomous turn (Alice) must have been billed, the synthesis none.
+      // Snapshot the budget at the moment the synthesis streams: six real
+      // autonomous turns must be billed, the synthesis none.
       let counterAtSynthesis: number | null = null;
       mockSynthesisTurn(conversationId, () => {
         counterAtSynthesis = getConversationState(conversationId)!.totalAutonomousTurnsTaken;
@@ -3061,16 +3170,19 @@ describe("G4 mention mechanics", () => {
       expect(turnNames()).toEqual(["Alice"]);
       await releaseNextTurn();
 
-      // Next decision: the Moderator concludes while the budget shows one
-      // used turn of two — the synthesis must not bill a second.
+      // The Moderator's early conclusion is deferred; the six-turn budget
+      // forces synthesis after two complete roster cycles.
+      for (let turn = 2; turn <= 6; turn++) {
+        await waitForTurns(turn);
+        await releaseNextTurn();
+      }
       await waitForMode(conversationId, "idle");
 
-      expect(counterAtSynthesis).toBe(1);
+      expect(counterAtSynthesis).toBe(6);
       expect(synthesisMessages()).toHaveLength(1);
-      // One autonomous expert turn + one synthesis. A synthesis billed
-      // against the cap would have pushed the loop to the cap first.
-      expect(turnNames()).toEqual(["Alice"]);
-      expect(assistantCount()).toBe(2);
+      // Six autonomous expert turns + one synthesis; synthesis is not billed.
+      expect(turnNames()).toEqual(["Alice", "Bob", "Carol", "Alice", "Bob", "Carol"]);
+      expect(assistantCount()).toBe(7);
       const state = getConversationState(conversationId)!;
       expect(state.mode).toBe("idle");
       expect(state.totalAutonomousTurnsTaken).toBe(0);
@@ -3079,12 +3191,12 @@ describe("G4 mention mechanics", () => {
       expect(getConversationState(conversationId)!.mode).toBe("idle");
     });
 
-    it("honors Moderator Conclude after the selected responder without a forced roll-call", async () => {
+    it("defers Moderator Conclude until each roster expert has spoken twice", async () => {
       const conversationId = nextConvId();
       const { waitForTurns, releaseNextTurn, drainToIdle, turnNames, assistantCount, addUserMessageToHistory, synthesisMessages, events } =
         setupGatedModeratorConversation(conversationId);
-      // The farmer's mention selects Alice; the Moderator may conclude after
-      // that current expert finishes instead of waiting for a roster roll-call.
+      // The farmer's mention selects Alice, but an early Conclude must not
+      // bypass the two-contribution minimum for the full roster.
       mockGetModeratorNextSpeakerSuggestion.mockResolvedValue("Conclude");
       mockSynthesisTurn(conversationId);
 
@@ -3094,16 +3206,18 @@ describe("G4 mention mechanics", () => {
       await waitForTurns(1);
       expect(turnNames()).toEqual(["Alice"]);
       await releaseNextTurn();
+      for (let turn = 2; turn <= 6; turn++) {
+        await waitForTurns(turn);
+        await releaseNextTurn();
+      }
       await waitForMode(conversationId, "idle");
 
-      // The Moderator's judgment is active in autonomous flow and no extra
-      // experts are forced to speak before synthesis.
-      expect(mockGetModeratorNextSpeakerSuggestion).toHaveBeenCalledTimes(1);
+      expect(mockGetModeratorNextSpeakerSuggestion).toHaveBeenCalledTimes(6);
       expect(mockGenerateClosingSynthesis).toHaveBeenCalledTimes(1);
       expect(events().some((e) => e.type === "concluding")).toBe(true);
       expect(synthesisMessages()).toHaveLength(1);
-      expect(turnNames()).toEqual(["Alice"]);
-      expect(assistantCount()).toBe(2);
+      expect(turnNames()).toEqual(["Alice", "Bob", "Carol", "Alice", "Bob", "Carol"]);
+      expect(assistantCount()).toBe(7);
       expect(getConversationState(conversationId)!.mode).toBe("idle");
 
       await drainToIdle();
@@ -3112,7 +3226,7 @@ describe("G4 mention mechanics", () => {
 
     it("does not start a handoff for a pause before a natural terminal decision", async () => {
       const conversationId = nextConvId();
-      const { waitForTurns, releaseNextTurn, addUserMessageToHistory } =
+      const { waitForTurns, releaseNextTurn, addUserMessageToHistory, waitForEvent } =
         setupGatedModeratorConversation(conversationId);
       mockGetModeratorNextSpeakerSuggestion.mockResolvedValue("Conclude");
       mockSynthesisTurn(conversationId);
@@ -3133,6 +3247,11 @@ describe("G4 mention mechanics", () => {
       expect(mockGenerateClosingSynthesis.mock.calls.filter(([cid]) => cid === conversationId)).toHaveLength(0);
 
       new InteractionOrchestrator(conversationId).resume();
+      for (let turn = 2; turn <= 6; turn++) {
+        await waitForTurns(turn);
+        await releaseNextTurn();
+      }
+      await waitForEvent("concluding");
       await waitForMode(conversationId, "idle");
       expect(mockGenerateClosingSynthesis.mock.calls.filter(([cid]) => cid === conversationId)).toHaveLength(1);
     });
@@ -3185,9 +3304,9 @@ describe("G4 mention mechanics", () => {
       addUserMessageToHistory(initialMessage);
       await processMessageTurnBased(userId, conversationId, initialMessage, broadcastFn);
 
-      // Route the original question through three distinct experts, then hold
-      // the Moderator's closing turn while the farmer adds another fact.
-      for (let i = 1; i <= 3; i++) {
+      // Route the original question through two complete roster cycles, then
+      // hold the Moderator's closing turn while the farmer adds another fact.
+      for (let i = 1; i <= 6; i++) {
         await waitForTurns(i);
         await releaseNextTurn();
       }
@@ -3202,12 +3321,12 @@ describe("G4 mention mechanics", () => {
       expect(synthesisMessages()).toHaveLength(0); // still held mid-stream
 
       releaseSynthesis();
-      await waitForTurns(4);
-      expect(turnNames()).toEqual(["Alice", "Bob", "Carol", "Bob"]);
+      await waitForTurns(7);
+      expect(turnNames()).toEqual(["Alice", "Bob", "Carol", "Alice", "Bob", "Carol", "Bob"]);
       expect(synthesisMessages()).toHaveLength(1); // old run's close completes before the fresh run
       expect(getConversationState(conversationId)!.totalAutonomousTurnsTaken).toBe(1);
       expect(mockGenerateClosingSynthesis.mock.calls.filter((call) => call[0] === conversationId)).toHaveLength(1);
-      const queuedAnswerCall = mockGetExpertResponseStream.mock.calls.filter(([expert]) => expert.conversationId === conversationId)[3];
+      const queuedAnswerCall = mockGetExpertResponseStream.mock.calls.filter(([expert]) => expert.conversationId === conversationId)[6];
       expect(queuedAnswerCall[2]).toBe("@[Soil Scientist] Wait — one more thing");
       expect(queuedAnswerCall[1]).toContainEqual(expect.objectContaining({ id: 2, answersQuestionId: 702 }));
 
@@ -3216,8 +3335,8 @@ describe("G4 mention mechanics", () => {
       new InteractionOrchestrator(conversationId).disableAutonomous();
       await releaseNextTurn();
       await waitForMode(conversationId, "idle");
-      expect(turnNames()).toEqual(["Alice", "Bob", "Carol", "Bob"]);
-      expect(assistantCount()).toBe(6); // 3 original turns + 2 handoffs + 1 fresh-run response
+      expect(turnNames()).toEqual(["Alice", "Bob", "Carol", "Alice", "Bob", "Carol", "Bob"]);
+      expect(assistantCount()).toBe(9); // 6 original turns + 2 handoffs + 1 fresh-run response
       expect(synthesisMessages()).toHaveLength(2);
       expect(mockGenerateClosingSynthesis.mock.calls.filter((call) => call[0] === conversationId)).toHaveLength(2);
       expect(events().filter(event => event.type === "concluding")).toHaveLength(2);
@@ -3256,6 +3375,10 @@ describe("G4 mention mechanics", () => {
       await releaseNextTurn();
 
       // The pause landed mid-synthesis...
+      for (let turn = 2; turn <= 6; turn++) {
+        await waitForTurns(turn);
+        await releaseNextTurn();
+      }
       await waitForEvent("concluding");
       await waitForMode(conversationId, "paused");
 
@@ -3281,8 +3404,8 @@ describe("G4 mention mechanics", () => {
 
       // The selected expert ran once; no extra expert turn was billed by the
       // resumed chain.
-      expect(turnNames()).toEqual(["Alice"]);
-      expect(assistantCount()).toBe(2); // 1 expert turn + 1 synthesis
+      expect(turnNames()).toEqual(["Alice", "Bob", "Carol", "Alice", "Bob", "Carol"]);
+      expect(assistantCount()).toBe(7); // 6 expert turns + 1 synthesis
 
       const state = getConversationState(conversationId)!;
       expect(state.mode).toBe("idle");
@@ -3322,9 +3445,10 @@ describe("G4 mention mechanics", () => {
       addUserMessageToHistory(userMessage);
       await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn);
 
-      await waitForTurns(1);
-      expect(turnNames()).toEqual(["Alice"]);
-      await releaseNextTurn();
+      for (let turn = 1; turn <= 6; turn++) {
+        await waitForTurns(turn);
+        await releaseNextTurn();
+      }
 
       await waitForEvent("concluding");
       await waitForMode(conversationId, "paused");
@@ -3354,8 +3478,8 @@ describe("G4 mention mechanics", () => {
       // autonomy disabled, it gets one responder and one separate handoff.
       new InteractionOrchestrator(conversationId).disableAutonomous();
       releaseSynthesis();
-      await waitForTurns(2);
-      expect(turnNames()).toEqual(["Alice", "Bob"]);
+      await waitForTurns(7);
+      expect(turnNames()).toEqual(["Alice", "Bob", "Carol", "Alice", "Bob", "Carol", "Bob"]);
       await releaseNextTurn();
       await waitForMode(conversationId, "idle");
 
@@ -3364,8 +3488,8 @@ describe("G4 mention mechanics", () => {
       expect(state.wasInterrupted).toBe(false);
       expect(state.lastUserMessage!.content).toBe("@[Soil Scientist] Wait — one more thing");
 
-      expect(turnNames()).toEqual(["Alice", "Bob"]);
-      expect(assistantCount()).toBe(4); // Alice + old handoff + response + fresh handoff
+      expect(turnNames()).toEqual(["Alice", "Bob", "Carol", "Alice", "Bob", "Carol", "Bob"]);
+      expect(assistantCount()).toBe(9); // 6 original turns + 2 handoffs + new response
       expect(synthesisMessages()).toHaveLength(2);
       expect(events().filter((e) => e.type === "concluding")).toHaveLength(2);
 

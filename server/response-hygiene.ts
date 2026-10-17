@@ -22,9 +22,9 @@ export function collectUrls(texts: string[]): Set<string> {
 }
 
 /**
- * Keep [S#] markers only for ids retrieved this turn; keep links only to
- * URLs retrieved this turn or already in the conversation. Everything else
- * is removed (marker) or unlinked (markdown link) / dropped (bare URL).
+ * Keep [S#] markers only for ids retrieved this turn and bind each marker to
+ * that source's URL. Keep other links only to URLs retrieved this turn or
+ * already in the conversation; everything else is unlinked or dropped.
  */
 export function enforceCitationIntegrity(
   text: string,
@@ -32,6 +32,7 @@ export function enforceCitationIntegrity(
   priorConversationText: string[],
 ): { content: string; removedMarkers: number; removedUrls: number } {
   const validIds = new Set(turnSources.map(s => s.id.toUpperCase()));
+  const sourceUrlById = new Map(turnSources.map(s => [s.id.toUpperCase(), s.url]));
   const allowed = collectUrls([...turnSources.map(s => s.url), ...priorConversationText]);
   let removedMarkers = 0;
   let removedUrls = 0;
@@ -50,26 +51,36 @@ export function enforceCitationIntegrity(
   });
   // Source markers: [S3], (S3), [S2, S4], bare S3 / S2/S4
   const keep = (id: string) => validIds.has(id.toUpperCase());
-  out = out.replace(/\[(\s*S\d+\s*(?:[,;/]\s*S\d+\s*)*)\]/gi, (_m, inner: string) => {
+  const renderMarker = (id: string) => {
+    const normalized = id.toUpperCase();
+    const url = sourceUrlById.get(normalized);
+    return url ? `[${normalized}](${url})` : `[${normalized}]`;
+  };
+  out = out.replace(/\[(\s*S\d+\s*(?:[,;/]\s*S\d+\s*)*)\](?:\((https?:\/\/[^)\s]+)\))?/gi, (_m, inner: string, existingUrl?: string) => {
     const ids = inner.split(/[,;/]/).map(s => s.trim()).filter(Boolean);
     const kept = ids.filter(keep);
     removedMarkers += ids.length - kept.length;
-    return kept.length ? `[${kept.join(", ")}]` : "";
+    if (existingUrl && kept.length === 1) {
+      const canonicalUrl = sourceUrlById.get(kept[0].toUpperCase());
+      if (canonicalUrl && normalizeUrl(existingUrl) !== normalizeUrl(canonicalUrl)) removedUrls++;
+    }
+    return kept.map(renderMarker).join(", ");
   });
   out = out.replace(/\(\s*(S\d+(?:\s*[,;/]\s*S\d+)*)\s*\)/gi, (_m, inner: string) => {
     const ids = inner.split(/[,;/]/).map(s => s.trim());
     const kept = ids.filter(keep);
     removedMarkers += ids.length - kept.length;
-    return kept.length ? `(${kept.join(", ")})` : "";
+    return kept.length ? `(${kept.map(renderMarker).join(", ")})` : "";
   });
   out = out.replace(/(?<![\w\[(,;/])S\d+(?:\/S\d+)+(?![\w\]])/g, (group) => {
     const ids = group.split("/");
     const kept = ids.filter(keep);
     removedMarkers += ids.length - kept.length;
-    return kept.join("/");
+    return kept.map(renderMarker).join("/");
   });
-  out = out.replace(/(?<![\w\[(,;/])S(\d+)(?![\w\]/])/g, (m) => {
-    if (keep(m)) return m;
+  out = out.replace(/(?<![\w\[(,;/])S(\d+)(?![\w\]/])/g, (m, _digits: string, offset: number, source: string) => {
+    if (keep(m)) return renderMarker(m);
+    if (/\s+[a-z]{2,}\b/i.test(source.slice(offset + m.length))) return m;
     removedMarkers++;
     return "";
   });
@@ -156,4 +167,66 @@ export function mergeDuplicateFarmerQuestions(
     if (/^\s*(?:[-*+]\s*)?(?:\*\*)?assuming\b/i.test(lines[i + 1] ?? "")) i++;
   }
   return { content: out.join("\n"), merged };
+}
+
+function measuredWords(text: string): string[] {
+  return text.toLowerCase().match(/[a-z][a-z-]+/g) ?? [];
+}
+
+function measuredTrigrams(text: string): Set<string> {
+  const tokens = measuredWords(text);
+  const grams = new Set<string>();
+  for (let i = 0; i <= tokens.length - 3; i++) grams.add(tokens.slice(i, i + 3).join(" "));
+  return grams;
+}
+
+function measuredSentenceSimilarity(a: string, b: string): number {
+  const left = measuredTrigrams(a);
+  const right = measuredTrigrams(b);
+  if (!left.size || !right.size) return 0;
+  let intersection = 0;
+  left.forEach(gram => { if (right.has(gram)) intersection++; });
+  return intersection / (left.size + right.size - intersection);
+}
+
+function stripCitationSyntax(text: string): string {
+  return text
+    .replace(/\[S\d+\](?:\s*\[[^\]]+\])?\s*\([^)]*\)/gi, "")
+    .replace(/\[S\d+\]|https?:\/\/\S+|```[\s\S]*?```/gi, "");
+}
+
+function measuredSentenceParts(text: string): string[] {
+  return text.split(/(\n+|(?<=[.!?])\s+)/);
+}
+
+/** Remove sentences already covered by a colleague since the farmer last spoke. */
+export function removeRepeatedExpertSentences(
+  text: string,
+  priorExpertTexts: string[],
+): { content: string; removed: number } {
+  const priorSentences = priorExpertTexts.flatMap(prior => {
+    const parts = measuredSentenceParts(prior);
+    return parts.filter((_part, index) => index % 2 === 0)
+      .map(stripCitationSyntax)
+      .filter(sentence => measuredWords(sentence).length >= 6);
+  });
+  if (!priorSentences.length) return { content: text, removed: 0 };
+
+  const parts = measuredSentenceParts(text);
+  let content = "";
+  let removed = 0;
+  for (let i = 0; i < parts.length; i += 2) {
+    const sentence = parts[i] ?? "";
+    const similarityText = stripCitationSyntax(sentence);
+    const duplicate = measuredWords(similarityText).length >= 6 &&
+      priorSentences.some(prior => measuredSentenceSimilarity(similarityText, prior) >= 0.6);
+    if (duplicate) removed++;
+    else content += sentence;
+    content += parts[i + 1] ?? "";
+  }
+
+  return {
+    content: content.replace(/[ \t]{2,}/g, " ").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim(),
+    removed,
+  };
 }
