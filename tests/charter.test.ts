@@ -619,6 +619,24 @@ describe("getModeratorNextSpeakerSuggestion charter awareness", () => {
     },
   );
 
+  it("falls back cleanly when the Moderator response content is null", async () => {
+    const convo = await storage.createConversation({ userId: 1, title: "Empty Moderator response" });
+    mockProviderChat.mockResolvedValueOnce({ message: { role: "assistant", content: null } });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    try {
+      const suggestion = await getModeratorNextSpeakerSuggestion(
+        createMockModerator(null, convo.id),
+        [],
+        ["Soil Scientist", "Crop Specialist"],
+      );
+      expect(suggestion).toBeNull();
+      expect(errorSpy).not.toHaveBeenCalled();
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
   it("stays charter-free when the conversation has no charter", async () => {
     const convo = await storage.createConversation({ userId: 1, title: "Unchartered" });
     expect(convo.charter ?? null).toBeNull();

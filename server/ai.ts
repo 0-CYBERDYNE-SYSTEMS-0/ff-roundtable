@@ -1622,7 +1622,12 @@ export async function getModeratorNextSpeakerSuggestion(
         }
 
         const response = await callOpenRouterAPI(messages, auxModel, conversation?.userId);
-        const rawSuggestion = response.message.content.trim().replace(/\.$/, '').trim();
+        const responseContent = response?.message?.content;
+        if (typeof responseContent !== "string" || !responseContent.trim()) {
+            console.warn("Moderator returned no next-speaker text. Falling back to round-robin.");
+            return null;
+        }
+        const rawSuggestion = responseContent.trim().replace(/\.$/, '').trim();
         let suggestedRole: string | null = null;
 
         if (rawSuggestion.toLowerCase() === 'continue') {
