@@ -1,5 +1,5 @@
 import { storage } from "./storage";
-import { getExpertResponse, getExpertResponseStream, generateInsights, getModeratorNextSpeakerSuggestion, generateClosingSynthesis, resolveAuxModel } from "./ai";
+import { getExpertResponse, getExpertResponseStream, generateInsights, getModeratorNextSpeakerSuggestion, generateClosingSynthesis, resolveAuxModel, isRetryableExpertProviderFailure } from "./ai";
 import type { DeliverableGenerationRequest, ModeratorContext } from "./ai";
 import { isNearDuplicate, shouldStopForRedundancy, REDUNDANCY_STOP_SIMILARITY_THRESHOLD } from "./text-similarity";
 import { enforceTurnFairness } from "./turn-fairness";
@@ -81,8 +81,8 @@ interface ConversationState {
     // a new sequence starts, carried across the sequential→autonomous
     // transition.
     sequenceExpertContents: string[];
-    // Experts that failed or returned no usable answer in this in-memory run.
-    // They are skipped for the rest of this run and reset at a fresh run.
+    // Non-recoverable failures only; recoverable provider failures remain eligible
+    // for another normal turn within the existing budget.
     failedExpertIds: number[];
     // Legacy G4 snapshot field. New G11 sequences route mentions through the
     // pending FIFO and leave this list empty; Moderator is never in it.
@@ -1161,6 +1161,7 @@ export class InteractionOrchestrator {
 
     private async recordExpertFailure(
         expert: Expert,
+        allowFutureBudgetedTurn = false,
     ): Promise<Message | undefined> {
         let errorMessage: Message | undefined;
         try {
@@ -1178,10 +1179,13 @@ export class InteractionOrchestrator {
 
         const currentState = getConversationState(this.conversationId);
         if (!currentState) return errorMessage;
-        updateConversationState(this.conversationId, {
-            failedExpertIds: currentState.failedExpertIds.includes(expert.id)
+        const failedExpertIds = allowFutureBudgetedTurn
+            ? currentState.failedExpertIds.filter(id => id !== expert.id)
+            : currentState.failedExpertIds.includes(expert.id)
                 ? currentState.failedExpertIds
-                : [...currentState.failedExpertIds, expert.id],
+                : [...currentState.failedExpertIds, expert.id];
+        updateConversationState(this.conversationId, {
+            failedExpertIds,
         });
         const latestState = getConversationState(this.conversationId);
         latestState?.broadcastFn(this.conversationId, {
@@ -1956,7 +1960,7 @@ export class InteractionOrchestrator {
                     };
                 } else {
                     providerCallStarted = true;
-                    expertResponse = await getExpertResponseStream(
+                    const streamExpertResponse = (retryInstruction?: string) => getExpertResponseStream(
                         currentExpert, history, referenceMessageContent, files, availableRoles,
                         (token) => {
                             // Stream each token to the client
@@ -1967,7 +1971,31 @@ export class InteractionOrchestrator {
                             });
                         },
                         deliverableRequest,
+                        retryInstruction,
                     );
+                    expertResponse = await streamExpertResponse();
+                    if ((state.mode === "autonomous" || state.mode === "processing_sequential") &&
+                        !state.singleTurnOnly &&
+                        typeof isRetryableExpertProviderFailure === "function" &&
+                        isRetryableExpertProviderFailure(expertResponse)) {
+                        const retryState = getConversationState(this.conversationId);
+                        if (retryState &&
+                            (retryState.mode === "autonomous" || retryState.mode === "processing_sequential") &&
+                            !retryState.singleTurnOnly && !retryState.wasInterrupted) {
+                            console.warn(`Orchestrator: retrying one provider error for ${currentExpert.role} in conversation ${this.conversationId}.`);
+                            // A fresh start clears any partial/error tokens from the first attempt in the client.
+                            retryState.broadcastFn(this.conversationId, {
+                                type: "expert_stream_start",
+                                conversationId: this.conversationId,
+                                expertId: currentExpert.id,
+                                expertName: currentExpert.name,
+                                expertRole: currentExpert.role,
+                            });
+                            expertResponse = await streamExpertResponse(
+                                "The previous provider attempt did not complete. Answer concisely (no more than 180 words), preserve the key action, caveats, and any supported inline citations, and do not repeat the full discussion.",
+                            );
+                        }
+                    }
                     providerCallResolved = true;
                 }
                 
@@ -2015,7 +2043,18 @@ export class InteractionOrchestrator {
                     expertResponseFailed = true;
                 }
                 if (expertResponseFailed && !discardedDuplicate) {
-                    storedExpertMessage = await this.recordExpertFailure(currentExpert);
+                    const failureState = getConversationState(this.conversationId);
+                    const allowFutureBudgetedTurn = Boolean(
+                        failureState &&
+                        !failureState.singleTurnOnly &&
+                        (failureState.mode === "autonomous" || failureState.mode === "processing_sequential") &&
+                        typeof isRetryableExpertProviderFailure === "function" &&
+                        isRetryableExpertProviderFailure(expertResponse)
+                    );
+                    if (allowFutureBudgetedTurn) {
+                        console.warn(`Orchestrator: keeping ${currentExpert.role} eligible for another budgeted turn after a recoverable provider failure in conversation ${this.conversationId}.`);
+                    }
+                    storedExpertMessage = await this.recordExpertFailure(currentExpert, allowFutureBudgetedTurn);
                 }
                 if (storedExpertMessage?.role === "assistant" && !expertResponseFailed) {
                     const questionCandidates = [

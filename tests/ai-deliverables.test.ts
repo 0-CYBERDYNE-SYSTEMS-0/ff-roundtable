@@ -5,12 +5,14 @@ import path from "node:path";
 
 const {
   mockProviderChat,
+  mockProviderChatStream,
   mockSaveDeliverableVersion,
   mockGetCurrentDeliverableFile,
   mockGetConversation,
   mockGetConversationInsights,
 } = vi.hoisted(() => ({
   mockProviderChat: vi.fn(),
+  mockProviderChatStream: vi.fn(),
   mockSaveDeliverableVersion: vi.fn(),
   mockGetCurrentDeliverableFile: vi.fn(),
   mockGetConversation: vi.fn(),
@@ -18,7 +20,7 @@ const {
 }));
 
 vi.mock("../server/ai-providers", () => ({
-  getProvider: vi.fn(() => ({ chat: mockProviderChat, chatStream: vi.fn() })),
+  getProvider: vi.fn(() => ({ chat: mockProviderChat, chatStream: mockProviderChatStream })),
 }));
 
 vi.mock("../server/storage", () => ({
@@ -30,7 +32,7 @@ vi.mock("../server/storage", () => ({
   },
 }));
 
-import { getExpertResponse, getExpertResponseStream } from "../server/ai";
+import { getExpertResponse, getExpertResponseStream, isRetryableExpertProviderFailure } from "../server/ai";
 import type { DeliverableGenerationRequest } from "../server/ai";
 import type { Expert, File } from "@shared/schema";
 
@@ -96,6 +98,7 @@ describe("AI deliverable generation", () => {
     tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "farmfriend-ai-deliverables-"));
     cwdSpy = vi.spyOn(process, "cwd").mockReturnValue(tempRoot);
     mockProviderChat.mockReset();
+    mockProviderChatStream.mockReset();
     mockGetConversation.mockReset().mockResolvedValue(null);
     mockGetConversationInsights.mockReset().mockResolvedValue([]);
     mockGetCurrentDeliverableFile.mockReset();
@@ -189,6 +192,7 @@ describe("AI deliverable generation", () => {
 
   it.each(["streaming", "non-streaming"] as const)("redacts provider errors on the retry message (%s)", async (pathType) => {
     mockProviderChat.mockRejectedValue(new Error("private provider payload"));
+    mockProviderChatStream.mockRejectedValue(new Error("private provider payload"));
 
     const result = pathType === "streaming"
       ? await getExpertResponseStream(
@@ -198,6 +202,22 @@ describe("AI deliverable generation", () => {
 
     expect(result.content).toMatch(/^⚠️ No complete response was received\./);
     expect(result.content).not.toContain("private provider payload");
+    expect(isRetryableExpertProviderFailure(result)).toBe(true);
+  });
+
+  it.each([
+    ["rate limit", Object.assign(new Error("Too Many Requests"), { status: 429 })],
+    ["timeout", Object.assign(new Error("request timed out"), { name: "APIConnectionTimeoutError" })],
+  ])("does not mark %s provider failures retryable", async (_label, providerError) => {
+    mockProviderChat.mockRejectedValue(providerError);
+    mockProviderChatStream.mockRejectedValue(providerError);
+
+    const result = await getExpertResponseStream(
+      makeExpert(), [], "Create the SOP", [], ["File Creator"], () => undefined, makeRequest(),
+    );
+
+    expect(result.content).toMatch(/^⚠️ No complete response was received\./);
+    expect(isRetryableExpertProviderFailure(result)).toBe(false);
   });
 
   it("rejects a filename or MIME type that does not match the requested format", async () => {

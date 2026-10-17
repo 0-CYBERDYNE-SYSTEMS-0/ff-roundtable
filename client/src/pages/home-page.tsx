@@ -628,39 +628,6 @@ export default function HomePage() {
       // Persistence is best-effort; the nudge stays hidden for this session.
     }
   };
-  const exportIcs = async (start: string) => {
-    if (!activeConversation) {
-      toast({
-        title: "No active conversation",
-        description: "Start a conversation first",
-        variant: "destructive",
-      });
-      return;
-    }
-
-    try {
-      const response = await fetch(`/api/protected/conversations/${activeConversation}/export.ics?start=${encodeURIComponent(start)}`, {
-        credentials: "include",
-      });
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error || error.message || "Could not export the calendar.");
-      }
-      const url = URL.createObjectURL(await response.blob());
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = response.headers.get("Content-Disposition")?.match(/filename="([^"]+)"/)?.[1] || "roundtable.ics";
-      link.click();
-      URL.revokeObjectURL(url);
-    } catch (error) {
-      toast({
-        title: "Calendar export unavailable",
-        description: error instanceof Error ? error.message : "Could not export the calendar.",
-        variant: "destructive",
-      });
-    }
-  };
-  
   // Create the conversation before opening the selector so experts are added
   // to the new conversation rather than the previously active one.
   const handleStartNewSession = async () => {
@@ -1092,7 +1059,6 @@ export default function HomePage() {
               files={files || []}
               onStartNewSession={handleStartNewSession}
               onExportMarkdown={exportMarkdown}
-              onExportIcs={exportIcs}
               canExportIcs={hasSchedulableSource}
               onFileUpload={handleFileUpload}
               onSelectConversation={handleSelectConversation}

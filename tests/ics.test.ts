@@ -57,6 +57,7 @@ vi.mock("../server/ai", () => ({
   callPerplexityAPI: vi.fn(),
   getExpertResponse: vi.fn(),
   generateInsights: vi.fn(),
+  isRetryableExpertProviderFailure: () => false,
   resolveAuxModel: (moderatorModel: string | null | undefined, firstExpertModel: string | null | undefined) =>
     moderatorModel?.trim() || process.env.DEFAULT_AUX_MODEL?.trim() || firstExpertModel?.trim() || null,
 }));
@@ -674,11 +675,12 @@ describe("extractScheduleRows — Expert-generated .md files", () => {
     expect(rows).toEqual([]);
   });
 
-  it("caps md descriptions at 200 chars", () => {
+  it("preserves complete Markdown task notes beyond the old 200-character cutoff", () => {
     const longMd = "Week 1\n" + ("Filler line with plenty of words. ".repeat(10) + "\n").repeat(5);
     const rows = extractScheduleRows([], [makeFile()], () => longMd);
     expect(rows).toHaveLength(1);
-    expect(rows[0].description.length).toBeLessThanOrEqual(200);
+    expect(rows[0].description.length).toBeGreaterThan(200);
+    expect(rows[0].description).toBe(longMd.slice("Week 1\n".length).split("\n").map(line => line.trim()).join("\n").trimEnd());
   });
 
   it("caps the row list at 60 entries", () => {
@@ -733,7 +735,7 @@ describe("extractScheduleRows — DESCRIPTION plaintext (F3)", () => {
     };
     const rows = extractScheduleRows([makeMessage([artifact])], []);
     expect(rows).toHaveLength(1);
-    expect(rows[0].description).toBe("Soil test — see guide — 10 kg");
+    expect(rows[0].description).toBe("Soil test — see guide (https://x.y) — 10 kg");
     expect(rows[0].description).not.toContain("**");
     expect(rows[0].description).not.toContain("](");
   });
@@ -748,7 +750,7 @@ describe("extractScheduleRows — DESCRIPTION plaintext (F3)", () => {
     };
     const rows = extractScheduleRows([makeMessage([artifact])], []);
     expect(rows).toHaveLength(1);
-    expect(rows[0].description).toBe("task: Side-dress with compost tea; note: shake well");
+    expect(rows[0].description).toBe("task: Side-dress with compost tea (https://x.y); note: shake well");
   });
 
   it("strips markdown from .md event lines and body lines", () => {
@@ -761,7 +763,7 @@ describe("extractScheduleRows — DESCRIPTION plaintext (F3)", () => {
     ].join("\n");
     const rows = extractScheduleRows([], [makeFile()], () => md);
     expect(rows).toHaveLength(2);
-    expect(rows[0].description).toBe("Soil test guide\nApply 10 kg N per acre.\nApplication window");
+    expect(rows[0].description).toBe("Soil test guide (https://x.y)\nApply 10 kg N per acre.\nApplication window");
     expect(rows[1].description).toBe("- Side-dress heavily lightly");
     for (const row of rows) {
       expect(row.description).not.toContain("**");
@@ -1051,4 +1053,108 @@ describe("GET /api/protected/conversations/:id/export.ics", () => {
     const res = await agent.get(`/api/protected/conversations/${convo.id}/export.ics`);
     expect(res.status).toBe(422);
   });
+
+  it("reviews, edits, versions and exports the exact saved calendar", async () => {
+    const agent = request.agent(app);
+    await registerAndLogin(agent, "calendarReview");
+    const convo = await createConversation(agent, "Review workflow");
+    await storage.createMessage({ conversationId: convo.id, content: "", role: "expert", artifacts: [tableArtifact()] } as any);
+    const url = `/api/protected/conversations/${convo.id}/calendar`;
+    const preview = await agent.get(url).query({ start: "2026-04-06" });
+    expect(preview.status).toBe(200);
+    expect(preview.body.events).toHaveLength(3);
+    const events = [
+      { ...preview.body.events[0], summary: "Revised soil test", startDate: "2026-04-09", description: "OBJECTIVE\nReview the supplied sources.\n\nSTEPS\n1. Read the reference.\n2. Record what it supports and what remains unknown.\n\nSOURCES\nSulfur reference\nhttps://npic.orst.edu/factsheets/sulfurgen.html\n\nAI HANDOFF\nTask: Prepare a source-backed summary.\nContext: Desk research only.\nInputs needed: The URL above.\nExpected output: Findings with citations.\nCompletion checks: Explicitly list evidence gaps.\nLimits / human approval: Draft only; do not publish or contact others." },
+      { uid: "new-event@farm", summary: "Review results", startDate: "2026-04-15", description: "Bring the report." },
+    ];
+    const saved = await agent.put(url).send({ events, expectedCurrentFileId: null });
+    expect(saved.status).toBe(200);
+    expect(saved.body.version).toBe(1);
+    const current = await agent.get(url);
+    expect(current.body.events).toEqual(events);
+    expect(current.body.currentFileId).toBe(saved.body.currentFileId);
+    const exported = await agent.get(saved.body.downloadUrl);
+    const { inspectCalendar } = await import("../server/calendar-files");
+    expect(inspectCalendar(exported.text).events).toEqual(events);
+    // Conversation changes cannot silently replace the reviewed events.
+    await storage.createMessage({ conversationId: convo.id, content: "", role: "expert", artifacts: [tableArtifact("New plan")] } as any);
+    expect((await agent.get(url)).body.events).toEqual(events);
+    const stale = await agent.put(url).send({ events, expectedCurrentFileId: null });
+    expect(stale.status).toBe(409);
+    const revised = await agent.put(url).send({ events: [{ ...events[0], summary: "Final soil test" }], expectedCurrentFileId: saved.body.currentFileId });
+    expect(revised.status).toBe(200);
+    expect(revised.body.version).toBe(2);
+    expect((await storage.getFileById(saved.body.currentFileId))?.supersededAt).toBeTruthy();
+    // The Files preview opens the same version chain.
+    const fromFile = await agent.get(url).query({ fileId: saved.body.currentFileId });
+    expect(fromFile.body.currentFileId).toBe(revised.body.currentFileId);
+    for (const id of [saved.body.currentFileId, revised.body.currentFileId]) {
+      const file = await storage.getFileById(id);
+      const fs = await import("fs/promises");
+      await fs.unlink(process.cwd() + file!.fileUrl);
+    }
+  });
+
+  it("protects calendar reads/writes and validates dates and event IDs", async () => {
+    const owner = request.agent(app);
+    await registerAndLogin(owner, "calendarOwner");
+    const convo = await createConversation(owner);
+    const url = `/api/protected/conversations/${convo.id}/calendar`;
+    const event = { uid: "one@farm", summary: "Test", startDate: "2026-04-01", description: "" };
+    const other = request.agent(app);
+    await registerAndLogin(other, "calendarOther");
+    expect((await request(app).get(url)).status).toBe(401);
+    expect((await request(app).put(url).send({ events: [event], expectedCurrentFileId: null })).status).toBe(401);
+    expect((await other.get(url)).status).toBe(404);
+    expect((await other.put(url).send({ events: [event], expectedCurrentFileId: null })).status).toBe(404);
+    for (const events of [[], [event, event], [{ ...event, startDate: "2026-02-30" }], [{ ...event, uid: "x\r\nBEGIN:VEVENT" }]]) {
+      expect((await owner.put(url).send({ events, expectedCurrentFileId: null })).status).toBe(422);
+    }
+    expect((await owner.get(url).query({ fileId: 999999 })).status).toBe(404);
+    expect((await owner.put(url).send({ events: [event], expectedCurrentFileId: null, sourceFileId: 999999 })).status).toBe(404);
+  });
+
+  it("opens generated ICS deliverables from the main preview and preserves their revision identity", async () => {
+    const agent = request.agent(app);
+    await registerAndLogin(agent, "calendarGenerated");
+    const convo = await createConversation(agent, "Generated ICS");
+    const events = [{ uid: "review@farm", summary: "Review sources", startDate: "2026-10-19", description: "Review the literature." }];
+    const created = await agent.post(`/api/protected/conversations/${convo.id}/generate-file`).send({ fileName: "research-review.ics", fileType: "text/calendar", content: buildVCalendar(events, "Research") });
+    expect(created.status).toBe(201);
+    const url = `/api/protected/conversations/${convo.id}/calendar`;
+    const preview = await agent.get(url);
+    expect(preview.status).toBe(200);
+    expect(preview.body.events).toEqual(events);
+    expect(preview.body.sourceFileId).toBe(created.body.id);
+    const saved = await agent.put(url).send({ events: [{ ...events[0], summary: "Edited review" }], sourceFileId: preview.body.sourceFileId, expectedCurrentFileId: preview.body.currentFileId });
+    expect(saved.status).toBe(200);
+    const reopened = await agent.get(url);
+    expect(reopened.body.events[0].summary).toBe("Edited review");
+    expect(reopened.body.currentFileId).toBe(saved.body.currentFileId);
+    const revised = await agent.put(url).send({ events, sourceFileId: reopened.body.sourceFileId, expectedCurrentFileId: reopened.body.currentFileId });
+    expect(revised.status).toBe(200);
+    expect(revised.body.version).toBe(2);
+    for (const id of [created.body.id, saved.body.currentFileId, revised.body.currentFileId]) {
+      const file = await storage.getFileById(id);
+      const fs = await import("fs/promises");
+      await fs.unlink(process.cwd() + file!.fileUrl);
+    }
+  });
+
+  it("opens a reviewed calendar even without any conversation schedule artifacts", async () => {
+    const agent = request.agent(app);
+    await registerAndLogin(agent, "calendarDirect");
+    const convo = await createConversation(agent);
+    const url = `/api/protected/conversations/${convo.id}/calendar`;
+    const events = [{ uid: "direct@farm", summary: "Review evidence", startDate: "2026-10-19", description: "Desk research only." }];
+    const saved = await agent.put(url).send({ events, expectedCurrentFileId: null });
+    expect(saved.status).toBe(200);
+    const preview = await agent.get(url);
+    expect(preview.status).toBe(200);
+    expect(preview.body.events).toEqual(events);
+    const file = await storage.getFileById(saved.body.currentFileId);
+    const fs = await import("fs/promises");
+    await fs.unlink(process.cwd() + file!.fileUrl);
+  });
+
 });

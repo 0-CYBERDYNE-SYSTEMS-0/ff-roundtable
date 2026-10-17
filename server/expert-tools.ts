@@ -13,6 +13,8 @@ import path from "path";
 import { randomBytes, randomUUID } from "crypto";
 import { lookup } from "dns/promises";
 import net from "net";
+import { compile, type TopLevelSpec } from "vega-lite";
+import { parseVegaChart, themedVegaSpec } from "@shared/chart-artifact";
 
 export const MAX_TOOL_CALLS_PER_TURN = 3;
 export const TOOL_TIMEOUT_MS = 10_000;
@@ -35,6 +37,7 @@ SEARCH: <short web search query within your specialty>
 FETCH: <https URL you already know is authoritative, e.g. a university extension page>
 or reply with the single word NONE if the farmer's facts and your expertise are enough.
 Prefer SEARCH when you need a source but are unsure the exact URL is reachable; search results are fetched before they can be cited. Use FETCH only for a stable URL you know is relevant.
+For decisions involving marketing or hedging, loan or insurance obligations, veterinary or health risks, safety, or regulation, do not reply NONE merely because you know the general advice: SEARCH for at least one relevant authoritative public-agency or university source. For soil-fertility, liming, fertilizer/nutrient-application, conservation-practice, or crop-production recommendations—especially numeric rates, thresholds, or yield claims—also SEARCH for at least one relevant authoritative public-agency or university source. Never search for or contradict a price or condition supplied by the farmer; use it as given. Use farmer-provided soil tests, acres, yields, prices, and field conditions exactly as supplied; never invent missing measurements or a source. If no source can be fetched, say that you could not verify the source-dependent claim and do not invent a citation.
 No other text.
 
 Farmer's question / latest discussion:
@@ -324,6 +327,12 @@ const GENERIC_TITLES = /^(chart( artifact)?|visual aid|data|trend|untitled|seaso
 export function validateChartArtifact(chartJson: string, allowedUrls: string[]): { json: string; title: string } | null {
   let chart: any;
   try { chart = JSON.parse(chartJson); } catch { return null; }
+  if (chart?.type === "vega-lite") {
+    const parsed = parseVegaChart(chart);
+    if (!parsed) return null;
+    try { compile(themedVegaSpec(parsed) as unknown as TopLevelSpec); } catch { return null; }
+    chart = parsed;
+  }
   const title = typeof chart?.title === "string" ? chart.title.trim() : "";
   if (!title || GENERIC_TITLES.test(title)) return null;
   const sources: unknown[] = Array.isArray(chart?.sources) ? chart.sources : typeof chart?.source === "string" ? [chart.source] : [];

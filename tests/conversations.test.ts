@@ -71,6 +71,7 @@ vi.mock("../server/ai", () => ({
   callPerplexityAPI: vi.fn(),
   getExpertResponse: vi.fn(),
   getExpertResponseStream: mockGetExpertResponseStream,
+  isRetryableExpertProviderFailure: () => false,
   getModeratorNextSpeakerSuggestion: mockGetModeratorNextSpeakerSuggestion,
   generateClosingSynthesis: mockGenerateClosingSynthesis,
   generateInsights: mockGenerateInsights,

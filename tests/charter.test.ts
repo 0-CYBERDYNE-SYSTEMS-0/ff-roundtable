@@ -143,11 +143,14 @@ describe("generateSystemPrompt charter injection", () => {
 
   it("requires named cross-talk to reuse two concrete domain terms without repeating a recommendation", () => {
     const prompt = generateSystemPrompt(expert, roles);
-    expect(prompt).toContain("use the colleague's full role name");
-    expect(prompt).toContain("at least two specific domain terms of five or more letters");
+    expect(prompt).toContain("make your first sentence follow this format");
+    expect(prompt).toContain("the colleague's full role name, copying every word exactly from the Colleagues list");
+    expect(prompt).toContain("two distinct domain terms of five or more letters");
+    expect(prompt).toContain("do not shorten or paraphrase it");
     expect(prompt).toContain("verbatim from that colleague's latest substantive message");
     expect(prompt).toContain("verify the exact full role name and both terms appear literally");
     expect(prompt).toContain("do not fabricate cross-talk");
+    expect(prompt).toContain("no more than 180 words");
     expect(prompt).toContain("Do not repeat their action step, calculation, or farmer question");
   });
 

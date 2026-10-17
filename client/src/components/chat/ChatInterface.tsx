@@ -15,6 +15,7 @@ import ModelBadge from "../roundtable/ModelBadge";
 import ConversationSidebar from "../roundtable/ConversationSidebar";
 import ArtifactDisplay from "../artifacts/ArtifactDisplay";
 import ExpertSettingsModal from "../expert/ExpertSettingsModal";
+import UserMessageContent from "./UserMessageContent";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { useQueryClient } from "@tanstack/react-query";
 import { useToast } from "@/hooks/use-toast";
@@ -802,7 +803,7 @@ export default function ChatInterface({
                       <div className="bg-gradient-to-br from-farm-blue to-farm-dark-green text-white rounded-xl p-4 max-w-[min(85%,calc(100%_-_52px))] shadow-md">
                         <MentionChips mentions={message.mentions} experts={experts} className="mb-2" />
                         <div className="markdown-content [overflow-wrap:anywhere] prose-sm prose-invert leading-relaxed">
-                          {renderMessageBody(message.content)}
+                          <UserMessageContent content={message.content} renderBody={renderMessageBody} />
                         </div>
                       </div>
                       <div className="flex-shrink-0 ml-3">

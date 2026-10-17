@@ -32,6 +32,9 @@ const mockGetConversation = vi.hoisted(() => vi.fn());
 const mockUpdateConversation = vi.hoisted(() => vi.fn());
 
 const mockGetExpertResponseStream = vi.hoisted(() => vi.fn());
+const mockIsRetryableExpertProviderFailure = vi.hoisted(() => vi.fn((response: { content: string }) =>
+  response.content.startsWith("(Error") && !/\b429\b/.test(response.content),
+));
 const mockGenerateInsights = vi.hoisted(() => vi.fn());
 const mockGetModeratorNextSpeakerSuggestion = vi.hoisted(() => vi.fn());
 const mockGenerateClosingSynthesis = vi.hoisted(() => vi.fn());
@@ -52,6 +55,7 @@ vi.mock("../server/storage", () => ({
 
 vi.mock("../server/ai", () => ({
   getExpertResponseStream: mockGetExpertResponseStream,
+  isRetryableExpertProviderFailure: mockIsRetryableExpertProviderFailure,
   generateInsights: mockGenerateInsights,
   getModeratorNextSpeakerSuggestion: mockGetModeratorNextSpeakerSuggestion,
   generateClosingSynthesis: mockGenerateClosingSynthesis,
@@ -607,7 +611,69 @@ describe("Orchestrator", () => {
       expect(mockGenerateClosingSynthesis.mock.calls.filter(([cid]) => cid === conversationId)).toHaveLength(1);
     });
 
-    it("treats a returned provider error as failed and skips a later Moderator pick of that expert", async () => {
+    it("retries one recoverable provider error without consuming another autonomous turn", async () => {
+      const conversationId = nextConvId();
+      const { waitForTurns, releaseNextTurn, addUserMessageToHistory, turnNames, storedMessages } =
+        setupGatedConversation(conversationId);
+      mockGetConversation.mockResolvedValue({ turnBudget: 2 });
+      mockGetModeratorNextSpeakerSuggestion.mockResolvedValue("RoundRobin");
+
+      const firstMessage = createMockMessage(1, "Check the irrigation plan");
+      addUserMessageToHistory(firstMessage);
+      await processMessageTurnBased(userId, conversationId, firstMessage, broadcastFn);
+      await waitForTurns(1);
+      await releaseNextTurn("(Error generating response: provider output limit exceeded)");
+
+      await waitForTurns(2);
+      expect(turnNames()).toEqual(["Alice", "Alice"]);
+      const aliceCalls = mockGetExpertResponseStream.mock.calls.filter(([expert]) => expert.id === experts[0].id);
+      expect(aliceCalls).toHaveLength(2);
+      expect(aliceCalls[1][7]).toContain("Answer concisely (no more than 180 words)");
+      await releaseNextTurn();
+
+      await waitForTurns(3);
+      expect(turnNames()).toEqual(["Alice", "Alice", "Bob"]);
+      expect(getConversationState(conversationId)!.totalAutonomousTurnsTaken).toBe(2);
+      expect(getConversationState(conversationId)!.failedExpertIds).not.toContain(experts[0].id);
+      expect(storedMessages().some(message => message.content.startsWith("(Error getting response from"))).toBe(false);
+      await releaseNextTurn();
+      await waitForMode(conversationId, "idle");
+    });
+
+    it("keeps a recoverably failed expert eligible for a later budgeted turn after the single retry", async () => {
+      const conversationId = nextConvId();
+      const { waitForTurns, releaseNextTurn, addUserMessageToHistory, turnNames } =
+        setupGatedConversation(conversationId);
+      mockGetConversation.mockResolvedValue({ turnBudget: 4 });
+      mockGetModeratorNextSpeakerSuggestion.mockResolvedValue("RoundRobin");
+
+      const firstMessage = createMockMessage(1, "Compare the field plans");
+      addUserMessageToHistory(firstMessage);
+      await processMessageTurnBased(userId, conversationId, firstMessage, broadcastFn);
+      await waitForTurns(1);
+      await releaseNextTurn("(Error generating response: provider output limit exceeded)");
+
+      await waitForTurns(2);
+      expect(turnNames()).toEqual(["Alice", "Alice"]);
+      await releaseNextTurn("(Error generating response: provider output limit exceeded)");
+
+      await waitForTurns(3);
+      expect(turnNames()).toEqual(["Alice", "Alice", "Bob"]);
+      expect(getConversationState(conversationId)!.failedExpertIds).not.toContain(experts[0].id);
+      await releaseNextTurn();
+
+      await waitForTurns(4);
+      expect(turnNames()).toEqual(["Alice", "Alice", "Bob", "Carol"]);
+      await releaseNextTurn();
+
+      await waitForTurns(5);
+      expect(turnNames()).toEqual(["Alice", "Alice", "Bob", "Carol", "Alice"]);
+      expect(getConversationState(conversationId)!.failedExpertIds).not.toContain(experts[0].id);
+      await releaseNextTurn();
+      await waitForMode(conversationId, "idle");
+    });
+
+    it("does not retry a rate-limited provider error and skips a later Moderator pick of that expert", async () => {
       const conversationId = nextConvId();
       const { waitForTurns, releaseNextTurn, addUserMessageToHistory, turnNames } = setupGatedConversation(conversationId);
       mockGetConversation.mockResolvedValue({ turnBudget: 2 });
@@ -619,7 +685,7 @@ describe("Orchestrator", () => {
       addUserMessageToHistory(firstMessage);
       await processMessageTurnBased(userId, conversationId, firstMessage, broadcastFn);
       await waitForTurns(1);
-      await releaseNextTurn("(Error generating response: provider output limit exceeded)");
+      await releaseNextTurn("(Error generating response: HTTP 429 Too Many Requests)");
 
       await waitForTurns(2);
       expect(turnNames()).toEqual(["Alice", "Bob"]);

@@ -1,4 +1,6 @@
 import { storage } from "./storage";
+import { ARTIFACT_DESIGN_PROMPT } from "./artifact-design";
+import { artifactExamplesForRequest } from "./artifact-examples";
 // Import shared DB types
 import type { InsertMessage, Expert, InsertFile, Message, File, Artifact, FarmProfile, MessageStance, OpenQuestion } from "@shared/schema";
 import { extractArtifacts } from "./artifact-extractor";
@@ -114,6 +116,12 @@ const MAX_FILE_CONTEXT_FILES = 10;
 // G9: cap on the carried-forward PRIOR DECISIONS system block.
 const PRIOR_DECISIONS_MAX_CHARS = 1200;
 const INCOMPLETE_EXPERT_RESPONSE_MESSAGE = "⚠️ No complete response was received. Try a shorter request or split it into smaller requests, then retry. You can also continue with the work available so far.";
+const retryableExpertResponses = new WeakSet<object>();
+
+/** True only for transient provider failures; metadata stays process-local and is never persisted. */
+export function isRetryableExpertProviderFailure(response: InsertMessage): boolean {
+  return retryableExpertResponses.has(response);
+}
 
 function truncateForModel(content: string, maxChars = MAX_MODEL_MESSAGE_CHARS): string {
   return content.length > maxChars
@@ -250,6 +258,7 @@ function buildDeliverableInstructions(request: DeliverableGenerationRequest): st
   if (request.constraints.datedTasks) {
     lines.push("Every task must include an explicit valid ISO date (YYYY-MM-DD) supplied by the farmer or farm plan; do not invent dates.");
   }
+  lines.push(ARTIFACT_DESIGN_PROMPT);
   return lines.join("\n");
 }
 
@@ -439,6 +448,18 @@ function expertResponseErrorMessage(error: unknown, expertName: string, imagePar
   if (isVisionRejection(error, imageParts)) return visionRejectionMessage(expertName);
   if (error instanceof SafeDeliverableError) return error.message;
   return INCOMPLETE_EXPERT_RESPONSE_MESSAGE;
+}
+
+function isRetryableProviderError(error: unknown): boolean {
+  const details = typeof error === "object" && error !== null
+    ? error as { status?: unknown; statusCode?: unknown; code?: unknown; name?: unknown; message?: unknown }
+    : {};
+  const status = Number(details.status ?? details.statusCode);
+  if (Number.isInteger(status) && status >= 400 && status < 500) return false;
+  const description = [details.name, details.code, details.message, error instanceof Error ? error.message : String(error)]
+    .filter(value => value !== undefined && value !== null)
+    .join(" ");
+  return !/(?:\b429\b|too many requests|rate[ -]?limit|timeout|timed?\s*out|abort(?:ed|error)?|cancel(?:led|ed)?|canceled)/i.test(description);
 }
 
 function deliverableSuccessMessage(
@@ -646,8 +667,11 @@ You are part of a team of experts: [${availableRoles?.join(', ') || 'various rol
     );
     const colleagues = colleagueRoles.length > 0 ? ` Colleagues (not you): [${colleagueRoles.join(", ")}].` : "";
     basePrompt += `\n🎭 STAY IN ROLE: you are the ${expert.role} only. Answer from your specialty; when a point belongs to another specialty, hand it to that colleague with @[Role] instead of answering it yourself.\n`;
-    basePrompt += `\n🔁 READ THE TABLE FIRST: before writing, read each colleague's most recent substantive message. Unless you are the first to speak on this farmer message, make your first sentence name one colleague and build on or disagree with a specific point they made (e.g. "Building on the Soil Scientist's buffer-capacity point…" / "I disagree with Pest Management that…"). In that sentence, use the colleague's full role name and carry forward at least two specific domain terms of five or more letters verbatim from that colleague's latest substantive message. Before sending, verify the exact full role name and both terms appear literally. If the latest message is an error or has no substantive point, use another colleague's most recent substantive message; if none exists, do not fabricate cross-talk. Then add a distinct fact, qualification, trade-off, or handoff. Do not repeat their action step, calculation, or farmer question; if you have nothing new to add, say so plainly rather than padding.\n`;
+    basePrompt += `\n🔁 READ THE TABLE FIRST: before writing, read each colleague's most recent substantive message. After the first substantive colleague response, make your first sentence follow this format: "Building on <exact full role label copied from Colleagues>'s <term 1> and <term 2>, ..." Use the colleague's full role name, copying every word exactly from the Colleagues list; do not shorten or paraphrase it. Carry forward two distinct domain terms of five or more letters verbatim from that colleague's latest substantive message. Before sending, verify the exact full role name and both terms appear literally. If the latest message is an error or has no substantive point, use another colleague's most recent substantive message; if none exists, do not fabricate cross-talk. Then add a distinct fact, qualification, trade-off, or handoff. Do not repeat their action step, calculation, or farmer question; if you have nothing new to add, say so plainly rather than padding.\n`;
     basePrompt += `\n💬 CROSS-TALK: Build on or challenge colleagues by name ("I agree with X because…" / "I disagree with X on…").${colleagues} Tag @[Role] only when you need that specialty or want that expert to defend a point; never tag yourself or force a tag every turn. Add new information or an objection instead of repeating settled points.\n`;
+    if (expert.role !== "File Creator") {
+      basePrompt += `\n📏 RESPONSE SIZE: Keep each expert turn to no more than 180 words. Lead with one concrete contribution; retain relevant evidence, units, caveats, and supported citations. Do not pad or repeat previous answers. This limit does not apply to user-requested deliverables.\n`;
+    }
   }
 
   // Inject farmer's custom instructions for this expert if present
@@ -745,7 +769,7 @@ Uploaded images are delivered to you directly as native vision input — describ
     ? ""
     : `\n\nAt the very end of every response, add exactly one machine-readable stance line in this format:\nSTANCE: <agree|disagree|conditional|abstain> | <confidence 1-5> | <one-line position>\nUse one of the four stance values exactly (case-insensitive), an integer confidence from 1 to 5, and a concise one-line position. Put no text after this line. This line will be removed from the farmer-facing response.`;
 
-  return basePrompt + interactionPrompt + roleInstructions + stanceInstruction;
+  return basePrompt + interactionPrompt + roleInstructions + (expert.role === "Moderator" ? "" : ARTIFACT_DESIGN_PROMPT) + stanceInstruction;
 }
 
 // Function to call AI API (routes through provider abstraction)
@@ -1107,6 +1131,7 @@ export async function getExpertResponseStream(
   availableRoles: string[],
   onToken: (token: string) => void,
   deliverableRequest?: DeliverableGenerationRequest,
+  retryInstruction?: string,
 ): Promise<InsertMessage> { 
   console.log(`[STREAM] Generating streaming response for expert: ${expert.name} (${expert.role})`);
   
@@ -1139,6 +1164,8 @@ export async function getExpertResponseStream(
   const messages: AIMessage[] = [
     { role: "system", content: systemPrompt }
   ];
+  const visualExamples = expert.role === "Moderator" ? "" : artifactExamplesForRequest([...history].reverse().find(message => message.role === "user")?.content ?? "");
+  if (visualExamples) messages.push({ role: "system", content: visualExamples });
 
   const { context: fileContext, imageParts } = await buildAttachedFilesContext(files, history);
   if (fileContext) {
@@ -1169,6 +1196,7 @@ export async function getExpertResponseStream(
    // Core tools: optional research phase (search / fetch) before answering.
    const toolRun = await runExpertToolPhase(expert, referenceMessageContent, conversation?.userId);
    if (toolRun) messages.push({ role: "system", content: formatToolResultsForPrompt(toolRun) });
+   if (retryInstruction?.trim()) messages.push({ role: "system", content: retryInstruction.trim() });
 
    const userText = truncateForModel(referenceMessageContent);
    messages.push(
@@ -1275,7 +1303,7 @@ export async function getExpertResponseStream(
     streamFilter?.finish();
     const errorMsg = expertResponseErrorMessage(error, expert.name, imageParts);
     onToken(errorMsg); // Show error inline
-    return {
+    const failedResponse: InsertMessage = {
       conversationId: expert.conversationId,
       expertId: expert.id,
       userId: null,
@@ -1285,6 +1313,11 @@ export async function getExpertResponseStream(
       expertRole: expert.role,
       stance: null,
     };
+    if (!(error instanceof SafeDeliverableError) &&
+        !isVisionRejection(error, imageParts) && isRetryableProviderError(error)) {
+      retryableExpertResponses.add(failedResponse);
+    }
+    return failedResponse;
   }
 }
 
@@ -1306,6 +1339,8 @@ export async function getExpertResponse(
   const messages: AIMessage[] = [
     { role: "system", content: systemPrompt }
   ];
+  const visualExamples = expert.role === "Moderator" ? "" : artifactExamplesForRequest([...history].reverse().find(message => message.role === "user")?.content ?? "");
+  if (visualExamples) messages.push({ role: "system", content: visualExamples });
 
   const { context: fileContext, imageParts } = await buildAttachedFilesContext(files, history);
   if (fileContext) {
@@ -1398,7 +1433,7 @@ export async function getExpertResponse(
   } catch (error) {
     console.error(`Response generation failed for expert ${expert.name}`);
     const errorMsg = expertResponseErrorMessage(error, expert.name, imageParts);
-    return {
+    const failedResponse: InsertMessage = {
       conversationId: expert.conversationId,
       expertId: expert.id,
       userId: null,
@@ -1408,6 +1443,11 @@ export async function getExpertResponse(
       expertRole: expert.role,
       stance: null,
     };
+    if (!(error instanceof SafeDeliverableError) &&
+        !isVisionRejection(error, imageParts) && isRetryableProviderError(error)) {
+      retryableExpertResponses.add(failedResponse);
+    }
+    return failedResponse;
   }
 }
 

@@ -3,7 +3,7 @@ import os from "os";
 import path from "path";
 import { describe, expect, it, vi } from "vitest";
 import {
-  parseToolPlan, parseDuckDuckGoResults, runToolCalls, formatToolResultsForPrompt, assertPublicUrl,
+  parseToolPlan, parseDuckDuckGoResults, runToolCalls, formatToolResultsForPrompt, assertPublicUrl, buildToolPlanningPrompt,
   extractDeliverable, saveExpertDeliverable, validateChartArtifact, filterChartArtifacts, toolCallLimitForTier, buildToolUsePrompt,
   MAX_TOOL_CALLS_PER_TURN,
 } from "../server/expert-tools";
@@ -19,6 +19,18 @@ describe("tool planning", () => {
       { tool: "search", query: "a third" },
     ]);
     expect(parseToolPlan("NONE", 3)).toEqual([]);
+  });
+  it("requires authoritative research for higher-stakes decisions without overriding farmer-provided prices", () => {
+    const prompt = buildToolPlanningPrompt("Grain Marketing Advisor", "Store or hedge these soybeans?", 2);
+    expect(prompt).toContain("do not reply NONE merely because you know the general advice");
+    expect(prompt).toContain("marketing or hedging");
+    expect(prompt).toContain("Never search for or contradict a price or condition supplied by the farmer");
+  });
+  it("requires authoritative sources for numeric soil and crop recommendations", () => {
+    const prompt = buildToolPlanningPrompt("Soil Scientist", "What liming rate follows from these soil-test results?", 2);
+    expect(prompt).toContain("soil-fertility, liming, fertilizer/nutrient-application");
+    expect(prompt).toContain("especially numeric rates, thresholds, or yield claims");
+    expect(prompt).toContain("Use farmer-provided soil tests, acres, yields, prices, and field conditions exactly as supplied");
   });
   it("tier caps: free 2, paid up to MAX", () => {
     expect(toolCallLimitForTier("free")).toBe(2);
