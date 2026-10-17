@@ -14,7 +14,6 @@ export function maxOutputTokens(): number {
 // Free OpenRouter models come and go; when a :free model is requested,
 // OpenRouter's `models` array lets it fall through to these (verified live 2026-10-16).
 export const FREE_MODEL_FALLBACKS = [
-  "nvidia/nemotron-3-super-120b-a12b:free",
   "dots-studio/dots-3-note-preview:free",
 ];
 export function modelRouting(model: string): { model: string; models?: string[] } {
