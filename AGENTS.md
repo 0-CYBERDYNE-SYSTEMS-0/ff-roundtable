@@ -28,7 +28,7 @@ FarmFriend Roundtable is an agricultural advisory app with a farmer-selected pan
 
 ## Commands and verification
 
-Use Node.js 20+ and npm with the root `package-lock.json`.
+Use Node.js 24+ and npm with the root `package-lock.json`. CI and Docker use Node.js 24 LTS; the PDF dependency requires APIs absent from Node.js 20.
 
 | Task | Command |
 | --- | --- |

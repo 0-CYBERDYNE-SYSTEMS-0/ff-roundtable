@@ -2,7 +2,7 @@
 # Multi-stage build: compile → runtime
 
 # ─── Stage 1: Build ───────────────────────────────────────────────────────────
-FROM node:20-alpine AS builder
+FROM node:24-alpine AS builder
 
 WORKDIR /app
 
@@ -20,7 +20,7 @@ COPY . .
 RUN npm run build
 
 # ─── Stage 2: Production Runtime ──────────────────────────────────────────────
-FROM node:20-alpine AS runtime
+FROM node:24-alpine AS runtime
 
 # Create non-root user
 RUN addgroup -g 1001 -S farmapp && \

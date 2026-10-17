@@ -25,7 +25,7 @@ You choose the seats. Then you ask about soil, water, pests, or the crop in the 
 
 ## Run it
 
-You need [Node.js](https://nodejs.org) 20 or newer. The full machine setup, including the database, is in [README-SELF-HOST.md](README-SELF-HOST.md).
+You need [Node.js](https://nodejs.org) 24 or newer; CI and Docker use Node.js 24 LTS. The full machine setup, including the database, is in [README-SELF-HOST.md](README-SELF-HOST.md).
 
 ```sh
 git clone https://github.com/0-CYBERDYNE-SYSTEMS-0/ff-roundtable.git
