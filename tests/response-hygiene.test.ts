@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { enforceCitationIntegrity, stripMetaLines, mergeDuplicateFarmerQuestions, questionsOverlap, removeRepeatedExpertSentences } from "../server/response-hygiene";
+import { enforceCitationIntegrity, removeUnsupportedCitedSentences, stripMetaLines, mergeDuplicateFarmerQuestions, questionsOverlap, removeRepeatedExpertSentences } from "../server/response-hygiene";
 import { parseTrailingStanceLine } from "../server/ai";
 
 describe("citation integrity", () => {
@@ -31,6 +31,24 @@ describe("citation integrity", () => {
   it("does not touch words like 'S10 rule' while linking an actual source marker", () => {
     expect(enforceCitationIntegrity("Use SS304 steel and S10 rule, with [S1].", src, []).content)
       .toBe("Use SS304 steel and S10 rule, with [S1](https://crops.extension.iastate.edu/a).");
+  });
+});
+
+describe("citation evidence support", () => {
+  it("removes a cited calculation unsupported by fetched source text and retains a supported claim", () => {
+    const source = {
+      id: "S1",
+      snippet: "The urea price listed in this source is $864.75 per short ton.",
+    };
+    const text = "The urea price listed in this source is $864.75 per short ton [S1](https://example.org/urea).\n" +
+      "Urea costs $0.432 per pound and $113 per acre based on this source [S1](https://example.org/urea).\n" +
+      "- [S1] [Urea pricing](https://example.org/urea)";
+
+    const result = removeUnsupportedCitedSentences(text, [source]);
+    expect(result.removed).toBe(1);
+    expect(result.content).toContain("$864.75 per short ton");
+    expect(result.content).not.toContain("$0.432 per pound");
+    expect(result.content).toContain("[S1] [Urea pricing](https://example.org/urea)");
   });
 });
 

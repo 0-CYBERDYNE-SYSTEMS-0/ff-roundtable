@@ -12,7 +12,7 @@ import { getProvider } from "./ai-providers";
 import { findCatalogExpert } from "@shared/expert-catalog";
 import { DELIVERABLE_PLACEHOLDER, pendingDeliverableFor, pendingDeliverableByMessage } from "./pending-deliverables";
 export { commitPendingDeliverable, discardPendingDeliverable } from "./pending-deliverables";
-import { enforceCitationIntegrity, stripMetaLines, undecorate, mergeDuplicateFarmerQuestions, removeRepeatedExpertSentences } from "./response-hygiene";
+import { enforceCitationIntegrity, removeUnsupportedCitedSentences, stripMetaLines, undecorate, mergeDuplicateFarmerQuestions, removeRepeatedExpertSentences } from "./response-hygiene";
 import {
   buildToolUsePrompt, buildToolPlanningPrompt, parseToolPlan, runToolCalls, formatToolResultsForPrompt,
   toolCallLimitForTier, extractDeliverable, saveExpertDeliverable, filterChartArtifacts, type ToolRun,
@@ -72,6 +72,11 @@ async function finalizeExpertTools(
     console.log(`[CITATIONS] ${expert.role}: removed ${citation.removedMarkers} invalid marker(s), ${citation.removedUrls} unverified URL(s)`);
   }
   text = citation.content;
+  const supportedCitationText = removeUnsupportedCitedSentences(text, toolRun?.sources ?? []);
+  if (supportedCitationText.removed) {
+    console.log(`[CITATION_SUPPORT] ${expert.role}: removed ${supportedCitationText.removed} unsupported cited claim(s)`);
+  }
+  text = supportedCitationText.content;
   let lastFarmer = -1;
   history.forEach((m, i) => { if (m.role === "user") lastFarmer = i; });
   const recentExperts = history.slice(lastFarmer + 1)

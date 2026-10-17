@@ -89,6 +89,79 @@ export function enforceCitationIntegrity(
   return { content: out, removedMarkers, removedUrls };
 }
 
+export type CitationEvidence = { id: string; snippet?: string };
+
+const CITATION_SUPPORT_STOPWORDS = new Set(
+  "about above after again against their there these those which while would could should other being because before between through during under further having where whose every each farmer field fields please first think also still might maybe really point agree build colleague right building points".split(" "),
+);
+
+function supportWords(text: string): Set<string> {
+  return new Set((text.toLowerCase().match(/[a-z][a-z-]+/g) ?? [])
+    .filter(word => word.length >= 5 && !CITATION_SUPPORT_STOPWORDS.has(word)));
+}
+
+function supportNumbers(text: string): Set<string> {
+  return new Set(text.replace(/,/g, "").match(/\d+(?:\.\d+)?/g) ?? []);
+}
+
+function isSupportedCitationClaim(claim: string, sourceText: string): boolean {
+  const claimWords = supportWords(claim);
+  if (!claimWords.size) return false;
+  const sourceWords = supportWords(sourceText);
+  const sharedWords = Array.from(claimWords).filter(word => sourceWords.has(word)).length;
+  const claimNumbers = supportNumbers(claim);
+  const sourceNumbers = supportNumbers(sourceText);
+  const allNumbersPresent = Array.from(claimNumbers).every(number => sourceNumbers.has(number));
+  return allNumbersPresent && sharedWords >= 0.5 * claimWords.size;
+}
+
+/**
+ * Remove citation-bearing factual sentences unless their fetched source text
+ * supports the claim's numeric values and at least half its concrete words.
+ * This mirrors the live quality audit and prevents a verified URL from being
+ * mistaken for evidence of an unsupported claim.
+ */
+export function removeUnsupportedCitedSentences(
+  text: string,
+  sources: CitationEvidence[],
+): { content: string; removed: number } {
+  if (!sources.length) return { content: text, removed: 0 };
+  const byId = new Map(sources.map(source => [source.id.toUpperCase(), source.snippet ?? ""]));
+  const parts = text.split(/((?<=[.!?])\s+|\n+)/);
+  let content = "";
+  let removed = 0;
+  for (let i = 0; i < parts.length; i += 2) {
+    const sentence = parts[i] ?? "";
+    const separator = parts[i + 1] ?? "";
+    const markerIds: string[] = [];
+    const markerPattern = /\[S(\d+)\]/gi;
+    let markerMatch: RegExpExecArray | null;
+    while ((markerMatch = markerPattern.exec(sentence)) !== null) {
+      markerIds.push(`S${markerMatch[1]}`.toUpperCase());
+    }
+    const claim = sentence.replace(/\[S\d+\](?:\s*\[[^\]]+\])?\s*\([^)]*\)/gi, "")
+      .replace(/\[S\d+\]|https?:\/\/\S+/gi, "").replace(/[*_]/g, "").trim();
+    const isSourceList = /^\s*[-*+]\s*\[S\d+\]\s+\[[^\]]+\]\(https?:\/\//i.test(sentence);
+    const claimWords = claim.toLowerCase().match(/[a-z][a-z-]+/g) ?? [];
+    if (!markerIds.length || isSourceList || claimWords.length < 6 || claim.endsWith(":")) {
+      content += sentence + separator;
+      continue;
+    }
+    const sourceText = markerIds.map(id => byId.get(id) ?? "").filter(Boolean).join(" ");
+    // If the marker is only from prior conversation context, this turn has no
+    // fetched snippet to judge; retain it rather than making an unsupported edit.
+    if (!sourceText || isSupportedCitationClaim(claim, sourceText)) {
+      content += sentence + separator;
+      continue;
+    }
+    removed++;
+  }
+  return {
+    content: content.replace(/\n{3,}/g, "\n\n").replace(/[ \t]+([.,;:])/g, "$1").trimEnd(),
+    removed,
+  };
+}
+
 // ---------- metadata lines ----------
 
 const DECORATION = /^[\s>*_`#~|-]*/;
