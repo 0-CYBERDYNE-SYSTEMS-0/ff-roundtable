@@ -10,7 +10,13 @@ describe("model routing and output cap", () => {
     expect(new Set(r.models).size).toBe(3);
     expect(r.models!.every(m => m.endsWith(":free"))).toBe(true);
     expect(modelRouting("openai/gpt-4o")).toEqual({ model: "openai/gpt-4o" });
-    expect(FREE_MODEL_FALLBACKS.length).toBeGreaterThanOrEqual(3);
+    expect(FREE_MODEL_FALLBACKS.length).toBeGreaterThanOrEqual(2);
+  });
+  it("uses the current reliable free-model primary and fallback chain", () => {
+    expect(modelRouting("nvidia/nemotron-3-super-120b-a12b:free").models).toEqual([
+      "nvidia/nemotron-3-super-120b-a12b:free",
+      "dots-studio/dots-3-note-preview:free",
+    ]);
   });
   it("defaults to 4096 and honours a sane override", () => {
     expect(maxOutputTokens()).toBe(DEFAULT_MAX_OUTPUT_TOKENS);

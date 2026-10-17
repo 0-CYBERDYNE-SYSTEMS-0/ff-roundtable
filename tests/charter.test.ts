@@ -145,6 +145,9 @@ describe("generateSystemPrompt charter injection", () => {
     const prompt = generateSystemPrompt(expert, roles);
     expect(prompt).toContain("use the colleague's full role name");
     expect(prompt).toContain("at least two specific domain terms of five or more letters");
+    expect(prompt).toContain("verbatim from that colleague's latest substantive message");
+    expect(prompt).toContain("verify the exact full role name and both terms appear literally");
+    expect(prompt).toContain("do not fabricate cross-talk");
     expect(prompt).toContain("Do not repeat their action step, calculation, or farmer question");
   });
 
