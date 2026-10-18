@@ -11,6 +11,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `npm run db:push` — push Drizzle schema (`shared/schema.ts`) to Postgres; `npm run db:setup` creates local `farm_roundtable_dev` DB then pushes
 - `npm run test:watch` — vitest in watch mode
 
+Node 24+ is required (CI and Docker use 24 LTS; the PDF dependency needs APIs missing in Node 20). There is no ESLint config, so `npm run check` plus tests are the verification steps. Tests are excluded from `tsc`, so run the relevant test file when editing tests. `npm run db:push` acts on whatever `DATABASE_URL` points at — check the target first.
+
 Tests run with `DATABASE_URL=""` (forced by `vitest.config.ts`), so they always use in-memory storage — no DB needed. Known flake: full-suite runs occasionally fail a session-auth test in `tests/auth.test.ts` / `tests/billing.test.ts` with 401s; it is pre-existing. Rerun, or run those files in isolation, before treating it as a regression.
 
 `npm run dev` with `DATABASE_URL` set (as in `.env`) uses the real Postgres DB. For a throwaway instance alongside it: `REPL_ID=local PORT=5002 DATABASE_URL= npm run dev`. Vite HMR otherwise binds fixed port 24678 (`server/vite.ts`), so a second plain instance dies with "Port is already in use"; `REPL_ID` makes HMR share the HTTP port. In-memory mode seeds `developer`/`password`; `POST /api/dev-login` then `POST /api/dev/quick-setup` gives a logged-in session with a conversation.
@@ -25,6 +27,8 @@ Monorepo with three roots, aliased as `@/` (client/src) and `@shared/` (shared):
   - `orchestrator.ts` — per-conversation state machine for expert turn-taking (sequential rounds, autonomous council mode, pause/interrupt/steering, @mention routing). State is snapshotted to storage so paused conversations survive restart (`restorePausedFromSnapshot`). Set `ORCH_DEBUG=1` for verbose turn tracing.
   - `ai.ts` — prompt construction, streaming expert responses, moderator next-speaker suggestion, insights, closing synthesis, "prior decisions" context. Aux calls use `resolveAuxModel` / `DEFAULT_AUX_MODEL`.
   - `ai-providers.ts` — `getProvider(modelId)` picks OpenRouter or a local OpenAI-compatible endpoint (`LOCAL_AI_BASE_URL`).
+  - `expert-tools.ts` — text-protocol tools any model can use (DuckDuckGo search, public-URL fetch, HTML/PDF extraction, sourced charts) and deliverable parsing/versioning/ownership. Deliverables are parsed during the model call but saved only after the orchestrator accepts the turn (`pending-deliverables.ts`, kept out of `ai.ts` so tests that mock `ai.ts` still get real commit/discard); a duplicate or rejected turn must leave no file. A revision creates a version; another expert's change becomes a proposal unless the farmer hands over ownership.
+  - `turn-fairness.ts`, `response-hygiene.ts`, `text-similarity.ts` — post-moderator speaker rules (one @mention honoured per farmer message, unspoken experts go first, no back-to-back turns, per-expert cap) and answer cleanup before storage (citations limited to sources retrieved this turn or already in the conversation, internal STANCE/tool lines stripped, repeated questions merged).
   - `storage.ts` — `IStorage` with `MemStorage` and `PostgresStorage`; chosen at startup by presence of `DATABASE_URL`. New storage operations must be implemented in both.
   - `auth.ts` — Passport local strategy + sessions; `tiers.ts` — subscription tier limits.
 - `shared/` — Drizzle schema + zod types (`schema.ts`) and pure helpers used by both sides (mentions parsing, schedule extraction, ICS export, markdown).
