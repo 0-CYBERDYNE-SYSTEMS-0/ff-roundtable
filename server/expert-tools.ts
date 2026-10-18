@@ -320,42 +320,107 @@ export async function saveExpertDeliverable(
 
 const GENERIC_TITLES = /^(chart( artifact)?|visual aid|data|trend|untitled|seasonal agricultural trends)$/i;
 
-/**
- * Keeps a chart only when it is labeled and every source is real: a URL
- * retrieved this turn, "farmer", or "weather". Returns null to drop it.
- */
-export function validateChartArtifact(chartJson: string, allowedUrls: string[]): { json: string; title: string } | null {
-  let chart: any;
-  try { chart = JSON.parse(chartJson); } catch { return null; }
-  if (chart?.type === "vega-lite") {
-    const parsed = parseVegaChart(chart);
-    if (!parsed) return null;
-    try { compile(themedVegaSpec(parsed) as unknown as TopLevelSpec); } catch { return null; }
-    chart = parsed;
-  }
-  const title = typeof chart?.title === "string" ? chart.title.trim() : "";
-  if (!title || GENERIC_TITLES.test(title)) return null;
-  const sources: unknown[] = Array.isArray(chart?.sources) ? chart.sources : typeof chart?.source === "string" ? [chart.source] : [];
-  if (!sources.length) return null;
-  const allowed = new Set(allowedUrls);
-  const ok = sources.every(s => typeof s === "string" && (allowed.has(s.trim()) || /^(farmer|weather)$/i.test(s.trim())));
-  if (!ok) return null;
-  if (!Array.isArray(chart?.data) || chart.data.length === 0) return null;
-  return { json: JSON.stringify(chart, null, 2), title };
+export type ChartArtifactRejectionReason =
+  | "invalid-json"
+  | "invalid-vega-envelope"
+  | "invalid-vega-spec"
+  | "missing-title"
+  | "generic-title"
+  | "missing-source"
+  | "unverified-source"
+  | "missing-data";
+
+export type ChartEvidence = { farmerText?: string; weatherText?: string };
+
+type ChartValidationResult =
+  | { ok: true; json: string; title: string }
+  | { ok: false; reason: ChartArtifactRejectionReason };
+
+function numericDataValues(data: unknown[]): number[] {
+  return data.flatMap(row => row && typeof row === "object" && !Array.isArray(row)
+    ? Object.values(row).filter((value): value is number => typeof value === "number" && Number.isFinite(value))
+    : []);
 }
 
-/** Applies validateChartArtifact to extracted artifacts; drops unsourced charts. */
+function evidenceContainsChartNumbers(data: unknown[], text: string | undefined): boolean {
+  if (!text) return false;
+  const values = numericDataValues(data);
+  if (!values.length) return false;
+  const evidenceNumbers = new Set((text.match(/[-+]?\d+(?:\.\d+)?/g) ?? []).map(Number));
+  return values.every(value => evidenceNumbers.has(value));
+}
+
+function inferChartSource(data: unknown[], evidence: ChartEvidence): "farmer" | "weather" | undefined {
+  if (evidenceContainsChartNumbers(data, evidence.farmerText)) return "farmer";
+  if (evidenceContainsChartNumbers(data, evidence.weatherText)) return "weather";
+  return undefined;
+}
+
+/**
+ * Keeps a chart only when it is labeled and every source is real: a URL
+ * retrieved this turn, "farmer", or "weather".
+ */
+export function validateChartArtifactDetailed(
+  chartJson: string,
+  allowedUrls: string[],
+  evidence: ChartEvidence = {},
+): ChartValidationResult {
+  let chart: any;
+  try { chart = JSON.parse(chartJson); } catch { return { ok: false, reason: "invalid-json" }; }
+  if (!chart || typeof chart !== "object" || Array.isArray(chart)) return { ok: false, reason: "invalid-json" };
+
+  const title = typeof chart.title === "string" ? chart.title.trim() : "";
+  if (!title) return { ok: false, reason: "missing-title" };
+  if (GENERIC_TITLES.test(title)) return { ok: false, reason: "generic-title" };
+  if (!Array.isArray(chart.data) || chart.data.length === 0) return { ok: false, reason: "missing-data" };
+
+  let sources: unknown[] = Array.isArray(chart.sources) && chart.sources.length
+    ? chart.sources
+    : typeof chart.source === "string" ? [chart.source] : [];
+  if (!sources.length) {
+    const inferredSource = inferChartSource(chart.data, evidence);
+    if (inferredSource) {
+      sources = [inferredSource];
+    }
+  }
+  if (!sources.length) return { ok: false, reason: "missing-source" };
+  if (!Array.isArray(chart.sources) || chart.sources.length === 0) chart.sources = sources;
+
+  if (chart?.type === "vega-lite") {
+    const parsed = parseVegaChart(chart);
+    if (!parsed) return { ok: false, reason: "invalid-vega-envelope" };
+    try { compile(themedVegaSpec(parsed) as unknown as TopLevelSpec); } catch { return { ok: false, reason: "invalid-vega-spec" }; }
+    chart = parsed;
+  }
+  const allowed = new Set(allowedUrls);
+  const ok = sources.every(s => typeof s === "string" && (allowed.has(s.trim()) || /^(farmer|weather)$/i.test(s.trim())));
+  if (!ok) return { ok: false, reason: "unverified-source" };
+  return { ok: true, json: JSON.stringify(chart, null, 2), title };
+}
+
+export function validateChartArtifact(
+  chartJson: string,
+  allowedUrls: string[],
+  evidence: ChartEvidence = {},
+): { json: string; title: string } | null {
+  const result = validateChartArtifactDetailed(chartJson, allowedUrls, evidence);
+  return result.ok ? { json: result.json, title: result.title } : null;
+}
+
+/** Applies validateChartArtifact to extracted artifacts and reports why charts were rejected. */
 export function filterChartArtifacts<T extends { type: string; content: string; title?: string }>(
   artifacts: T[],
   allowedUrls: string[],
-): { kept: T[]; dropped: number } {
+  evidence: ChartEvidence = {},
+): { kept: T[]; dropped: number; droppedReasons: ChartArtifactRejectionReason[] } {
   let dropped = 0;
   const kept: T[] = [];
+  const droppedReasons: ChartArtifactRejectionReason[] = [];
   for (const a of artifacts) {
     if (a.type !== "chart") { kept.push(a); continue; }
-    const valid = validateChartArtifact(a.content, allowedUrls);
-    if (!valid) { dropped++; continue; }
+    const valid = validateChartArtifactDetailed(a.content, allowedUrls, evidence);
+    if (!valid.ok) { dropped++; droppedReasons.push(valid.reason); continue; }
     kept.push({ ...a, content: valid.json, title: valid.title });
   }
-  return { kept, dropped };
+  return { kept, dropped, droppedReasons };
 }
