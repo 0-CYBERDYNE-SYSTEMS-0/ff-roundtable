@@ -1,230 +1,106 @@
-import { useState, useEffect } from 'react';
+import { useRef, useState } from "react";
+import type { KeyboardEvent, PointerEvent } from "react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Message, Expert, Artifact } from "@shared/schema";
+import { Message, Artifact } from "@shared/schema";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { BarChart, LineChart, Map, PieChart, Table, Code, ChevronRight } from 'lucide-react';
+import { BarChart3, Code, ChevronRight, RefreshCw } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import ArtifactDisplay from "../artifacts/ArtifactDisplay";
 
 interface ConversationSidebarProps {
   messages: Message[];
-  experts: Expert[];
   insights: any[];
-  visualizations: any[];
   onWidthChange: (width: number) => void;
   onCollapse: () => void;
   currentWidth: number;
-}
-
-interface Visualization {
-  type: 'chart' | 'map' | 'iframe' | 'table';
-  title: string;
-  data: any;
-  url?: string;
+  minWidth: number;
+  maxWidth: number;
+  onRefreshInsights: () => void;
+  isRefreshingInsights: boolean;
 }
 
 export default function ConversationSidebar({
   messages,
-  experts,
   insights,
-  visualizations,
   onWidthChange,
   onCollapse,
-  currentWidth
+  currentWidth,
+  minWidth,
+  maxWidth,
+  onRefreshInsights,
+  isRefreshingInsights,
 }: ConversationSidebarProps) {
-  const [activeTab, setActiveTab] = useState('insights');
-  const [activeVisualizations, setActiveVisualizations] = useState<Visualization[]>([]);
-  const [allArtifacts, setAllArtifacts] = useState<Artifact[]>([]);
+  const [artifactFilter, setArtifactFilter] = useState<"all" | "chart">("all");
   const [isResizing, setIsResizing] = useState(false);
-  const [startX, setStartX] = useState(0);
-  const [startWidth, setStartWidth] = useState(currentWidth);
+  const resizeStartRef = useRef<{ x: number; width: number } | null>(null);
   const compactTabs = currentWidth <= 340;
+  const allArtifacts: Artifact[] = messages.flatMap((message) =>
+    Array.isArray(message.artifacts) ? message.artifacts : []
+  );
+  const filteredArtifacts = artifactFilter === "chart"
+    ? allArtifacts.filter((artifact) => artifact.type === "chart")
+    : allArtifacts;
 
-  // Extract artifacts from messages
-  useEffect(() => {
-    const extractedArtifacts: Artifact[] = [];
-    
-    messages.forEach(message => {
-      if (message.artifacts && Array.isArray(message.artifacts)) {
-        extractedArtifacts.push(...message.artifacts);
-      }
-    });
-
-    setAllArtifacts(extractedArtifacts);
-  }, [messages]);
-
-  // Process messages to extract visualization requests and URLs
-  useEffect(() => {
-    const extractedVisualizations: Visualization[] = [];
-    
-    messages.forEach(message => {
-      if (message.expertId) {
-        // Look for URL patterns
-        const urlMatches = message.content.match(/\bhttps?:\/\/\S+/gi);
-        if (urlMatches) {
-          urlMatches.forEach(url => {
-            // Determine visualization type based on URL
-            if (url.includes('maps.google.com') || url.includes('openstreetmap.org')) {
-              extractedVisualizations.push({
-                type: 'map',
-                title: 'Location Map',
-                data: null,
-                url
-              });
-            } else if (url.includes('chart.googleapis.com')) {
-              extractedVisualizations.push({
-                type: 'chart',
-                title: 'Data Visualization',
-                data: null,
-                url
-              });
-            }
-          });
-        }
-
-        // Look for data visualization markers
-        if (message.content.includes('```chart') || message.content.includes('```visualization')) {
-          // Extract chart data between code blocks
-          const chartMatch = message.content.match(/```chart\n([\s\S]*?)```/);
-          if (chartMatch) {
-            try {
-              const chartData = JSON.parse(chartMatch[1]);
-              extractedVisualizations.push({
-                type: 'chart',
-                title: chartData.title || 'Data Visualization',
-                data: chartData
-              });
-            } catch (e) {
-              console.error('Failed to parse chart data:', e);
-            }
-          }
-        }
-      }
-    });
-
-    setActiveVisualizations(extractedVisualizations);
-  }, [messages]);
-
-  const handleMouseDown = (e: React.MouseEvent) => {
-    e.preventDefault();
+  const handleResizeStart = (event: PointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    resizeStartRef.current = { x: event.clientX, width: currentWidth };
     setIsResizing(true);
-    setStartX(e.clientX);
-    setStartWidth(currentWidth);
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
   };
 
-  const handleTouchStart = (e: React.TouchEvent) => {
-    e.preventDefault();
-    setIsResizing(true);
-    setStartX(e.touches[0].clientX);
-    setStartWidth(currentWidth);
+  const handleResizeMove = (event: PointerEvent<HTMLDivElement>) => {
+    const start = resizeStartRef.current;
+    if (!start) return;
+    const width = start.width + start.x - event.clientX;
+    onWidthChange(Math.max(minWidth, Math.min(maxWidth, width)));
   };
 
-  useEffect(() => {
-    const handleMouseMove = (e: MouseEvent) => {
-      if (!isResizing) return;
-      const diff = startX - e.clientX;
-      const newWidth = Math.max(300, Math.min(800, startWidth + diff));
-      onWidthChange(newWidth);
-    };
+  const stopResizing = () => {
+    resizeStartRef.current = null;
+    setIsResizing(false);
+  };
 
-    const handleMouseUp = () => {
-      if (isResizing) {
-        setIsResizing(false);
-        document.body.style.cursor = '';
-        document.body.style.userSelect = '';
-      }
-    };
-
-    const handleTouchMove = (e: TouchEvent) => {
-      if (!isResizing) return;
-      const diff = startX - e.touches[0].clientX;
-      const newWidth = Math.max(300, Math.min(800, startWidth + diff));
-      onWidthChange(newWidth);
-    };
-
-    const handleTouchEnd = () => {
-      if (isResizing) {
-        setIsResizing(false);
-        document.body.style.cursor = '';
-        document.body.style.userSelect = '';
-      }
-    };
-
-    if (isResizing) {
-      document.addEventListener('mousemove', handleMouseMove);
-      document.addEventListener('mouseup', handleMouseUp);
-      document.addEventListener('touchmove', handleTouchMove, { passive: false });
-      document.addEventListener('touchend', handleTouchEnd);
-      return () => {
-        document.removeEventListener('mousemove', handleMouseMove);
-        document.removeEventListener('mouseup', handleMouseUp);
-        document.removeEventListener('touchmove', handleTouchMove);
-        document.removeEventListener('touchend', handleTouchEnd);
-      };
-    }
-  }, [isResizing, startX, startWidth, onWidthChange]);
-
-  const renderVisualization = (vis: Visualization) => {
-    switch (vis.type) {
-      case 'map':
-        return (
-          <div className="w-full h-[300px] rounded-lg overflow-hidden border border-neutral-200">
-            <iframe
-              src={vis.url}
-              className="w-full h-full"
-              frameBorder="0"
-              allowFullScreen
-              loading="lazy"
-              referrerPolicy="no-referrer-when-downgrade"
-            />
-          </div>
-        );
-      case 'iframe':
-        return (
-          <div className="w-full h-[300px] rounded-lg overflow-hidden border border-neutral-200">
-            <iframe
-              src={vis.url}
-              className="w-full h-full"
-              frameBorder="0"
-              allowFullScreen
-            />
-          </div>
-        );
-      case 'chart':
-        return (
-          <div className="w-full h-[300px] rounded-lg overflow-hidden border border-neutral-200 bg-white p-4">
-            {/* Placeholder for chart rendering - you'll want to use a charting library like recharts or chart.js */}
-            <div className="flex items-center justify-center h-full text-neutral-400">
-              <BarChart className="w-6 h-6 mr-2" />
-              Chart Visualization
-            </div>
-          </div>
-        );
-      default:
-        return null;
+  const handleResizeKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+      event.preventDefault();
+      const delta = event.key === "ArrowLeft" ? 16 : -16;
+      onWidthChange(Math.max(minWidth, Math.min(maxWidth, currentWidth + delta)));
+    } else if (event.key === "Home" || event.key === "End") {
+      event.preventDefault();
+      onWidthChange(event.key === "Home" ? minWidth : maxWidth);
     }
   };
 
   return (
-    <div className="h-full flex flex-col relative w-full">
-      <Tabs defaultValue="insights" className="w-full h-full flex flex-col">
-        <div className="border-b border-neutral-200 px-3 flex flex-shrink-0 items-center gap-2">
-          <TabsList className={`mb-[-1px] min-w-0 flex-1 ${compactTabs ? "grid w-full grid-cols-3" : ""}`}>
-            <TabsTrigger value="insights" onClick={() => setActiveTab('insights')} className={compactTabs ? "min-w-0 w-full px-1 text-[11px] whitespace-nowrap" : undefined}>
+    <div className="relative flex h-full w-full flex-col">
+      <Tabs defaultValue="insights" className="flex h-full w-full flex-col">
+        <div className="flex flex-shrink-0 items-center gap-2 border-b border-neutral-200 px-3">
+          <TabsList className={`mb-[-1px] min-w-0 flex-1 ${compactTabs ? "grid w-full grid-cols-2" : ""}`}>
+            <TabsTrigger value="insights" className={compactTabs ? "min-w-0 w-full px-1 text-[11px]" : undefined}>
               Insights
             </TabsTrigger>
-            <TabsTrigger value="artifacts" onClick={() => setActiveTab('artifacts')} className={compactTabs ? "min-w-0 w-full px-1 text-[11px] whitespace-nowrap" : undefined}>
+            <TabsTrigger value="artifacts" className={compactTabs ? "min-w-0 w-full px-1 text-[11px]" : undefined}>
               Artifacts ({allArtifacts.length})
             </TabsTrigger>
-            <TabsTrigger value="visualizations" onClick={() => setActiveTab('visualizations')} className={compactTabs ? "min-w-0 w-full px-1 text-[11px] whitespace-nowrap" : undefined}>
-              Visualizations
-            </TabsTrigger>
           </TabsList>
-          <button
+          <Button
             type="button"
-            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-neutral-600 hover:bg-neutral-100 hover:text-farm-blue focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-farm-blue"
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8 shrink-0 text-neutral-600 hover:text-farm-dark-green"
+            onClick={onRefreshInsights}
+            disabled={isRefreshingInsights}
+            aria-label="Refresh insights"
+            title="Refresh insights"
+          >
+            <RefreshCw className={`h-4 w-4 ${isRefreshingInsights ? "animate-spin motion-reduce:animate-none" : ""}`} />
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8 shrink-0 text-neutral-600 hover:text-farm-dark-green"
             aria-label="Collapse right sidebar"
             aria-controls="right-sidebar-panel"
             aria-expanded={true}
@@ -232,19 +108,17 @@ export default function ConversationSidebar({
             onClick={onCollapse}
           >
             <ChevronRight className="h-4 w-4" />
-          </button>
+          </Button>
         </div>
 
-        <TabsContent value="insights" className="flex-1 mt-0 min-h-0">
+        <TabsContent value="insights" className="mt-0 min-h-0 flex-1">
           <ScrollArea className="h-full w-full px-4">
             {insights && insights.length > 0 ? (
               insights.map((insight, index) => (
                 <Card key={index} className="mb-4">
                   <CardHeader>
                     <CardTitle className="text-sm font-medium">{insight.title}</CardTitle>
-                    <CardDescription className="text-xs text-neutral-500">
-                      Generated from conversation
-                    </CardDescription>
+                    <CardDescription className="text-xs text-neutral-600">Generated from conversation</CardDescription>
                   </CardHeader>
                   <CardContent>
                     <ul className="list-disc list-inside space-y-1">
@@ -256,79 +130,71 @@ export default function ConversationSidebar({
                 </Card>
               ))
             ) : (
-              <div className="text-center text-neutral-500 mt-12 space-y-4">
-                <div className="flex flex-col items-center space-y-2">
-                  <div className="text-4xl">📊</div>
-                  <p className="text-sm font-medium">No insights yet</p>
-                  <p className="text-xs">Experts will generate key insights as your discussion progresses</p>
-                </div>
+              <div className="mt-12 space-y-3 text-center text-neutral-600">
+                <BarChart3 className="mx-auto h-8 w-8 text-neutral-500" aria-hidden="true" />
+                <p className="text-sm font-medium">No insights yet</p>
+                <p className="text-xs">Experts will generate key insights as your discussion progresses.</p>
               </div>
             )}
           </ScrollArea>
         </TabsContent>
 
-        <TabsContent value="artifacts" className="flex-1 mt-0 min-h-0">
-          <ScrollArea className="h-full w-full px-4">
-            {allArtifacts.length > 0 ? (
-              allArtifacts.map((artifact, index) => (
-                <ArtifactDisplay key={index} artifact={artifact} />
-              ))
-            ) : (
-              <div className="text-center text-neutral-500 mt-8">
-                <div className="flex flex-col items-center space-y-2">
-                  <Code className="w-6 h-6 text-neutral-400" />
-                  <p className="text-sm">No artifacts generated yet.</p>
-                  <p className="text-xs">Experts will generate code, charts, tables, and more as you discuss!</p>
+        <TabsContent value="artifacts" className="mt-0 min-h-0 flex-1">
+          <div className="flex h-full min-h-0 flex-col">
+            <div className="flex items-center gap-2 px-4 py-3">
+              <Button
+                type="button"
+                size="sm"
+                variant={artifactFilter === "all" ? "default" : "outline"}
+                aria-pressed={artifactFilter === "all"}
+                onClick={() => setArtifactFilter("all")}
+              >
+                All ({allArtifacts.length})
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant={artifactFilter === "chart" ? "default" : "outline"}
+                aria-pressed={artifactFilter === "chart"}
+                onClick={() => setArtifactFilter("chart")}
+              >
+                <BarChart3 className="mr-1.5 h-4 w-4" />
+                Charts ({allArtifacts.filter((artifact) => artifact.type === "chart").length})
+              </Button>
+            </div>
+            <ScrollArea className="min-h-0 w-full flex-1 px-4">
+              {filteredArtifacts.length > 0 ? (
+                filteredArtifacts.map((artifact, index) => (
+                  <ArtifactDisplay key={`${artifact.title}-${index}`} artifact={artifact} />
+                ))
+              ) : (
+                <div className="mt-8 flex flex-col items-center space-y-2 text-center text-neutral-600">
+                  <Code className="h-6 w-6 text-neutral-500" aria-hidden="true" />
+                  <p className="text-sm">{artifactFilter === "chart" ? "No charts generated yet." : "No artifacts generated yet."}</p>
+                  <p className="text-xs">Artifacts from the discussion will appear here.</p>
                 </div>
-              </div>
-            )}
-          </ScrollArea>
-        </TabsContent>
-
-        <TabsContent value="visualizations" className="flex-1 mt-0 min-h-0">
-          <ScrollArea className="h-full w-full px-4">
-            {allArtifacts.filter((artifact) => artifact.type === 'chart').map((artifact, index) => (
-              <ArtifactDisplay key={`chart-${index}`} artifact={artifact} />
-            ))}
-            {activeVisualizations.map((vis, index) => (
-              <Card key={index} className="mb-4">
-                <CardHeader>
-                  <CardTitle className="text-sm font-medium">{vis.title}</CardTitle>
-                </CardHeader>
-                <CardContent>
-                  {renderVisualization(vis)}
-                </CardContent>
-              </Card>
-            ))}
-            {activeVisualizations.length === 0 && !allArtifacts.some((artifact) => artifact.type === 'chart') && (
-              <div className="text-center text-neutral-500 mt-8">
-                <div className="flex flex-col items-center space-y-2">
-                  <div className="flex space-x-2">
-                    <BarChart className="w-5 h-5" />
-                    <LineChart className="w-5 h-5" />
-                    <PieChart className="w-5 h-5" />
-                    <Map className="w-5 h-5" />
-                  </div>
-                  <p className="text-sm">No visualizations available yet.</p>
-                  <p className="text-xs">Ask the experts to create charts or share locations!</p>
-                </div>
-              </div>
-            )}
-          </ScrollArea>
+              )}
+            </ScrollArea>
+          </div>
         </TabsContent>
       </Tabs>
 
-      {/* Resizable handle - LEFT side (drag to resize) */}
       <div
-        onMouseDown={handleMouseDown}
-        onTouchStart={handleTouchStart}
-        className={`absolute -left-1 top-0 w-2 h-full hover:bg-farm-blue/30 cursor-col-resize transition-colors z-10 ${
-          isResizing ? "bg-farm-blue/50" : "bg-transparent"
-        }`}
-        style={{
-          borderLeft: isResizing ? '2px solid rgb(59 130 246)' : '1px solid rgb(229 231 235)'
-        }}
-        title="Drag to resize sidebar (300-800px)"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize right sidebar"
+        aria-controls="right-sidebar-panel"
+        aria-valuemin={minWidth}
+        aria-valuemax={maxWidth}
+        aria-valuenow={Math.round(currentWidth)}
+        tabIndex={0}
+        onPointerDown={handleResizeStart}
+        onPointerMove={handleResizeMove}
+        onPointerUp={stopResizing}
+        onPointerCancel={stopResizing}
+        onKeyDown={handleResizeKeyDown}
+        className={`absolute -left-1 top-0 z-10 h-full w-2 touch-none cursor-col-resize select-none transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-farm-blue hover:bg-farm-blue/30 ${isResizing ? "bg-farm-blue/50" : "bg-transparent"}`}
+        title="Drag or use arrow, Home, and End keys to resize the sidebar"
       />
     </div>
   );
