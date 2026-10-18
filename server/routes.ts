@@ -26,6 +26,7 @@ import { getWeatherForFarm, formatWeatherContext } from './weather';
 import { isDuplicateUserSubmission } from './text-similarity';
 import { format } from 'date-fns';
 import { TIERS, getTierLimits, isPaidModel } from './tiers';
+import { checkMessageAllowance, currentUsagePeriod, isHouseKeyAllowedModel, HOUSE_KEY_PAID_MODEL_ALLOWLIST, UsageCapError, monthlyAiBudgetUsd, BUDGET_EXHAUSTED_NOTICE } from './usage-caps';
 
 class OpenQuestionAnswerConflictError extends Error {}
 const rememberedAnswerTurnStarts = new Map<number, number>();
@@ -678,6 +679,32 @@ export async function registerRoutes(app: Express): Promise<Server> {
     return { questionId: question.id };
   }
 
+  async function assertMessageAllowance(userId: number): Promise<void> {
+    const user = await storage.getUser(userId);
+    const usage = await storage.getMonthlyUsage(userId, currentUsagePeriod());
+    const denial = checkMessageAllowance(user?.tier, usage.messageCount);
+    if (denial) throw new UsageCapError(denial);
+  }
+
+  async function recordUserMessage(userId: number): Promise<void> {
+    try {
+      await storage.incrementMonthlyMessages(userId, currentUsagePeriod());
+    } catch (err) {
+      console.error("[CAPS] failed to record message usage:", (err as Error).message);
+    }
+  }
+
+  function sendUsageCapError(res: Response, error: UsageCapError) {
+    const { status, ...body } = error.denial;
+    return res.status(status).json(body);
+  }
+
+  /** Pro on the house key may only pick allowlisted paid models (BYOK may pick any). */
+  async function houseKeyModelDenied(userId: number, tier: string, model: string): Promise<boolean> {
+    if (tier !== "pro" || isHouseKeyAllowedModel(model)) return false;
+    return !(await storage.getUserApiKey(userId));
+  }
+
   async function storeAndProcessUserMessage(
     userId: number,
     conversationId: number,
@@ -762,6 +789,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
       return { message: lastExistingMessage!, created: false };
     }
 
+    // Pricing caps: a "message" = one farmer message (see server/usage-caps.ts).
+    await assertMessageAllowance(userId);
+
     const conversationExperts = await storage.getConversationExperts(conversationId);
     const userMessage: InsertMessage = {
       conversationId,
@@ -782,6 +812,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } else {
       storedMessage = await storage.createMessage(userMessage);
     }
+    await recordUserMessage(userId);
 
     // Broadcast the saved answer itself for transcript compatibility, then
     // signal subscribers to refresh the question list after its status change.
@@ -859,9 +890,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
         });
       }
 
-      const priceId = process.env.STRIPE_PRICE_ID_PRO;
+      // The client chooses an interval only; price ids stay server-side.
+      const interval = req.body?.interval ?? "month";
+      if (interval !== "month" && interval !== "year") {
+        return res.status(400).json({ message: 'interval must be "month" or "year"' });
+      }
+      const priceId = interval === "year" ? process.env.STRIPE_PRICE_ID_PRO_ANNUAL : process.env.STRIPE_PRICE_ID_PRO;
       if (!priceId) {
-        { const r = billingUnavailable("Stripe Pro price ID not configured"); return res.status(r.status).json(r.body); }
+        { const r = billingUnavailable(interval === "year" ? "Stripe annual Pro price ID not configured" : "Stripe Pro price ID not configured"); return res.status(r.status).json(r.body); }
       }
 
       const session = await stripe.checkout.sessions.create({
@@ -904,7 +940,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Stripe subscription endpoints (legacy — keep for backward compat)
+  // Stripe subscription endpoints (legacy/retired — UI uses /api/create-checkout-session)
   app.post("/api/create-subscription", async (req, res) => {
     if (!req.isAuthenticated()) {
       return res.status(401).json({ message: "Authentication required" });
@@ -940,7 +976,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
       
       // Create subscription
-      const PRICE_ID = process.env.STRIPE_PRICE_ID;
+      // Retired: the UI now uses /api/create-checkout-session. Kept only for
+      // old clients; uses the same Pro price. STRIPE_PRICE_ID is a deprecated fallback.
+      const PRICE_ID = process.env.STRIPE_PRICE_ID_PRO || process.env.STRIPE_PRICE_ID;
       if (!PRICE_ID) {
         { const r = billingUnavailable("Stripe price ID not configured"); return res.status(r.status).json(r.body); }
       }
@@ -1040,7 +1078,18 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const user = await storage.getUser(req.user!.id);
       const tier = user?.tier || "free";
       const limits = getTierLimits(tier);
-      res.json({ tier, limits });
+      const usage = await storage.getMonthlyUsage(req.user!.id, currentUsagePeriod());
+      res.json({
+        tier,
+        limits,
+        usage: { period: currentUsagePeriod(), messages: usage.messageCount },
+        // True once house-key paid calls are falling back to free models.
+        aiBudgetExhausted: tier === "pro" && !user?.openRouterKey && usage.aiSpendUsd >= monthlyAiBudgetUsd(tier),
+        aiBudgetNotice: BUDGET_EXHAUSTED_NOTICE,
+        // Paid models usable on the house key (Pro); any model works with BYOK.
+        houseKeyModels: HOUSE_KEY_PAID_MODEL_ALLOWLIST,
+        hasOwnKey: Boolean(user?.openRouterKey),
+      });
     } catch (error: any) {
       res.status(500).json({ message: error.message });
     }
@@ -1171,6 +1220,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
           message: "Upgrade to Pro for paid models",
         });
       }
+      if (await houseKeyModelDenied(req.user!.id, tier, model)) {
+        return res.status(403).json({
+          code: "MODEL_REQUIRES_OWN_KEY",
+          message: `Pro includes ${HOUSE_KEY_PAID_MODEL_ALLOWLIST.join(", ")} and free models. Add your own OpenRouter key to use other models.`,
+        });
+      }
       
       const expert: InsertExpert = {
         conversationId,
@@ -1241,6 +1296,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
           return res.status(403).json({
             code: "TIER_LIMIT_MODEL",
             message: "Upgrade to Pro for paid models",
+          });
+        }
+        if (await houseKeyModelDenied(req.user!.id, tier, model)) {
+          return res.status(403).json({
+            code: "MODEL_REQUIRES_OWN_KEY",
+            message: `Pro includes ${HOUSE_KEY_PAID_MODEL_ALLOWLIST.join(", ")} and free models. Add your own OpenRouter key to use other models.`,
           });
         }
       }
@@ -1336,6 +1397,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       return res.status(result.created ? 201 : 200).json(result.message);
     } catch (error: any) {
       console.error("Error in POST /messages:", error);
+      if (error instanceof UsageCapError) return sendUsageCapError(res, error);
       if (error instanceof OpenQuestionAnswerConflictError) {
         return res.status(409).json({ message: error.message });
       }
@@ -1374,6 +1436,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       return res.status(result.created ? 201 : 200).json(result.message);
     } catch (error: any) {
       console.error("Error answering an open question:", error);
+      if (error instanceof UsageCapError) return sendUsageCapError(res, error);
       if (error instanceof OpenQuestionAnswerConflictError) {
         return res.status(409).json({ message: error.message });
       }
@@ -1404,6 +1467,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       let restartMessage: Message;
       if (requestedTopic) {
+        await assertMessageAllowance(req.user!.id);
         const conversationExperts = await storage.getConversationExperts(conversationId);
         restartMessage = await storage.createMessage({
           conversationId,
@@ -1413,6 +1477,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           role: "user",
           mentions: extractMentions(requestedTopic, conversationExperts.map(expert => expert.role)),
         });
+        await recordUserMessage(req.user!.id);
         broadcastToConversation(conversationId, restartMessage);
       } else {
         // Bare `/new` repeats the latest farmer topic as an explicit fresh
@@ -1436,6 +1501,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       res.status(requestedTopic ? 201 : 200).json(restartMessage);
     } catch (error: any) {
+      if (error instanceof UsageCapError) return sendUsageCapError(res, error);
       console.error("Error in POST /restart:", error);
       res.status(500).json({ message: error.message || "Internal server error" });
     }

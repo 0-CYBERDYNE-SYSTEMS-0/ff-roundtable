@@ -1,4 +1,4 @@
-import { pgTable, pgEnum, text, serial, integer, boolean, timestamp, json, jsonb, uniqueIndex, type AnyPgColumn } from "drizzle-orm/pg-core";
+import { pgTable, pgEnum, text, serial, integer, boolean, timestamp, json, jsonb, uniqueIndex, primaryKey, doublePrecision, type AnyPgColumn } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { sql } from "drizzle-orm";
 import { z } from "zod";
@@ -15,6 +15,19 @@ export const users = pgTable("users", {
   openRouterKey: text("open_router_key"),
   createdAt: timestamp("created_at").defaultNow(),
 });
+
+// Pricing caps: one row per user per UTC calendar month ("YYYY-MM").
+// messageCount = farmer messages; aiSpendUsd = house-key OpenRouter cost.
+export const usageMonthly = pgTable("usage_monthly", {
+  userId: integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  period: text("period").notNull(),
+  messageCount: integer("message_count").notNull().default(0),
+  aiSpendUsd: doublePrecision("ai_spend_usd").notNull().default(0),
+}, (table) => ({
+  pk: primaryKey({ columns: [table.userId, table.period] }),
+}));
+
+export type UsageMonthly = typeof usageMonthly.$inferSelect;
 
 // G7: minimal orchestrator snapshot persisted per turn boundary so a server
 // restart can recover honest state — dead loops (processing_*/autonomous)
