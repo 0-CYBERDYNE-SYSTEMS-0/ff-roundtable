@@ -4,7 +4,7 @@ import createMemoryStore from "memorystore";
 import session from "express-session";
 import { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
-import { eq, desc, asc, and, isNull, isNotNull } from "drizzle-orm";
+import { eq, desc, asc, and, isNull, isNotNull, max } from "drizzle-orm";
 import ConnectPgSimple from "connect-pg-simple";
 import type { DeliverableGenerationRequest, SaveDeliverableVersionResult } from "@shared/schema";
 
@@ -23,6 +23,8 @@ export class DeliverableConflictError extends Error {}
 
 // modify the interface with any CRUD methods
 // you might need
+export type ConversationWithActivity = Conversation & { updatedAt: Date | null };
+
 export interface IStorage {
   // User operations
   getUser(id: number): Promise<User | undefined>;
@@ -38,7 +40,8 @@ export interface IStorage {
   // Conversation operations
   createConversation(conversation: InsertConversation): Promise<Conversation>;
   getConversation(id: number): Promise<Conversation | undefined>;
-  getUserConversations(userId: number): Promise<Conversation[]>;
+  // `updatedAt` is computed: latest message timestamp, else createdAt.
+  getUserConversations(userId: number): Promise<ConversationWithActivity[]>;
   // Partial update (G6/G13): only provided keys change. Null clears the
   // charter or turn budget; omitted keys stay untouched.
   // G7: `orchestratorState` joins the allowlist so the orchestrator can
@@ -282,9 +285,16 @@ export class MemStorage implements IStorage {
     return this.conversations.get(id);
   }
   
-  async getUserConversations(userId: number): Promise<Conversation[]> {
+  async getUserConversations(userId: number): Promise<ConversationWithActivity[]> {
+    const lastMessageAt = new Map<number, Date>();
+    this.messages.forEach(message => {
+      const at = message.timestamp;
+      const current = lastMessageAt.get(message.conversationId);
+      if (at && (!current || at > current)) lastMessageAt.set(message.conversationId, at);
+    });
     return Array.from(this.conversations.values())
       .filter(conversation => conversation.userId === userId)
+      .map(conversation => ({ ...conversation, updatedAt: lastMessageAt.get(conversation.id) ?? conversation.createdAt }))
       .sort((a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0));
   }
 
@@ -783,12 +793,21 @@ export class PostgresStorage implements IStorage {
     return result[0];
   }
 
-  async getUserConversations(userId: number): Promise<Conversation[]> {
-    return this.db
+  async getUserConversations(userId: number): Promise<ConversationWithActivity[]> {
+    const rows = await this.db
       .select()
       .from(conversations)
       .where(eq(conversations.userId, userId))
       .orderBy(desc(conversations.createdAt));
+    if (rows.length === 0) return [];
+    const activity = await this.db
+      .select({ conversationId: messages.conversationId, lastAt: max(messages.timestamp) })
+      .from(messages)
+      .innerJoin(conversations, eq(messages.conversationId, conversations.id))
+      .where(eq(conversations.userId, userId))
+      .groupBy(messages.conversationId);
+    const lastMessageAt = new Map(activity.map(row => [row.conversationId, row.lastAt]));
+    return rows.map(row => ({ ...row, updatedAt: lastMessageAt.get(row.id) ?? row.createdAt }));
   }
 
   async updateConversation(id: number, updates: Partial<Pick<Conversation, "title" | "charter" | "orchestratorState" | "turnBudget">>): Promise<Conversation | undefined> {

@@ -304,6 +304,27 @@ describe("Conversations & Expert Flows", () => {
       expect(res.body).toEqual([]);
     });
 
+    it("includes updatedAt as the latest message time, falling back to createdAt", async () => {
+      const agent = request.agent(app);
+      await registerAndLogin(agent, "activityconvos", "pass123");
+      const quiet = await createConversation(agent, "Quiet");
+      const active = await createConversation(agent, "Active");
+      await new Promise((resolve) => setTimeout(resolve, 15));
+      const message = await storage.createMessage({
+        conversationId: active.id,
+        userId: null,
+        expertId: null,
+        content: "latest",
+        role: "assistant",
+      });
+
+      const res = await agent.get("/api/protected/conversations");
+      const byId = new Map<number, any>(res.body.map((c: any) => [c.id, c]));
+      expect(byId.get(quiet.id).updatedAt).toBe(byId.get(quiet.id).createdAt);
+      expect(byId.get(active.id).updatedAt).toBe(new Date(message.timestamp!).toISOString());
+      expect(byId.get(active.id).updatedAt > byId.get(active.id).createdAt).toBe(true);
+    });
+
     it("returns all conversations for authenticated user", async () => {
       const agent = request.agent(app);
       await registerAndLogin(agent, "manyconvos", "pass123");
