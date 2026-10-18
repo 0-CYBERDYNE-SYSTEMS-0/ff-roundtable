@@ -19,6 +19,8 @@ import { withRequestedOpenRouterModels } from "@/lib/openrouter-model-options";
 import {
   Dialog,
   DialogContent,
+  DialogHeader,
+  DialogTitle,
 } from "@/components/ui/dialog";
 
 // --- Define type for OpenRouter Model ---
@@ -115,6 +117,7 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
   const [errorLoadingModels, setErrorLoadingModels] = useState<string | null>(null);
   const [currentTab, setCurrentTab] = useState<string>(EXPERT_CATEGORIES.AGRICULTURE);
   const [selectedPreset, setSelectedPreset] = useState<string | null>(null);
+  const [selectionNotice, setSelectionNotice] = useState<{ unavailable: string[]; alreadyAdded: string[]; capped: string[] } | null>(null);
   const [userTier, setUserTier] = useState<string>("free");
   const [maxExperts, setMaxExperts] = useState<number>(3);
   const [customExperts, setCustomExperts] = useState<SelectableExpert[]>([]);
@@ -232,7 +235,10 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
   };
 
   // Handle selecting an expert
+  const remainingSlots = Math.max(0, maxExperts - selectedExperts.length);
+
   const toggleExpert = (index: number) => {
+    setSelectionNotice(null);
     const existingIndex = localSelectedExperts.findIndex(e => e.expertIndex === index);
 
     if (existingIndex !== -1) {
@@ -243,7 +249,7 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
       // Clear preset selection when manually changing experts
       setSelectedPreset(null);
     } else {
-      if (localSelectedExperts.length >= maxExperts) return;
+      if (localSelectedExperts.length >= remainingSlots) return;
 
       setLocalSelectedExperts(prev => [
         ...prev,
@@ -268,11 +274,24 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
 
     // Add all experts in the preset
     const newSelectedExperts: SelectedExpertState[] = [];
+    const unavailable: string[] = [];
+    const alreadyAdded: string[] = [];
+    const capped: string[] = [];
 
     preset.experts.forEach(expertRole => {
       const expertIndex = allExperts.findIndex(e => e.role === expertRole);
-      if (expertIndex === -1) return;
-      if (newSelectedExperts.length >= maxExperts) return;
+      if (expertIndex === -1) {
+        unavailable.push(expertRole);
+        return;
+      }
+      if (expertRoles.has(expertRole)) {
+        alreadyAdded.push(expertRole);
+        return;
+      }
+      if (newSelectedExperts.length >= remainingSlots) {
+        capped.push(expertRole);
+        return;
+      }
 
       newSelectedExperts.push({
         expertIndex,
@@ -282,6 +301,9 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
 
     setLocalSelectedExperts(newSelectedExperts);
     setSelectedPreset(presetName);
+    setSelectionNotice(unavailable.length || alreadyAdded.length || capped.length
+      ? { unavailable, alreadyAdded, capped }
+      : null);
   };
 
   // Handle changing model for an expert
@@ -296,6 +318,7 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
 
     // Clear preset selection when manually changing models
     setSelectedPreset(null);
+    setSelectionNotice(null);
   };
 
   // Handle adding experts to conversation
@@ -349,6 +372,9 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
   };
 
   const selectedCount = localSelectedExperts.length;
+  const selectedTotalCount = selectedExperts.length + selectedCount;
+  const isAtLimit = selectedTotalCount >= maxExperts;
+  const limitReason = `Your plan allows ${maxExperts} experts. Upgrade to add more.`;
 
   // Check if an expert is selected
   const isExpertSelected = (index: number) => {
@@ -375,12 +401,9 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
   return (
     <Dialog open={true} onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto p-4 md:p-6">
-      <div className="flex justify-between items-center mb-2">
-        <h2 className="font-serif font-bold text-xl md:text-2xl">Select Your Expert Team</h2>
-        <Button variant="ghost" size="icon" onClick={onClose}>
-          <X className="h-5 w-5" />
-        </Button>
-      </div>
+      <DialogHeader className="mb-2">
+        <DialogTitle className="font-serif text-xl font-bold md:text-2xl">Select Your Expert Team</DialogTitle>
+      </DialogHeader>
 
       <div className="flex items-center space-x-2 mb-4">
         <p className="text-sm text-gray-600">Choose AI experts for your agricultural roundtable. Each expert brings specialized knowledge and capabilities.</p>
@@ -391,9 +414,9 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
             </Button>
           </PopoverTrigger>
           <PopoverContent className="w-80 p-4">
-            <h4 className="font-medium mb-2">About Expert Selection</h4>
+            <h4 className="text-sm font-semibold mb-2">About Expert Selection</h4>
             <p className="text-sm text-gray-600 mb-3">Each expert uses a specialized AI model configured for their domain. You can customize which model powers each expert.</p>
-            <h5 className="font-medium text-xs mb-1">Tips:</h5>
+            <h5 className="text-xs font-semibold mb-1">Tips:</h5>
             <ul className="text-xs text-gray-600 space-y-1">
               <li>• Select 3-5 experts for balanced discussions</li>
               <li>• Choose experts from different categories for comprehensive insights</li>
@@ -405,7 +428,7 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
 
       {/* Quick Preset Selection */}
       <div className="mb-4">
-        <h3 className="text-sm font-medium mb-2">Recommended Presets</h3>
+        <h3 className="text-sm font-semibold mb-2">Recommended Presets</h3>
         <div className="flex flex-wrap gap-2">
           {EXPERT_PRESETS.map(preset => (
             <Button
@@ -427,10 +450,54 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
         )}
       </div>
 
+      {(selectedExperts.length > 0 || localSelectedExperts.length > 0) && (
+        <div className="mb-4 rounded-md border border-neutral-200 bg-neutral-50 p-2">
+          <p className="mb-2 text-xs font-medium text-neutral-700">In this roundtable or selected to add</p>
+          <div className="flex flex-wrap gap-2">
+            {selectedExperts.map((expert) => (
+              <Badge key={`existing-${expert.id}`} variant="secondary">{expert.role}</Badge>
+            ))}
+            {localSelectedExperts.map(({ expertIndex }) => (
+              <span key={expertIndex} className="inline-flex items-center gap-1 rounded-full border border-neutral-300 bg-white pl-2 text-xs text-neutral-700">
+                {allExperts[expertIndex]?.role}
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="h-6 w-6 rounded-full"
+                  aria-label={`Remove ${allExperts[expertIndex]?.role} from selection`}
+                  onClick={() => toggleExpert(expertIndex)}
+                >
+                  <X className="h-3 w-3" />
+                </Button>
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {selectionNotice && (
+        <div role="status" className="mb-4 space-y-1 rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-neutral-800">
+          {selectionNotice.unavailable.length > 0 && <p>Preset roles not available: {selectionNotice.unavailable.join(", ")}.</p>}
+          {selectionNotice.alreadyAdded.length > 0 && <p>Already in this roundtable: {selectionNotice.alreadyAdded.join(", ")}.</p>}
+          {selectionNotice.capped.length > 0 && (
+            <p>
+              Your plan allows {maxExperts} experts. {selectionNotice.capped.join(", ")} {selectionNotice.capped.length === 1 ? "was" : "were"} not added. <a className="font-semibold text-farm-dark-green underline" href="/subscribe">Upgrade your plan</a>.
+            </p>
+          )}
+        </div>
+      )}
+
+      {isAtLimit && (
+        <p className="mb-3 text-xs text-neutral-700" role="status">
+          Your plan allows {maxExperts} experts. Remove one or <a className="font-semibold text-farm-dark-green underline" href="/subscribe">upgrade your plan</a> to add another.
+        </p>
+      )}
+
       {/* Loading/Error States */}
       {isLoadingModels && (
         <div className="flex items-center justify-center py-4">
-          <div className="animate-spin mr-2">
+          <div className="animate-spin motion-reduce:animate-none mr-2">
             <div className="h-5 w-5 border-2 border-primary border-t-transparent rounded-full"></div>
           </div>
           <span className="text-sm">Loading AI models...</span>
@@ -458,7 +525,7 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
             <div className="flex items-center">
               <span className="text-xs text-gray-500 mr-2">Selected:</span>
               <Badge variant="outline" className="font-medium">
-                {selectedCount}/{maxExperts}
+                {selectedTotalCount}/{maxExperts}
               </Badge>
             </div>
           </div>
@@ -494,6 +561,8 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
                       onToggle={() => toggleExpert(actualIndex)}
                       onChangeModel={(newModel) => changeExpertModel(actualIndex, newModel)}
                       userTier={userTier}
+                      isAtLimit={isAtLimit}
+                      limitReason={limitReason}
                     />
                   );
                 })}
@@ -507,16 +576,14 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
       <div className="mt-4 pt-4 border-t border-neutral-300 flex flex-col sm:flex-row justify-between items-center gap-3">
         <div className="text-center sm:text-left w-full sm:w-auto">
           {selectedCount === 0 ? (
-            <p className="text-sm text-amber-600">Please select at least one expert</p>
-          ) : selectedCount > maxExperts ? (
-            <p className="text-sm text-red-600">Maximum {maxExperts} experts allowed on your plan</p>
+            <p className="text-sm text-amber-700">Please select at least one expert</p>
           ) : (
-            <p className="text-sm text-green-600">Your team is ready to join the conversation</p>
+            <p className="text-sm text-farm-dark-green">Your team is ready to join the conversation</p>
           )}
         </div>
         <Button
           onClick={handleAddExperts}
-          disabled={selectedCount < 1 || selectedCount > maxExperts || isLoadingModels}
+          disabled={selectedCount < 1 || selectedTotalCount > maxExperts || isLoadingModels}
           className="bg-primary hover:bg-primary/90 px-6 w-full sm:w-auto"
         >
           Add {selectedCount > 0 ? `${selectedCount} ` : ''}Expert{selectedCount !== 1 ? 's' : ''} to Roundtable
