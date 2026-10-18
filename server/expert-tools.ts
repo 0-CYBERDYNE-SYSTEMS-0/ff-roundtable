@@ -195,7 +195,7 @@ title: <short descriptive title>
 <markdown content>
 \`\`\`
 Reusing the same title revises that document as a new version. You may only revise documents you wrote (or that the farmer explicitly asked you to change); otherwise your block is saved as a proposal for the owner.
-- Charts: only from numbers the farmer gave, the weather data provided, or the research results. Every chart JSON must include "title" (specific, e.g. "June rainfall vs. 30-yr normal, Ames IA") and "sources" (list of URLs from RESEARCH RESULTS, or "farmer" / "weather"). If you have no real data, do not make a chart. Never use example or illustrative numbers.`;
+- Charts: put the chart JSON in a fenced block tagged \`chart\` (\`\`\`chart ... \`\`\`), never \`json\`, with every brace closed. Only from numbers the farmer gave, the weather data provided, or the research results. Every chart JSON must include "title" (specific, e.g. "June rainfall vs. 30-yr normal, Ames IA") and "sources" (list of URLs from RESEARCH RESULTS, or "farmer" / "weather"). If you have no real data, do not make a chart. Never use example or illustrative numbers.`;
 }
 
 // ---------- Deliverables ----------
@@ -320,13 +320,40 @@ export async function saveExpertDeliverable(
 
 const GENERIC_TITLES = /^(chart( artifact)?|visual aid|data|trend|untitled|seasonal agricultural trends)$/i;
 
+/** Models often drop trailing closers from long JSON; add the missing ones before giving up. */
+function parseChartJson(text: string): unknown | null {
+  try { return JSON.parse(text); } catch { /* try repair below */ }
+  const closers: string[] = [];
+  let inString = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inString) {
+      if (c === "\\") i++;
+      else if (c === '"') inString = false;
+    } else if (c === '"') inString = true;
+    else if (c === "{") closers.push("}");
+    else if (c === "[") closers.push("]");
+    else if (c === "}" || c === "]") { if (closers.pop() !== c) return null; }
+  }
+  if (inString || !closers.length) return null;
+  try { return JSON.parse(text + closers.reverse().join("")); } catch { return null; }
+}
+
+/** Shown in place of a chart that failed validation, so the farmer is not left with a dangling "here it is". */
+export function droppedChartNote(dropped: number): string {
+  return dropped
+    ? `\n\n_I couldn't produce a valid chart${dropped > 1 ? "s" : ""} this time. Ask me to try again, and I'll rebuild ${dropped > 1 ? "them" : "it"}._`
+    : "";
+}
+
 /**
  * Keeps a chart only when it is labeled and every source is real: a URL
  * retrieved this turn, "farmer", or "weather". Returns null to drop it.
  */
 export function validateChartArtifact(chartJson: string, allowedUrls: string[]): { json: string; title: string } | null {
-  let chart: any;
-  try { chart = JSON.parse(chartJson); } catch { return null; }
+  const chart0 = parseChartJson(chartJson);
+  if (!chart0) return null;
+  let chart: any = chart0;
   if (chart?.type === "vega-lite") {
     const parsed = parseVegaChart(chart);
     if (!parsed) return null;

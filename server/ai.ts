@@ -17,7 +17,7 @@ export { commitPendingDeliverable, discardPendingDeliverable } from "./pending-d
 import { enforceCitationIntegrity, removeUnsupportedCitedSentences, stripMetaLines, undecorate, mergeDuplicateFarmerQuestions, removeRepeatedExpertSentences } from "./response-hygiene";
 import {
   buildToolUsePrompt, buildToolPlanningPrompt, parseToolPlan, runToolCalls, formatToolResultsForPrompt,
-  toolCallLimitForTier, extractDeliverable, saveExpertDeliverable, filterChartArtifacts, type ToolRun,
+  toolCallLimitForTier, extractDeliverable, saveExpertDeliverable, filterChartArtifacts, droppedChartNote, type ToolRun,
 } from "./expert-tools";
 
 /** Expert tools are on by default; EXPERT_TOOLS=off disables them. Unit tests never hit the network. */
@@ -1275,6 +1275,8 @@ export async function getExpertResponseStream(
       ? appendRetrievedCitationUrls(cleanContent, response.citations)
       : { content: cleanContent, addition: "" };
     if (researchAnswer.addition) onToken(researchAnswer.addition);
+    const chartNote = droppedChartNote(droppedCharts);
+    if (chartNote) { onToken(chartNote); researchAnswer.content += chartNote; }
 
     const streamedMessage: InsertMessage = {
       conversationId: expert.conversationId,
@@ -1408,11 +1410,12 @@ export async function getExpertResponse(
     
     requireNonEmptyAssistantContent(response);
     const extractedNonStream = extractArtifacts(response.message.content);
-    const { kept: artifacts } = filterChartArtifacts(extractedNonStream.artifacts, []);
+    const { kept: artifacts, dropped: droppedChartsNonStream } = filterChartArtifacts(extractedNonStream.artifacts, []);
     const cleanContent = extractedNonStream.cleanContent;
     const researchAnswer = expert.role === "Research Analyst"
       ? appendRetrievedCitationUrls(cleanContent, response.citations)
       : { content: cleanContent, addition: "" };
+    researchAnswer.content += droppedChartNote(droppedChartsNonStream);
 
     return {
       conversationId: expert.conversationId,
