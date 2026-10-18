@@ -857,7 +857,7 @@ export default function ChatInterface({
                   return (
                     <div key={message.id} className="flex items-start mb-4 justify-end">
                       <div className="bg-gradient-to-br from-farm-blue to-farm-dark-green text-white rounded-xl p-4 max-w-[min(85%,calc(100%_-_52px))] shadow-md">
-                        {message.timestamp && <time className="mb-2 block text-right text-xs text-white/80" dateTime={message.timestamp.toISOString()}>{format(message.timestamp, "h:mm a")}</time>}
+                        {message.timestamp && <time className="mb-2 block text-right text-xs text-white/80" dateTime={new Date(message.timestamp).toISOString()}>{format(new Date(message.timestamp), "h:mm a")}</time>}
                         <MentionChips mentions={message.mentions} experts={experts} className="mb-2" />
                         <div className="markdown-content [overflow-wrap:anywhere] prose-sm prose-invert leading-relaxed">
                           <UserMessageContent content={message.content} renderBody={renderMessageBody} />
@@ -896,7 +896,7 @@ export default function ChatInterface({
                           <div className="flex flex-wrap items-start justify-between gap-2 mb-2">
                             <div className="flex min-w-0 flex-wrap items-center gap-2">
                               <p className="min-w-0 break-words text-sm font-semibold text-farm-blue">{speakerName} <span className="text-neutral-600 font-normal">({speakerRole})</span></p>
-                              {message.timestamp && <time className="text-xs text-neutral-600" dateTime={message.timestamp.toISOString()}>{format(message.timestamp, "h:mm a")}</time>}
+                              {message.timestamp && <time className="text-xs text-neutral-600" dateTime={new Date(message.timestamp).toISOString()}>{format(new Date(message.timestamp), "h:mm a")}</time>}
                               {/* G5: the Moderator's closing synthesis of the roundtable */}
                               {message.isSynthesis && (
                                 <span className="inline-flex items-center gap-1 rounded-full border border-amber-300/60 bg-amber-100 px-2 py-0.5 text-xs font-medium leading-none text-amber-800 flex-shrink-0">
