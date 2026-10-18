@@ -1140,8 +1140,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(409).json({ message: "Wait for the discussion to finish before deleting this conversation." });
       }
 
+      const conversationFiles = await storage.getConversationFiles(conversationId);
       await discardConversationState(conversationId);
       await storage.deleteConversation(conversationId);
+      // Best-effort: the rows are gone, so a leftover file must not fail the request.
+      for (const file of conversationFiles) {
+        const filePath = getStoredUploadPath(file);
+        if (filePath) await fs.promises.unlink(filePath).catch(() => {});
+      }
       res.status(204).end();
     } catch (error: any) {
       res.status(500).json({ message: error.message });
@@ -1249,6 +1255,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
       await storage.deleteExpert(expertId);
       // Idle state caches the roster; drop it so the next message rebuilds it.
       await discardConversationState(conversationId);
+      // A persisted paused snapshot indexes the old roster; clear it so
+      // resume cannot restore a stale expert index.
+      await storage.updateConversation(conversationId, { orchestratorState: null });
       res.status(204).end();
     } catch (error: any) {
       res.status(500).json({ message: error.message });

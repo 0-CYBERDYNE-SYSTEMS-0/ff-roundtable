@@ -77,7 +77,7 @@ export default function HomePage() {
   const [showFarmProfileModal, setShowFarmProfileModal] = useState(false);
   const [farmProfileModalDismissed, setFarmProfileModalDismissed] = useState(() => {
     try {
-      return localStorage.getItem("ffFarmProfileDismissed") === "1";
+      return user ? localStorage.getItem(`ffFarmProfileDismissed:${user.id}`) === "1" : false;
     } catch {
       return false;
     }
@@ -95,7 +95,7 @@ export default function HomePage() {
     setShowFarmProfileModal(false);
     setFarmProfileModalDismissed(true);
     try {
-      localStorage.setItem("ffFarmProfileDismissed", "1");
+      if (user) localStorage.setItem(`ffFarmProfileDismissed:${user.id}`, "1");
     } catch {
       // Keep the modal dismissed for this session when storage is unavailable.
     }
@@ -665,6 +665,8 @@ export default function HomePage() {
     if (createConversationMutation.isPending) return;
     try {
       await createConversationMutation.mutateAsync();
+      // Drop the previous conversation's roster so remaining slots are computed for the new one.
+      setSelectedExperts([]);
       setShowExpertSelector(true);
     } catch {
       // The mutation owns the user-facing error toast.

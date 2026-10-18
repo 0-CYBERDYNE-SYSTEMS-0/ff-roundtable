@@ -181,9 +181,12 @@ export default function SidebarPanel({
     }
   };
 
-  const displayedConversations = conversations.filter((conversation) =>
-    (conversation.title ?? "").toLowerCase().includes(conversationSearch.trim().toLowerCase())
-  );
+  // The search input only renders at 10+ conversations, so only filter then.
+  const displayedConversations = conversations.length >= 10
+    ? conversations.filter((conversation) =>
+        (conversation.title ?? "").toLowerCase().includes(conversationSearch.trim().toLowerCase())
+      )
+    : conversations;
   
   return (
     <aside className="w-full min-w-0 h-full min-h-0 overflow-hidden bg-card bg-gradient-to-b from-farm-powder/5 to-card border-r border-farm-tan/30 flex flex-col z-10 shadow-lg">

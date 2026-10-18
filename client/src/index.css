@@ -214,11 +214,11 @@
 
 /* Brand text colors are too dark to read on dark surfaces; their background
    uses (white text on brand color) stay unchanged. */
-.dark .text-primary,
-.dark .text-farm-blue {
+.dark .text-primary:not(:hover),
+.dark .text-farm-blue:not(:hover) {
   color: #5cc8e0;
 }
 
-.dark .text-farm-dark-green {
+.dark .text-farm-dark-green:not(:hover) {
   color: #7bc67e;
 }
