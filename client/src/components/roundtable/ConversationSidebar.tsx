@@ -88,7 +88,7 @@ export default function ConversationSidebar({
             type="button"
             variant="ghost"
             size="icon"
-            className="h-8 w-8 shrink-0 text-neutral-600 hover:text-farm-dark-green"
+            className="h-8 w-8 shrink-0 text-neutral-600 hover:bg-neutral-100 hover:text-farm-dark-green"
             onClick={onRefreshInsights}
             disabled={isRefreshingInsights}
             aria-label="Refresh insights"
@@ -100,7 +100,7 @@ export default function ConversationSidebar({
             type="button"
             variant="ghost"
             size="icon"
-            className="h-8 w-8 shrink-0 text-neutral-600 hover:text-farm-dark-green"
+            className="h-8 w-8 shrink-0 text-neutral-600 hover:bg-neutral-100 hover:text-farm-dark-green"
             aria-label="Collapse right sidebar"
             aria-controls="right-sidebar-panel"
             aria-expanded={true}

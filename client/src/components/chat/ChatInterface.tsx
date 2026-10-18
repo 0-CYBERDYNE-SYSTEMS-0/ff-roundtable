@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { AtSign, Bot, Paperclip, Send, Loader2, Users, ScrollText, ChevronLeft, ChevronDown, ChevronUp, X } from "lucide-react";
+import { AtSign, Bot, Paperclip, Send, Loader2, Users, ScrollText, PanelRight, ChevronLeft, ChevronDown, ChevronUp, X } from "lucide-react";
 import { Message, Expert, User, OpenQuestion } from "@shared/schema";
 import { format } from "date-fns";
 import ReactMarkdown from "react-markdown";
@@ -255,6 +255,15 @@ export default function ChatInterface({
     typeof window === "undefined" ? 0 : window.innerWidth - (isMobile ? 0 : 288),
   );
   const isCompactLayout = isMobile || layoutWidth < 876;
+
+  useEffect(() => {
+    if (!isCompactLayout || !showMobileRightSidebar) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setShowMobileRightSidebar(false);
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [isCompactLayout, showMobileRightSidebar]);
   const minimumChatWidth = layoutWidth < 600 ? 256 : 560;
   const maximumRightSidebarWidth = isCompactLayout
     ? Math.max(300, Math.min(800, layoutWidth - 24))
@@ -763,7 +772,7 @@ export default function ChatInterface({
                   aria-label={showMobileRightSidebar ? "Close insights and artifacts" : "Open insights and artifacts"}
                   title="Insights and artifacts"
                 >
-                  <ScrollText className="h-4 w-4" />
+                  <PanelRight className="h-4 w-4" />
                 </Button>
               )}
             </div>

@@ -1259,7 +1259,7 @@ export default function HomePage() {
         <div className="flex-1 flex flex-col overflow-hidden min-h-0">
             {(socketStatus !== "connected" || activeConversation) && (
               <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border bg-white px-3 py-2 md:px-6">
-                <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2 text-sm">
+                <div className="flex min-w-0 basis-full flex-wrap items-center gap-2 text-sm md:flex-1 md:basis-0">
                   <span role="status" aria-live="polite" className="font-medium text-neutral-800">{statusMessage}</span>
                   {expertTurnCounts && (
                     <span className="text-xs text-neutral-600" aria-live="polite">
