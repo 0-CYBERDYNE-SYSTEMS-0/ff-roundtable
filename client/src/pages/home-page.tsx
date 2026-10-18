@@ -1187,7 +1187,7 @@ export default function HomePage() {
         <div
           ref={sidebarDrawerRef}
           id="left-sidebar-drawer"
-          className={`relative h-full min-h-0 shrink-0 ${isMobile ? 'absolute inset-y-0 left-0 z-30 transition-transform duration-300' : ''} ${isMobile && !sidebarOpen ? '-translate-x-full' : ''}`}
+          className={`h-full min-h-0 shrink-0 ${isMobile ? 'absolute inset-y-0 left-0 z-30 transition-transform duration-300' : 'relative'} ${isMobile && !sidebarOpen ? '-translate-x-full' : ''}`}
           style={{ width: isMobile ? DEFAULT_LEFT_SIDEBAR_WIDTH : isLeftSidebarCollapsed ? COLLAPSED_SIDEBAR_RAIL_WIDTH : leftSidebarWidth }}
           aria-hidden={isMobile && !sidebarOpen}
         >
