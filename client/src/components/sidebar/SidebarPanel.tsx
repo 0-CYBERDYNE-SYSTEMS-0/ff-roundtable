@@ -43,8 +43,11 @@ function readCalendarStart(conversationId: number | null): string | null {
   }
 }
 
+// The conversations list API adds a computed updatedAt (latest message time).
+export type ConversationSummary = Conversation & { updatedAt?: Date | string | null };
+
 interface SidebarPanelProps {
-  conversations: Conversation[];
+  conversations: ConversationSummary[];
   files: FileSchema[];
   onStartNewSession: () => void;
   onExportMarkdown: () => void;
@@ -85,7 +88,7 @@ export default function SidebarPanel({
   const [conversationSearch, setConversationSearch] = useState("");
   const [editingConversationId, setEditingConversationId] = useState<number | null>(null);
   const [editingTitle, setEditingTitle] = useState("");
-  const [deleteTarget, setDeleteTarget] = useState<Conversation | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<ConversationSummary | null>(null);
   const [calendarStart, setCalendarStart] = useState(() => readCalendarStart(activeConversationId) ?? nextMondayDate());
   const [calendarPreview, setCalendarPreview] = useState<CalendarPreview | null>(null);
   const [isLoadingCalendarPreview, setIsLoadingCalendarPreview] = useState(false);
@@ -324,7 +327,7 @@ export default function SidebarPanel({
                 ) : (
                   <div className="space-y-2">
                     {displayedConversations.map((conversation) => {
-                      const lastActivity = (conversation as Conversation & { updatedAt?: Date | string | null }).updatedAt ?? conversation.createdAt;
+                      const lastActivity = conversation.updatedAt ?? conversation.createdAt;
                       const title = conversation.title || "Untitled conversation";
                       const rowClass = `flex items-center gap-1 rounded-lg border p-1 ${activeConversationId === conversation.id ? "border-farm-blue bg-farm-powder/30" : "border-border bg-white hover:bg-farm-powder/10"}`;
 

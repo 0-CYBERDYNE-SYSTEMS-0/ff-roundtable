@@ -805,6 +805,7 @@ export default function HomePage() {
     },
     onSuccess: (_conversationId, variables) => {
       queryClient.invalidateQueries({ queryKey: [`/api/protected/conversations/${variables.conversationId}/experts`] });
+      queryClient.invalidateQueries({ queryKey: [`/api/protected/conversations/${variables.conversationId}/messages`] });
     },
     onError: (error: Error) => {
       toast({ title: "Failed to remove expert", description: error.message, variant: "destructive" });
