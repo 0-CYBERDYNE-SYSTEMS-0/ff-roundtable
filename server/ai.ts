@@ -10,14 +10,15 @@ import path from "path";
 import fs from "fs";
 import axios from "axios";
 import { randomBytes } from "crypto";
-import { getProvider } from "./ai-providers";
+import { getProvider, type ChatOptions } from "./ai-providers";
+import { BUDGET_FALLBACK_MODEL, EXPERT_REPLY_MAX_TOKENS } from "./usage-caps";
 import { findCatalogExpert } from "@shared/expert-catalog";
 import { DELIVERABLE_PLACEHOLDER, pendingDeliverableFor, pendingDeliverableByMessage } from "./pending-deliverables";
 export { commitPendingDeliverable, discardPendingDeliverable } from "./pending-deliverables";
 import { enforceCitationIntegrity, removeUnsupportedCitedSentences, stripMetaLines, undecorate, mergeDuplicateFarmerQuestions, removeRepeatedExpertSentences } from "./response-hygiene";
 import {
   buildToolUsePrompt, buildToolPlanningPrompt, parseToolPlan, runToolCalls, formatToolResultsForPrompt,
-  toolCallLimitForTier, extractDeliverable, saveExpertDeliverable, filterChartArtifacts, droppedChartNote, type ToolRun,
+  toolCallLimitForTier, extractDeliverable, saveExpertDeliverable, filterChartArtifacts, type ChartArtifactRejectionReason, type ChartEvidence, type ToolRun,
 } from "./expert-tools";
 
 /** Expert tools are on by default; EXPERT_TOOLS=off disables them. Unit tests never hit the network. */
@@ -25,10 +26,29 @@ export function expertToolsEnabled(): boolean {
   return process.env.EXPERT_TOOLS !== "off" && !process.env.VITEST;
 }
 
+const CHART_REJECTION_NOTICE = "\n\nI couldn't render the chart because its data, source, or specification failed validation. Please provide or confirm the source data, and I'll try again.";
+
+function logRejectedCharts(role: string, reasons: ChartArtifactRejectionReason[]): void {
+  if (!reasons.length) return;
+  const counts = reasons.reduce<Record<string, number>>((totals, reason) => {
+    totals[reason] = (totals[reason] ?? 0) + 1;
+    return totals;
+  }, {});
+  console.warn(`[CHARTS] rejected ${reasons.length} chart(s) from ${role}: ${JSON.stringify(counts)}`);
+}
+
 /** Paid OpenRouter web plugin only on explicit opt-in; free DuckDuckGo tools are the default. */
 function paidWebPluginEnabled(): boolean {
   return process.env.OPENROUTER_WEB_PLUGIN === "true";
 }
+
+/** Search planning is a tiny routing task: run it on a free model (override with TOOL_PLANNING_MODEL). */
+function toolPlanningModel(): string {
+  return process.env.TOOL_PLANNING_MODEL?.trim() || BUDGET_FALLBACK_MODEL;
+}
+
+/** Expert reply calls see the last N transcript messages (was 15). */
+const EXPERT_HISTORY_MESSAGES = 8;
 
 async function runExpertToolPhase(expert: Expert, question: string, userId?: number): Promise<ToolRun | null> {
   if (!expertToolsEnabled() || expert.role === "Moderator" || expert.role === "File Creator") return null;
@@ -40,7 +60,7 @@ async function runExpertToolPhase(expert: Expert, question: string, userId?: num
     const planning = await callOpenRouterAPI([
       { role: "system", content: buildToolPlanningPrompt(expert.role, question, limit) },
       { role: "user", content: "List your tool calls now (or NONE)." },
-    ], expert.model, userId);
+    ], toolPlanningModel(), userId);
     plan = planning.message.content ?? "NONE";
   } catch (error) {
     console.warn(`[TOOLS] planning failed for ${expert.role}: ${(error as Error).message}`);
@@ -773,9 +793,9 @@ Uploaded images are delivered to you directly as native vision input — describ
 }
 
 // Function to call AI API (routes through provider abstraction)
-export async function callOpenRouterAPI(messages: AIMessage[], model: string, userId?: number, webSearch = false): Promise<AIModelResponse> {
+export async function callOpenRouterAPI(messages: AIMessage[], model: string, userId?: number, webSearch = false, options?: ChatOptions): Promise<AIModelResponse> {
   const provider = getProvider(model);
-  return provider.chat(messages, model, userId, webSearch);
+  return provider.chat(messages, model, userId, webSearch, options);
 }
 
 // Function to call AI API with streaming (SSE) — routes through provider abstraction
@@ -784,10 +804,11 @@ export async function callOpenRouterAPIStream(
   model: string,
   onToken: (token: string) => void,
   userId?: number,
-  webSearch = false
+  webSearch = false,
+  options?: ChatOptions
 ): Promise<AIModelResponse> {
   const provider = getProvider(model);
-  return provider.chatStream(messages, model, onToken, userId, webSearch);
+  return provider.chatStream(messages, model, onToken, userId, webSearch, options);
 }
 
 const PERPLEXITY_RESEARCH_SYSTEM_PROMPT = `You are a Research Analyst specializing in agriculture. Provide concise, accurate information with relevant citations. Keep responses short. Where possible, place exact retrieved URLs next to the factual claims they support; use only URLs returned by retrieval and do not imply independent verification. Distinguish farmer facts, fictional or example prices and inputs, calculations, and assumptions. Qualify recommendations when evidence or farm-specific inputs are missing.`;
@@ -1175,7 +1196,7 @@ export async function getExpertResponseStream(
    messages.push(...history.map(msg => ({
       role: mapDbRoleToApiRole(msg.role),
       content: truncateForModel(msg.content)
-   })).slice(-15));
+   })).slice(-EXPERT_HISTORY_MESSAGES));
 
    // G9 legibility: carried-forward context — the latest insight from a prior
    // sequence rides along as a compact system block (zero extra model calls).
@@ -1227,6 +1248,7 @@ export async function getExpertResponseStream(
           streamFilter ? token => streamFilter!.push(token) : onToken,
           conversation?.userId,
           paidWebPluginEnabled(),
+          { maxTokens: EXPERT_REPLY_MAX_TOKENS },
         );
         streamFilter?.finish();
         stance = stripExpertStance(response, expert.role);
@@ -1250,6 +1272,8 @@ export async function getExpertResponseStream(
         expert.model,
         streamFilter ? token => streamFilter!.push(token) : onToken,
         conversation?.userId,
+        false,
+        { maxTokens: EXPERT_REPLY_MAX_TOKENS },
       );
       streamFilter?.finish();
       stance = stripExpertStance(response, expert.role);
@@ -1264,19 +1288,25 @@ export async function getExpertResponseStream(
       : extractDeliverable(response.message.content);
     const extracted = extractArtifacts(deliverableSplit.cleanContent);
     const allowedChartUrls = toolRun?.sources.map(src => src.url) ?? [];
-    const { kept: artifacts, dropped: droppedCharts } = filterChartArtifacts(extracted.artifacts, allowedChartUrls);
-    if (droppedCharts) console.log(`[CHARTS] dropped ${droppedCharts} unsourced chart(s) from ${expert.role}`);
+    const chartEvidence: ChartEvidence = {
+      farmerText: history.filter(message => message.role === "user").map(message => message.content).join("\n"),
+      weatherText: weatherContext,
+    };
+    const { kept: artifacts, dropped: droppedCharts, droppedReasons } = filterChartArtifacts(extracted.artifacts, allowedChartUrls, chartEvidence);
+    logRejectedCharts(expert.role, droppedReasons);
     const finalized = expert.role === "File Creator" || expert.role === "Moderator"
       ? { content: extracted.cleanContent, addition: "" }
       : await finalizeExpertTools(expert, extracted.cleanContent, toolRun, deliverableSplit.deliverable, history);
     if (finalized.addition) onToken(finalized.addition);
-    const cleanContent = finalized.content;
+    let cleanContent = finalized.content;
+    if (droppedCharts) {
+      cleanContent += CHART_REJECTION_NOTICE;
+      onToken(CHART_REJECTION_NOTICE);
+    }
     const researchAnswer = expert.role === "Research Analyst"
       ? appendRetrievedCitationUrls(cleanContent, response.citations)
       : { content: cleanContent, addition: "" };
     if (researchAnswer.addition) onToken(researchAnswer.addition);
-    const chartNote = droppedChartNote(droppedCharts);
-    if (chartNote) { onToken(chartNote); researchAnswer.content += chartNote; }
 
     const streamedMessage: InsertMessage = {
       conversationId: expert.conversationId,
@@ -1355,7 +1385,7 @@ export async function getExpertResponse(
    messages.push(...history.map(msg => ({
       role: mapDbRoleToApiRole(msg.role),
       content: truncateForModel(msg.content)
-   })).slice(-15));
+   })).slice(-EXPERT_HISTORY_MESSAGES));
 
    // G9 legibility: same carried-forward PRIOR DECISIONS block as the
    // streaming path. Optional context: storage hiccups are skipped.
@@ -1389,7 +1419,7 @@ export async function getExpertResponse(
       if (process.env.PERPLEXITY_API_KEY) {
         response = await callPerplexityAPI(referenceMessageContent, messages);
       } else {
-        response = await callOpenRouterAPI(messages, expert.model, conversation?.userId, paidWebPluginEnabled());
+        response = await callOpenRouterAPI(messages, expert.model, conversation?.userId, paidWebPluginEnabled(), { maxTokens: EXPERT_REPLY_MAX_TOKENS });
       }
     } 
     else if (expert.role === "File Creator") {
@@ -1401,7 +1431,7 @@ export async function getExpertResponse(
        response.message.content = deliverableSuccessMessage(saved, request);
     }
     else {
-      response = await callOpenRouterAPI(messages, expert.model, conversation?.userId);
+      response = await callOpenRouterAPI(messages, expert.model, conversation?.userId, false, { maxTokens: EXPERT_REPLY_MAX_TOKENS });
     }
 
     if (expert.role !== "File Creator") {
@@ -1410,12 +1440,15 @@ export async function getExpertResponse(
     
     requireNonEmptyAssistantContent(response);
     const extractedNonStream = extractArtifacts(response.message.content);
-    const { kept: artifacts, dropped: droppedChartsNonStream } = filterChartArtifacts(extractedNonStream.artifacts, []);
-    const cleanContent = extractedNonStream.cleanContent;
+    const chartEvidence: ChartEvidence = {
+      farmerText: history.filter(message => message.role === "user").map(message => message.content).join("\n"),
+    };
+    const { kept: artifacts, dropped: droppedCharts, droppedReasons } = filterChartArtifacts(extractedNonStream.artifacts, [], chartEvidence);
+    logRejectedCharts(expert.role, droppedReasons);
+    const cleanContent = extractedNonStream.cleanContent + (droppedCharts ? CHART_REJECTION_NOTICE : "");
     const researchAnswer = expert.role === "Research Analyst"
       ? appendRetrievedCitationUrls(cleanContent, response.citations)
       : { content: cleanContent, addition: "" };
-    researchAnswer.content += droppedChartNote(droppedChartsNonStream);
 
     return {
       conversationId: expert.conversationId,

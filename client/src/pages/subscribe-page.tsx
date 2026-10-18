@@ -1,103 +1,25 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { useAuth } from '@/hooks/use-auth';
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Loader2, CheckCircle2, AlertTriangle } from "lucide-react";
-import { useStripe, Elements, PaymentElement, useElements } from '@stripe/react-stripe-js';
-import { loadStripe } from '@stripe/stripe-js';
+import { Loader2, CheckCircle2 } from "lucide-react";
 import { Redirect } from 'wouter';
 import Header from "@/components/layout/Header";
-import { queryClient } from '@/lib/queryClient';
 
-// Development mode flag - uses Vite's env to determine dev vs production
-const DEVELOPMENT_MODE = import.meta.env.DEV;
+// Pro checkout goes through Stripe Checkout (/api/create-checkout-session).
+// The client sends only an interval; the server maps it to
+// STRIPE_PRICE_ID_PRO (monthly) or STRIPE_PRICE_ID_PRO_ANNUAL (yearly).
+type BillingInterval = "month" | "year";
+const PLAN_LABELS: Record<BillingInterval, { price: string; note: string }> = {
+  month: { price: "$10/month", note: "Billed monthly. Cancel anytime." },
+  year: { price: "$96/year", note: "Save 20% (equal to $8/month). Billed yearly." },
+};
 
-// Check for Stripe public key
-const stripeKey = import.meta.env.VITE_STRIPE_PUBLIC_KEY;
-if (!stripeKey && !DEVELOPMENT_MODE) {
-  console.error('Missing required Stripe key: VITE_STRIPE_PUBLIC_KEY');
-}
-
-// Initialize Stripe outside component render
-const stripePromise = stripeKey ? loadStripe(stripeKey) : null;
-
-function PaymentForm() {
-  const stripe = useStripe();
-  const elements = useElements();
-  const { toast } = useToast();
-  const [isLoading, setIsLoading] = useState(false);
-  const [isCompleted, setIsCompleted] = useState(false);
-  
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-
-    if (!stripe || !elements) {
-      return;
-    }
-
-    setIsLoading(true);
-
-    const { error } = await stripe.confirmPayment({
-      elements,
-      confirmParams: {
-        return_url: window.location.origin,
-      },
-      redirect: 'if_required'
-    });
-
-    if (error) {
-      toast({
-        title: "Payment Failed",
-        description: error.message,
-        variant: "destructive",
-      });
-      setIsLoading(false);
-    } else {
-      toast({
-        title: "Payment Successful",
-        description: "Thank you for subscribing to Farm Friend Roundtable!",
-      });
-      setIsCompleted(true);
-      // Wait 2 seconds before redirecting to home page
-      setTimeout(() => {
-        window.location.href = '/';
-      }, 2000);
-    }
-  }
-
-  if (isCompleted) {
-    return (
-      <div className="text-center py-8">
-        <CheckCircle2 className="w-16 h-16 text-green-500 mx-auto mb-4" />
-        <h3 className="text-xl font-bold">Payment Successful!</h3>
-        <p className="mb-4">Thank you for subscribing to Farm Friend Roundtable.</p>
-        <p className="text-sm text-neutral-500">Redirecting to dashboard...</p>
-      </div>
-    );
-  }
-
-  return (
-    <form onSubmit={handleSubmit}>
-      <PaymentElement className="mb-6" />
-      <Button 
-        type="submit" 
-        className="w-full" 
-        disabled={!stripe || isLoading}
-      >
-        {isLoading ? (
-          <>
-            <Loader2 className="mr-2 h-4 w-4 animate-spin motion-reduce:animate-none" />
-            Processing...
-          </>
-        ) : (
-          "Subscribe Now - $10/month"
-        )}
-      </Button>
-    </form>
-  );
-}
+// Enterprise is sales-led. TODO: set VITE_ENTERPRISE_CONTACT_URL to a
+// mailto: or Calendly link; no contact link exists in the repo yet.
+const ENTERPRISE_CONTACT_URL = import.meta.env.VITE_ENTERPRISE_CONTACT_URL as string | undefined;
 
 // apiRequest throws "<status>: <body>". Only ever show the server's
 // friendly `message` field, never raw provider text.
@@ -107,244 +29,105 @@ function friendlyBillingMessage(err: unknown): string {
   const json = text.slice(text.indexOf("{"));
   try {
     const body = JSON.parse(json);
-    if (typeof body?.code === "string" && typeof body?.message === "string") return body.message;
+    if (typeof body?.message === "string") return body.message;
   } catch { /* not JSON */ }
   return fallback;
 }
 
+const PRO_FEATURES = [
+  "Up to 8 specialized AI agricultural experts",
+  "1,000 messages a month (one message = one question you send)",
+  "Included fast models: GLM 5.3 Flash, DeepSeek V4.1 Flash, MiMo V2.6 Flash, GPT-6 Luna (monthly allowance; free models after that)",
+  "Any other model with your own OpenRouter key",
+  "File creation, web research and markdown export",
+];
+
 export default function SubscribePage() {
   const { user, isLoading: isAuthLoading } = useAuth();
-  const [clientSecret, setClientSecret] = useState("");
-  const [isLoadingSecret, setIsLoadingSecret] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const { toast } = useToast();
+  const [isRedirecting, setIsRedirecting] = useState(false);
+  const [interval, setBillingInterval] = useState<BillingInterval>("month");
+  const plan = PLAN_LABELS[interval];
 
-  useEffect(() => {
-    if (user) {
-      // Create subscription
-      setIsLoadingSecret(true);
-      apiRequest("POST", "/api/create-subscription")
-        .then((res) => res.json())
-        .then((data) => {
-          if (data.clientSecret) {
-            setClientSecret(data.clientSecret);
-          } else if (data.message) {
-            setError(data.message);
-            toast({
-              title: "Subscription Error",
-              description: data.message,
-              variant: "destructive",
-            });
-          }
-          setIsLoadingSecret(false);
-        })
-        .catch((err) => {
-          console.error("Subscription error:", err);
-          const friendly = friendlyBillingMessage(err);
-          setError(friendly);
-          toast({
-            title: "Subscriptions unavailable",
-            description: friendly,
-            variant: "destructive",
-          });
-          setIsLoadingSecret(false);
-        });
-    }
-  }, [user, toast]);
-
-  // Redirect to auth if not logged in
   if (!isAuthLoading && !user) {
     return <Redirect to="/auth" />;
   }
 
-  // Show loading state
-  if (isAuthLoading || isLoadingSecret) {
-    return (
-      <div className="min-h-screen flex flex-col">
-        <Header />
-        <div className="flex flex-grow items-center justify-center">
-          <div className="text-center">
-            <Loader2 className="h-12 w-12 animate-spin motion-reduce:animate-none text-primary mx-auto mb-4" />
-            <p className="text-lg">Preparing subscription details...</p>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  // Show error state
-  if (error) {
-    return (
-      <div className="min-h-screen flex flex-col">
-        <Header />
-        <div className="flex flex-grow items-center justify-center p-4">
-          <Card className="w-full max-w-lg">
-            <CardHeader>
-              <CardTitle className="flex items-center">
-                <AlertTriangle className="text-red-500 mr-2 h-6 w-6" />
-                Subscription Error
-              </CardTitle>
-              <CardDescription>
-                We encountered a problem setting up your subscription.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <p className="text-red-600">{error}</p>
-            </CardContent>
-            <CardFooter>
-              <Button onClick={() => window.location.reload()} className="w-full">
-                Try Again
-              </Button>
-            </CardFooter>
-          </Card>
-        </div>
-      </div>
-    );
-  }
-
-  // Handle development mode subscription
-  const handleDevSubscription = async () => {
+  const startCheckout = async () => {
+    setIsRedirecting(true);
     try {
-      // Mock a successful subscription by updating the user cache
-      const updatedUser = { ...user, subscriptionStatus: "active" };
-      queryClient.setQueryData(["/api/user"], updatedUser);
-      
-      toast({
-        title: "Development Mode",
-        description: "Subscription activated for development purposes",
-      });
-      
-      // Redirect to home page
-      setTimeout(() => {
-        window.location.href = '/';
-      }, 1000);
-    } catch (error) {
-      console.error("Dev subscription error:", error);
-      toast({
-        title: "Error",
-        description: "Failed to activate development subscription",
-        variant: "destructive",
-      });
+      const res = await apiRequest("POST", "/api/create-checkout-session", { interval });
+      const data = await res.json();
+      if (data?.url) {
+        window.location.href = data.url;
+        return;
+      }
+      throw new Error(data?.message || "No checkout URL returned");
+    } catch (err) {
+      toast({ title: "Subscriptions unavailable", description: friendlyBillingMessage(err), variant: "destructive" });
+      setIsRedirecting(false);
     }
   };
-  
-  // If no Stripe is available
-  if (!stripePromise) {
-    return (
-      <div className="min-h-screen flex flex-col">
-        <Header />
-        <div className="flex flex-grow items-center justify-center p-4">
-          <Card className="w-full max-w-lg">
-            <CardHeader>
-              <CardTitle className="flex items-center">
-                {DEVELOPMENT_MODE ? (
-                  <>Development Mode</>
-                ) : (
-                  <>
-                    <AlertTriangle className="text-red-500 mr-2 h-6 w-6" />
-                    Configuration Error
-                  </>
-                )}
-              </CardTitle>
-              <CardDescription>
-                {DEVELOPMENT_MODE ? 
-                  "Use the development mode subscription option below." :
-                  "The payment system is not properly configured."}
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              {DEVELOPMENT_MODE ? (
-                <div className="text-center">
-                  <Button 
-                    onClick={handleDevSubscription}
-                    className="bg-green-600 hover:bg-green-700 text-white"
-                  >
-                    Activate Development Subscription
-                  </Button>
-                  <p className="mt-4 text-sm text-gray-600">
-                    This will bypass the payment process for development purposes.
-                  </p>
-                </div>
-              ) : (
-                <p>Stripe integration is not available. Please contact support.</p>
-              )}
-            </CardContent>
-          </Card>
-        </div>
-      </div>
-    );
-  }
 
   return (
     <div className="min-h-screen flex flex-col">
       <Header />
       <div className="flex flex-grow">
-        <div className="container mx-auto grid md:grid-cols-2 gap-8 p-6 items-center">
-          {/* Subscription information */}
-          <div>
-            <h1 className="text-3xl font-serif font-bold text-primary mb-4">
-              Subscribe to Farm Friend Roundtable
-            </h1>
-            <p className="mb-6 text-lg">
-              Unlock the full power of agricultural AI expertise with your subscription.
-            </p>
-            
-            <div className="bg-neutral-100 p-6 rounded-lg mb-6">
-              <h2 className="text-xl font-medium mb-4">What's included:</h2>
-              <ul className="space-y-3">
-                <li className="flex items-start">
-                  <CheckCircle2 className="h-5 w-5 text-primary mr-2 mt-0.5" />
-                  <span>Access to 8 specialized AI agricultural experts</span>
-                </li>
-                <li className="flex items-start">
-                  <CheckCircle2 className="h-5 w-5 text-primary mr-2 mt-0.5" />
-                  <span>File creation and download capabilities</span>
-                </li>
-                <li className="flex items-start">
-                  <CheckCircle2 className="h-5 w-5 text-primary mr-2 mt-0.5" />
-                  <span>Internet search integration for up-to-date information</span>
-                </li>
-                <li className="flex items-start">
-                  <CheckCircle2 className="h-5 w-5 text-primary mr-2 mt-0.5" />
-                  <span>Agricultural image generation</span>
-                </li>
-                <li className="flex items-start">
-                  <CheckCircle2 className="h-5 w-5 text-primary mr-2 mt-0.5" />
-                  <span>Unlimited agricultural roundtable sessions</span>
-                </li>
-                <li className="flex items-start">
-                  <CheckCircle2 className="h-5 w-5 text-primary mr-2 mt-0.5" />
-                  <span>Export conversations as markdown</span>
-                </li>
-              </ul>
-            </div>
-            
-            <div className="text-sm text-neutral-600">
-              <p>Only $10 per month. Cancel anytime.</p>
-            </div>
-          </div>
-          
-          {/* Payment form */}
-          <div>
-            <Card>
-              <CardHeader>
-                <CardTitle>Complete your subscription</CardTitle>
-                <CardDescription>
-                  Enter your payment information below to start your subscription.
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                {clientSecret && (
-                  <Elements 
-                    stripe={stripePromise} 
-                    options={{ clientSecret, appearance: { theme: 'stripe' } }}
+        <div className="container mx-auto grid md:grid-cols-2 gap-8 p-6 items-start">
+          <Card>
+            <CardHeader>
+              <CardTitle>Pro</CardTitle>
+              <div className="inline-flex rounded-md border p-1 w-fit" role="group" aria-label="Billing interval">
+                {(["month", "year"] as const).map((value) => (
+                  <Button
+                    key={value}
+                    type="button"
+                    size="sm"
+                    variant={interval === value ? "default" : "ghost"}
+                    aria-pressed={interval === value}
+                    onClick={() => setBillingInterval(value)}
                   >
-                    <PaymentForm />
-                  </Elements>
-                )}
-              </CardContent>
-            </Card>
-          </div>
+                    {value === "month" ? "Monthly" : "Annual (save 20%)"}
+                  </Button>
+                ))}
+              </div>
+              <CardDescription>
+                <span className="text-2xl font-semibold text-foreground">{plan.price}</span>{" "}
+                {plan.note} No free trial; the Free plan stays free.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <ul className="space-y-3">
+                {PRO_FEATURES.map((feature) => (
+                  <li key={feature} className="flex items-start">
+                    <CheckCircle2 className="h-5 w-5 text-primary mr-2 mt-0.5" />
+                    <span>{feature}</span>
+                  </li>
+                ))}
+              </ul>
+            </CardContent>
+            <CardFooter>
+              <Button className="w-full" onClick={startCheckout} disabled={isAuthLoading || isRedirecting}>
+                {isRedirecting ? (<><Loader2 className="mr-2 h-4 w-4 animate-spin motion-reduce:animate-none" />Opening checkout...</>) : `Subscribe - ${plan.price}`}
+              </Button>
+            </CardFooter>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Enterprise</CardTitle>
+              <CardDescription>Unlimited experts and messages, custom models and support.</CardDescription>
+            </CardHeader>
+            <CardFooter>
+              {ENTERPRISE_CONTACT_URL ? (
+                <Button asChild variant="outline" className="w-full">
+                  <a href={ENTERPRISE_CONTACT_URL}>Contact us</a>
+                </Button>
+              ) : (
+                <Button variant="outline" className="w-full" disabled>Contact us</Button>
+              )}
+            </CardFooter>
+          </Card>
         </div>
       </div>
     </div>

@@ -1,3 +1,4 @@
+import { checkHouseKeyCall, currentUsagePeriod, UsageCapError, BUDGET_FALLBACK_MODEL } from "./usage-caps";
 import type { AIMessage, AIModelResponse } from './ai';
 import { randomUUID } from 'crypto';
 
@@ -35,6 +36,8 @@ type OpenRouterAttempt = {
   startedAt: number;
   reservedUsd: number;
   maxTokens: number;
+  houseKeyUserId?: number;
+  usagePeriod?: string;
   providerPriceLimit?: { prompt: number; completion: number };
   settled: boolean;
 };
@@ -94,14 +97,18 @@ function safeOpenRouterError(status: number | undefined, providerDetail?: unknow
 
 // ─── Provider Interface ───────────────────────────────────────────────────────
 
+/** Per-call options. maxTokens overrides the default output cap (e.g. expert replies). */
+export type ChatOptions = { maxTokens?: number };
+
 export interface AIProvider {
-  chat(messages: AIMessage[], model: string, userId?: number, webSearch?: boolean): Promise<AIModelResponse>;
+  chat(messages: AIMessage[], model: string, userId?: number, webSearch?: boolean, options?: ChatOptions): Promise<AIModelResponse>;
   chatStream(
     messages: AIMessage[],
     model: string,
     onToken: (token: string) => void,
     userId?: number,
-    webSearch?: boolean
+    webSearch?: boolean,
+    options?: ChatOptions
   ): Promise<AIModelResponse>;
 }
 
@@ -126,13 +133,14 @@ export class OpenRouterProvider implements AIProvider {
     };
   }
 
-  private beginAttempt(model: string, messages: AIMessage[]): OpenRouterAttempt {
+  private beginAttempt(model: string, messages: AIMessage[], maxTokensOverride?: number): OpenRouterAttempt {
+    const maxTokens = maxTokensOverride && maxTokensOverride > 0 ? Math.min(maxTokensOverride, maxOutputTokens()) : maxOutputTokens();
     const attempt: OpenRouterAttempt = {
       id: randomUUID(),
       model,
       startedAt: Date.now(),
       reservedUsd: 0,
-      maxTokens: maxOutputTokens(),
+      maxTokens,
       settled: false,
     };
     if (this.spendCapUsd === null) return attempt;
@@ -142,7 +150,7 @@ export class OpenRouterProvider implements AIProvider {
     const reservation = Math.min(SPEND_CAP_PER_REQUEST_USD, remainingUsd);
     const estimatedInputTokens = Math.max(1, Math.ceil(JSON.stringify(messages).length * 2));
     attempt.reservedUsd = reservation;
-    attempt.maxTokens = maxOutputTokens();
+    attempt.maxTokens = maxTokens;
     attempt.providerPriceLimit = {
       prompt: Number(((reservation * 0.45 * 1_000_000) / estimatedInputTokens).toFixed(8)),
       completion: Number(((reservation * 0.45 * 1_000_000) / attempt.maxTokens).toFixed(8)),
@@ -160,6 +168,12 @@ export class OpenRouterProvider implements AIProvider {
     if (attempt.settled) return;
     attempt.settled = true;
     const costUsd = numericCost(usage);
+    if (attempt.houseKeyUserId && attempt.usagePeriod && costUsd) {
+      const { houseKeyUserId, usagePeriod } = attempt;
+      void import("./storage")
+        .then(({ storage }) => storage.addMonthlyAiSpend(houseKeyUserId, usagePeriod, costUsd))
+        .catch(err => console.error("[CAPS] failed to record AI spend:", (err as Error).message));
+    }
     if (attempt.reservedUsd > 0) {
       this.reservedUsd = Math.max(0, this.reservedUsd - attempt.reservedUsd);
       // When the provider omits cost, conservatively consume the reservation
@@ -198,6 +212,36 @@ export class OpenRouterProvider implements AIProvider {
   }
 
   private async getApiKey(userId?: number): Promise<string> {
+    return (await this.resolveKey(userId)).key;
+  }
+
+  /**
+   * Resolve the key for a call and enforce pricing caps on house-key calls
+   * (server/usage-caps.ts): tier gate, Pro model allowlist, monthly budget.
+   * BYOK calls are never capped and never counted.
+   */
+  private async authorizeCall(attempt: OpenRouterAttempt, model: string, userId?: number): Promise<{ key: string; model: string }> {
+    const { key, byok } = await this.resolveKey(userId);
+    if (byok || !userId) return { key, model };
+    const { storage } = await import("./storage");
+    const user = await storage.getUser(userId);
+    const period = currentUsagePeriod();
+    const usage = await storage.getMonthlyUsage(userId, period);
+    const denial = checkHouseKeyCall(user?.tier, model, usage.aiSpendUsd);
+    if (denial?.code === "ai_budget_exhausted") {
+      // Graceful fallback: keep answering on a free model; the client shows
+      // BUDGET_EXHAUSTED_NOTICE from /api/user/tier.
+      console.info(`[CAPS] user ${userId} AI budget spent — ${model} -> ${BUDGET_FALLBACK_MODEL}`);
+      attempt.model = BUDGET_FALLBACK_MODEL;
+      return { key, model: BUDGET_FALLBACK_MODEL };
+    }
+    if (denial) throw new UsageCapError(denial);
+    attempt.houseKeyUserId = userId;
+    attempt.usagePeriod = period;
+    return { key, model };
+  }
+
+  private async resolveKey(userId?: number): Promise<{ key: string; byok: boolean }> {
     // If a userId is provided, try to use their stored BYOK key first
     if (userId) {
       try {
@@ -205,7 +249,7 @@ export class OpenRouterProvider implements AIProvider {
         const userKey = await storage.getUserApiKey(userId);
         if (userKey) {
           console.log(`[BYOK] Using user-provided API key for user ${userId}`);
-          return userKey;
+          return { key: userKey, byok: true };
         }
       } catch (err) {
         console.warn("[BYOK] Failed to retrieve user API key:", (err as Error).message);
@@ -217,18 +261,20 @@ export class OpenRouterProvider implements AIProvider {
     if (!platformKey) {
       throw new Error("OpenRouter API key not provided");
     }
-    return platformKey;
+    return { key: platformKey, byok: false };
   }
 
-  async chat(messages: AIMessage[], model: string, userId?: number, webSearch = false): Promise<AIModelResponse> {
-    const attempt = this.beginAttempt(model, messages);
+  async chat(messages: AIMessage[], model: string, userId?: number, webSearch = false, options: ChatOptions = {}): Promise<AIModelResponse> {
+    const attempt = this.beginAttempt(model, messages, options.maxTokens);
     let requestStarted = false;
     let usage: unknown;
     let generationId: string | undefined;
     let provider: string | undefined;
     let responseModel: string | undefined;
     try {
-      const openRouterKey = await this.getApiKey(userId);
+      const authorized = await this.authorizeCall(attempt, model, userId);
+      const openRouterKey = authorized.key;
+      model = authorized.model;
 
       requestStarted = true;
       const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
@@ -305,16 +351,19 @@ export class OpenRouterProvider implements AIProvider {
     model: string,
     onToken: (token: string) => void,
     userId?: number,
-    webSearch = false
+    webSearch = false,
+    options: ChatOptions = {}
   ): Promise<AIModelResponse> {
-    const attempt = this.beginAttempt(model, messages);
+    const attempt = this.beginAttempt(model, messages, options.maxTokens);
     let requestStarted = false;
     let usage: unknown;
     let generationId: string | undefined;
     let provider: string | undefined;
     let responseModel: string | undefined;
     try {
-      const openRouterKey = await this.getApiKey(userId);
+      const authorized = await this.authorizeCall(attempt, model, userId);
+      const openRouterKey = authorized.key;
+      model = authorized.model;
 
       requestStarted = true;
       const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {

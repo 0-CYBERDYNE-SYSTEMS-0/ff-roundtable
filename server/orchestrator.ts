@@ -38,7 +38,7 @@ interface ConversationState {
     broadcastFn: (convId: number, data: any) => void; // Store broadcast function
     // Autonomous settings
     isAutonomousEnabled: boolean; // Default: true
-    maxAutonomousTurns: number;   // Max expert responses; 100 represents the hard-capped "let it run" option
+    maxAutonomousTurns: number;   // Max expert responses; MAX_TURN_BUDGET (20) is the hard-capped "let it run" option
     totalAutonomousTurnsTaken: number; // Counter for turns within the current autonomous session
     // Add a flag to indicate if the current sequence was interrupted by the user
     wasInterrupted: boolean;
@@ -124,8 +124,8 @@ interface PendingMentionRoute {
 // Placeholder - In-memory state management
 const conversationStates: Map<number, ConversationState> = new Map();
 const STALE_PROCESSING_MS = 5 * 60 * 1000;
-const DEFAULT_TURN_BUDGET = 25;
-const MAX_TURN_BUDGET = 100;
+const DEFAULT_TURN_BUDGET = 8;
+const MAX_TURN_BUDGET = 20;
 
 type StanceLedger = Record<string, MessageStance | null>;
 

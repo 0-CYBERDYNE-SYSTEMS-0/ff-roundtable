@@ -16,8 +16,8 @@ import { Loader2, ScrollText } from "lucide-react";
 
 // Mirrors the server-side hard cap on conversations.charter.
 const CHARTER_MAX_LENGTH = 2000;
-const DEFAULT_TURN_BUDGET = 25;
-const MAX_TURN_BUDGET = 100;
+const DEFAULT_TURN_BUDGET = 8;
+const MAX_TURN_BUDGET = 20;
 
 interface CharterDialogProps {
   open: boolean;

@@ -117,6 +117,10 @@ describe("charts must be sourced", () => {
     expect(validateChartArtifact(JSON.stringify({ type: "line", title: "Rain", data }), [])).toBeNull();
     expect(validateChartArtifact(JSON.stringify({ type: "line", title: "Rain", data, sources: ["https://made.up/x"] }), ["https://real.edu/a"])).toBeNull();
   });
+  it("uses a valid legacy source when the sources array is empty", () => {
+    const validated = validateChartArtifact(JSON.stringify({ type: "line", title: "Rainfall by week", data, sources: [], source: "farmer" }), []);
+    expect(JSON.parse(validated!.json).sources).toEqual(["farmer"]);
+  });
   it("keeps charts whose sources are retrieved URLs, farmer, or weather", () => {
     expect(validateChartArtifact(JSON.stringify({ type: "line", title: "June rain, Ames IA", data, sources: ["https://real.edu/a"] }), ["https://real.edu/a"])?.title).toBe("June rain, Ames IA");
     const { kept, dropped } = filterChartArtifacts([
@@ -126,6 +130,13 @@ describe("charts must be sourced", () => {
     ], []);
     expect(dropped).toBe(1);
     expect(kept.map(k => k.type)).toEqual(["chart", "table"]);
+  });
+
+  it("infers a missing farmer or weather source only when every numeric chart value appears in that evidence", () => {
+    const chart = { type: "vega-lite", title: "Rainfall by week", theme: "earth", data, spec: { mark: "area", encoding: { x: { field: "week", type: "ordinal" }, y: { field: "rain_in", type: "quantitative" } } } };
+    const inferred = validateChartArtifact(JSON.stringify(chart), [], { farmerText: "Rainfall was 1.2 inches on Jun 1." });
+    expect(JSON.parse(inferred!.json).sources).toEqual(["farmer"]);
+    expect(validateChartArtifact(JSON.stringify(chart), [], { farmerText: "Rainfall was 2.4 inches on Jun 1." })).toBeNull();
   });
 });
 

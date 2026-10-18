@@ -17,6 +17,7 @@ import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { PauseIcon, PlayIcon, ScrollText, XIcon, ChevronLeft, ChevronRight } from "lucide-react";
 import { parseNewCommand } from "@/lib/new-command";
+import AiBudgetNotice from "@/components/billing/AiBudgetNotice";
 
 // G9 quiet console: per-event chatter is gated behind a debug flag so the
 // browser console stays readable in production. Force it per-tab with
@@ -636,7 +637,7 @@ export default function HomePage() {
     setIsAutonomousEnabled(typeof snapshot?.isAutonomousEnabled === "boolean" ? snapshot.isAutonomousEnabled : true);
   }, [activeConversation, activeConversationData?.orchestratorState]);
   // G13: older conversation responses may omit turnBudget; the dialog applies
-  // the standard 25-turn default in that case. Null means "Let it run".
+  // the standard 8-turn default in that case. Null means "Let it run".
   const activeTurnBudget = (
     activeConversationData as (typeof activeConversationData & { turnBudget?: number | null }) | null
   )?.turnBudget;
@@ -1337,6 +1338,7 @@ export default function HomePage() {
 
             {/* === Chat Area (Takes remaining space) === */}
              <div className="flex-1 overflow-y-auto">
+                 <AiBudgetNotice />
                  {activeConversation ? (
                     <ChatInterface
                         messages={messages || []}

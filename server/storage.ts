@@ -1,10 +1,10 @@
-import { users, type User, type InsertUser, conversations, type Conversation, type InsertConversation, experts, type Expert, type InsertExpert, messages, type Message, type InsertMessage, openQuestions, type OpenQuestion, type InsertOpenQuestion, files, type File, type InsertFile, insights, type Insight, type InsertInsight, farmProfiles, type FarmProfile, type InsertFarmProfile, weatherCache } from "@shared/schema";
+import { users, type User, type InsertUser, conversations, type Conversation, type InsertConversation, experts, type Expert, type InsertExpert, messages, type Message, type InsertMessage, openQuestions, type OpenQuestion, type InsertOpenQuestion, files, type File, type InsertFile, insights, type Insight, type InsertInsight, farmProfiles, type FarmProfile, type InsertFarmProfile, weatherCache, usageMonthly } from "@shared/schema";
 import { encryptApiKey, decryptApiKey } from "./crypto";
 import createMemoryStore from "memorystore";
 import session from "express-session";
 import { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
-import { eq, desc, asc, and, isNull, isNotNull, max } from "drizzle-orm";
+import { eq, desc, asc, and, isNull, isNotNull, max, sql } from "drizzle-orm";
 import ConnectPgSimple from "connect-pg-simple";
 import type { DeliverableGenerationRequest, SaveDeliverableVersionResult } from "@shared/schema";
 
@@ -36,6 +36,11 @@ export interface IStorage {
   getUserApiKey(userId: number): Promise<string | null>;
   setUserApiKey(userId: number, key: string): Promise<void>;
   removeUserApiKey(userId: number): Promise<void>;
+
+  // Pricing caps (server/usage-caps.ts). period = "YYYY-MM" UTC.
+  getMonthlyUsage(userId: number, period: string): Promise<{ messageCount: number; aiSpendUsd: number }>;
+  incrementMonthlyMessages(userId: number, period: string): Promise<number>;
+  addMonthlyAiSpend(userId: number, period: string, usd: number): Promise<void>;
   
   // Conversation operations
   createConversation(conversation: InsertConversation): Promise<Conversation>;
@@ -223,6 +228,26 @@ export class MemStorage implements IStorage {
     
     this.users.set(userId, updatedUser);
     return updatedUser;
+  }
+
+  private usage = new Map<string, { messageCount: number; aiSpendUsd: number }>();
+
+  async getMonthlyUsage(userId: number, period: string) {
+    return { ...(this.usage.get(`${userId}:${period}`) ?? { messageCount: 0, aiSpendUsd: 0 }) };
+  }
+
+  async incrementMonthlyMessages(userId: number, period: string): Promise<number> {
+    const row = await this.getMonthlyUsage(userId, period);
+    row.messageCount += 1;
+    this.usage.set(`${userId}:${period}`, row);
+    return row.messageCount;
+  }
+
+  async addMonthlyAiSpend(userId: number, period: string, usd: number): Promise<void> {
+    if (!(usd > 0)) return;
+    const row = await this.getMonthlyUsage(userId, period);
+    row.aiSpendUsd += usd;
+    this.usage.set(`${userId}:${period}`, row);
   }
 
   async getUserApiKey(userId: number): Promise<string | null> {
@@ -656,7 +681,7 @@ export class PostgresStorage implements IStorage {
     });
 
     this.db = drizzle(this.pool, {
-      schema: { users, conversations, experts, messages, openQuestions, files, insights, farmProfiles, weatherCache },
+      schema: { users, conversations, experts, messages, openQuestions, files, insights, farmProfiles, weatherCache, usageMonthly },
     });
 
     this.sessionStore = new PgSessionStore({
@@ -736,6 +761,33 @@ export class PostgresStorage implements IStorage {
 
     if (!result[0]) throw new Error(`User with ID ${userId} not found`);
     return result[0];
+  }
+
+  async getMonthlyUsage(userId: number, period: string) {
+    const rows = await this.db.select().from(usageMonthly)
+      .where(and(eq(usageMonthly.userId, userId), eq(usageMonthly.period, period)));
+    return { messageCount: rows[0]?.messageCount ?? 0, aiSpendUsd: rows[0]?.aiSpendUsd ?? 0 };
+  }
+
+  async incrementMonthlyMessages(userId: number, period: string): Promise<number> {
+    const rows = await this.db.insert(usageMonthly)
+      .values({ userId, period, messageCount: 1, aiSpendUsd: 0 })
+      .onConflictDoUpdate({
+        target: [usageMonthly.userId, usageMonthly.period],
+        set: { messageCount: sql`${usageMonthly.messageCount} + 1` },
+      })
+      .returning();
+    return rows[0]?.messageCount ?? 1;
+  }
+
+  async addMonthlyAiSpend(userId: number, period: string, usd: number): Promise<void> {
+    if (!(usd > 0)) return;
+    await this.db.insert(usageMonthly)
+      .values({ userId, period, messageCount: 0, aiSpendUsd: usd })
+      .onConflictDoUpdate({
+        target: [usageMonthly.userId, usageMonthly.period],
+        set: { aiSpendUsd: sql`${usageMonthly.aiSpendUsd} + ${usd}` },
+      });
   }
 
   async getUserApiKey(userId: number): Promise<string | null> {

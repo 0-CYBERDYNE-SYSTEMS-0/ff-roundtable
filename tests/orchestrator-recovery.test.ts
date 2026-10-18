@@ -277,11 +277,11 @@ describe("Orchestrator recovery (G7 snapshots)", () => {
   });
 
   it.each([
-    ["missing", undefined, 25],
+    ["missing", undefined, 8],
     ["saved numeric", 17, 17],
-    ["let it run", null, 100],
-    ["legacy zero", 0, 100],
-    ["over-ceiling stored value", 140, 100],
+    ["let it run", null, 20],
+    ["legacy zero", 0, 20],
+    ["over-ceiling stored value", 140, 20],
   ] as const)("initializes the runtime budget from %s conversation setting", async (_label, savedBudget, expectedBudget) => {
     const conversationId = nextConvId();
     setupFullRound(conversationId);
@@ -309,17 +309,17 @@ describe("Orchestrator recovery (G7 snapshots)", () => {
     expect(getConversationState(conversationId)?.maxAutonomousTurns).toBe(2);
   });
 
-  it("lets the council run under the hard 100-turn ceiling when the saved budget is null", async () => {
+  it("lets the council run under the hard 20-turn ceiling when the saved budget is null", async () => {
     const conversationId = nextConvId();
     setupFullRound(conversationId);
     persistRow(conversationId, null, null);
 
     await processMessageTurnBased(userId, conversationId, createMockMessage(42, "Let it run"), broadcastFn);
-    await drainAutonomousRun(conversationId, 100);
+    await drainAutonomousRun(conversationId, 20);
 
-    expect(assistantCount()).toBe(100);
+    expect(assistantCount()).toBe(20);
     expect(getConversationState(conversationId)?.mode).toBe("idle");
-    expect(getConversationState(conversationId)?.maxAutonomousTurns).toBe(100);
+    expect(getConversationState(conversationId)?.maxAutonomousTurns).toBe(20);
   });
 
   it("passes the upcoming turn position and effective budget to the Moderator", async () => {
@@ -482,7 +482,7 @@ describe("Orchestrator recovery (G7 snapshots)", () => {
       wasInterrupted: false,
       pausedFromMode: "autonomous",
       isAutonomousEnabled: false,
-      maxAutonomousTurns: 44,
+      maxAutonomousTurns: 14,
     }, 12);
 
     expect(await restorePausedFromSnapshot(conversationId, broadcastFn)).toBe(true);
@@ -491,13 +491,13 @@ describe("Orchestrator recovery (G7 snapshots)", () => {
     expect(restored.isAutonomousEnabled).toBe(false);
     // The paused snapshot records the effective configured cap and wins over
     // the conversation row's current default (which can differ after a save).
-    expect(restored.maxAutonomousTurns).toBe(44);
+    expect(restored.maxAutonomousTurns).toBe(14);
 
     await waitFor(30);
     expect(persistedSnapshots().at(-1)).toMatchObject({
       mode: "paused",
       isAutonomousEnabled: false,
-      maxAutonomousTurns: 44,
+      maxAutonomousTurns: 14,
     });
   });
 
@@ -585,7 +585,7 @@ describe("Orchestrator recovery (G7 snapshots)", () => {
     expect(getConversationState(conversationId)).toMatchObject({
       mode: "paused",
       isAutonomousEnabled: true,
-      maxAutonomousTurns: 25,
+      maxAutonomousTurns: 8,
     });
   });
 

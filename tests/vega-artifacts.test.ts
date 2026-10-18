@@ -4,7 +4,7 @@ import { parse, View } from "vega";
 import { expressionInterpreter } from "vega-interpreter";
 import { parseVegaChart, themedVegaSpec } from "../shared/chart-artifact";
 import { extractArtifacts } from "../server/artifact-extractor";
-import { validateChartArtifact, droppedChartNote } from "../server/expert-tools";
+import { validateChartArtifact } from "../server/expert-tools";
 import { artifactExamples, artifactExamplesForRequest } from "../server/artifact-examples";
 
 const chart = {
@@ -75,9 +75,5 @@ describe("themed Vega-Lite artifacts", () => {
     expect(validateChartArtifact(text.slice(0, 40), [])).toBeNull();
     expect(validateChartArtifact(text.replace('"Corn"', '"Co}rn"').slice(0, -1), [])).not.toBeNull();
     expect(validateChartArtifact(text + "}", [])).toBeNull();
-  });
-  it("notes dropped charts for the farmer", () => {
-    expect(droppedChartNote(0)).toBe("");
-    expect(droppedChartNote(1)).toContain("couldn't produce a valid chart");
   });
 });
