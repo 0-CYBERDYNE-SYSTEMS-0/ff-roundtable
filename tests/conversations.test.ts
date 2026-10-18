@@ -41,6 +41,7 @@ const {
   mockGenerateClosingSynthesis,
   mockGetFarmerFileIntent,
   mockPersistAutonomySettings,
+  mockIsConversationBusy,
 } = vi.hoisted(() => ({
   mockProcessMessageTurnBased: vi.fn(),
   mockGetExpertResponseStream: vi.fn(),
@@ -49,6 +50,7 @@ const {
   mockGenerateClosingSynthesis: vi.fn(),
   mockGetFarmerFileIntent: vi.fn().mockReturnValue(null),
   mockPersistAutonomySettings: vi.fn().mockResolvedValue(undefined),
+  mockIsConversationBusy: vi.fn().mockReturnValue(false),
 }));
 
 vi.mock("../server/orchestrator", () => ({
@@ -62,6 +64,8 @@ vi.mock("../server/orchestrator", () => ({
   getConversationState: vi.fn().mockReturnValue(null),
   getFarmerFileIntent: mockGetFarmerFileIntent,
   persistAutonomySettings: mockPersistAutonomySettings,
+  isConversationBusy: mockIsConversationBusy,
+  discardConversationState: vi.fn().mockResolvedValue(undefined),
 }));
 
 // ── Mock AI module (generateSystemPrompt used when creating experts) ──
@@ -207,6 +211,7 @@ describe("Conversations & Expert Flows", () => {
     mockGenerateClosingSynthesis.mockReset().mockResolvedValue(undefined);
     mockGetFarmerFileIntent.mockReset().mockReturnValue(null);
     mockPersistAutonomySettings.mockReset().mockResolvedValue(undefined);
+    mockIsConversationBusy.mockReset().mockReturnValue(false);
   });
 
   // ─────────────────────────────────────────────────────────────────
@@ -297,6 +302,27 @@ describe("Conversations & Expert Flows", () => {
       const res = await agent.get("/api/protected/conversations");
       expect(res.status).toBe(200);
       expect(res.body).toEqual([]);
+    });
+
+    it("includes updatedAt as the latest message time, falling back to createdAt", async () => {
+      const agent = request.agent(app);
+      await registerAndLogin(agent, "activityconvos", "pass123");
+      const quiet = await createConversation(agent, "Quiet");
+      const active = await createConversation(agent, "Active");
+      await new Promise((resolve) => setTimeout(resolve, 15));
+      const message = await storage.createMessage({
+        conversationId: active.id,
+        userId: null,
+        expertId: null,
+        content: "latest",
+        role: "assistant",
+      });
+
+      const res = await agent.get("/api/protected/conversations");
+      const byId = new Map<number, any>(res.body.map((c: any) => [c.id, c]));
+      expect(byId.get(quiet.id).updatedAt).toBe(byId.get(quiet.id).createdAt);
+      expect(byId.get(active.id).updatedAt).toBe(new Date(message.timestamp!).toISOString());
+      expect(byId.get(active.id).updatedAt > byId.get(active.id).createdAt).toBe(true);
     });
 
     it("returns all conversations for authenticated user", async () => {
@@ -637,6 +663,141 @@ describe("Conversations & Expert Flows", () => {
       expect(res.body.name).toBe("Stable Expert");
       expect(res.body.role).toBe("Stable Role");
       expect(res.body.model).toBe("stable-model");
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────
+  // Delete Expert / Delete Conversation
+  // ─────────────────────────────────────────────────────────────────
+
+  describe("DELETE /api/protected/conversations/:conversationId/experts/:expertId", () => {
+    it("returns 401 when not authenticated", async () => {
+      const res = await request(app).delete("/api/protected/conversations/1/experts/1");
+      expect(res.status).toBe(401);
+    });
+
+    it("removes the expert with 204 and keeps its past messages", async () => {
+      const agent = request.agent(app);
+      await registerAndLogin(agent, "deleteExpertOwner", "pass123");
+      const convo = await createConversation(agent);
+      const expert = await addExpert(agent, convo.id, { name: "Dr. Gone", role: "Agronomist", model: "m:free" });
+      const other = await addExpert(agent, convo.id, { name: "Dr. Stay", role: "Economist", model: "m:free" });
+      const message = await storage.createMessage({
+        conversationId: convo.id,
+        userId: null,
+        expertId: expert.id,
+        content: "Plant early.",
+        role: "assistant",
+        expertName: "Dr. Gone",
+        expertRole: "Agronomist",
+      });
+
+      const res = await agent.delete(`/api/protected/conversations/${convo.id}/experts/${expert.id}`);
+      expect(res.status).toBe(204);
+
+      const list = await agent.get(`/api/protected/conversations/${convo.id}/experts`);
+      expect(list.body.map((e: any) => e.id)).toEqual([other.id]);
+
+      const messages = await storage.getConversationMessages(convo.id);
+      const kept = messages.find((m) => m.id === message.id);
+      expect(kept).toMatchObject({ content: "Plant early.", expertName: "Dr. Gone", expertId: null });
+    });
+
+    it("returns 404 for another user's conversation", async () => {
+      const owner = request.agent(app);
+      await registerAndLogin(owner, "deleteExpertOwner2", "pass123");
+      const convo = await createConversation(owner);
+      const expert = await addExpert(owner, convo.id, { name: "Dr. A", role: "Agronomist", model: "m:free" });
+
+      const intruder = request.agent(app);
+      await registerAndLogin(intruder, "deleteExpertIntruder", "pass456");
+      const res = await intruder.delete(`/api/protected/conversations/${convo.id}/experts/${expert.id}`);
+      expect(res.status).toBe(404);
+      expect((await storage.getExpertById(expert.id))?.id).toBe(expert.id);
+    });
+
+    it("returns 404 when the expert belongs to a different conversation or does not exist", async () => {
+      const agent = request.agent(app);
+      await registerAndLogin(agent, "deleteExpertMismatch", "pass123");
+      const convoA = await createConversation(agent, "A");
+      const convoB = await createConversation(agent, "B");
+      const expertB = await addExpert(agent, convoB.id, { name: "Dr. B", role: "Agronomist", model: "m:free" });
+
+      const wrongConvo = await agent.delete(`/api/protected/conversations/${convoA.id}/experts/${expertB.id}`);
+      expect(wrongConvo.status).toBe(404);
+      const missing = await agent.delete(`/api/protected/conversations/${convoA.id}/experts/99999`);
+      expect(missing.status).toBe(404);
+      expect((await storage.getExpertById(expertB.id))?.id).toBe(expertB.id);
+    });
+
+    it("returns 409 while a discussion is running", async () => {
+      const agent = request.agent(app);
+      await registerAndLogin(agent, "deleteExpertBusy", "pass123");
+      const convo = await createConversation(agent);
+      const expert = await addExpert(agent, convo.id, { name: "Dr. Busy", role: "Agronomist", model: "m:free" });
+
+      mockIsConversationBusy.mockReturnValue(true);
+      const res = await agent.delete(`/api/protected/conversations/${convo.id}/experts/${expert.id}`);
+      expect(res.status).toBe(409);
+      expect(res.body.message).toBeTruthy();
+      expect((await storage.getExpertById(expert.id))?.id).toBe(expert.id);
+    });
+  });
+
+  describe("DELETE /api/protected/conversations/:id", () => {
+    it("returns 401 when not authenticated", async () => {
+      const res = await request(app).delete("/api/protected/conversations/1");
+      expect(res.status).toBe(401);
+    });
+
+    it("deletes the conversation and everything in it with 204", async () => {
+      const agent = request.agent(app);
+      await registerAndLogin(agent, "deleteConvoOwner", "pass123");
+      const convo = await createConversation(agent, "Doomed");
+      const keep = await createConversation(agent, "Survivor");
+      const expert = await addExpert(agent, convo.id, { name: "Dr. A", role: "Agronomist", model: "m:free" });
+      const keepExpert = await addExpert(agent, keep.id, { name: "Dr. K", role: "Agronomist", model: "m:free" });
+      await storage.createMessage({ conversationId: convo.id, userId: null, expertId: expert.id, content: "hi", role: "assistant" });
+      await createOpenQuestion(convo.id);
+      await storage.createFile({ conversationId: convo.id, filename: "a.txt", fileUrl: "/uploads/delete-convo-a.txt", fileType: "text/plain", uploadedBy: "user" });
+      await storage.createInsight({ conversationId: convo.id, title: "t", points: ["p"] });
+
+      const res = await agent.delete(`/api/protected/conversations/${convo.id}`);
+      expect(res.status).toBe(204);
+
+      expect(await storage.getConversation(convo.id)).toBeUndefined();
+      expect(await storage.getConversationExperts(convo.id)).toEqual([]);
+      expect(await storage.getConversationMessages(convo.id)).toEqual([]);
+      expect(await storage.listOpenQuestions(convo.id)).toEqual([]);
+      expect(await storage.getConversationFiles(convo.id)).toEqual([]);
+      expect(await storage.getConversationInsights(convo.id)).toEqual([]);
+
+      expect((await agent.get(`/api/protected/conversations/${convo.id}`)).status).toBe(404);
+      expect((await storage.getConversation(keep.id))?.id).toBe(keep.id);
+      expect((await storage.getConversationExperts(keep.id)).map((e) => e.id)).toEqual([keepExpert.id]);
+    });
+
+    it("returns 404 for another user's or a missing conversation", async () => {
+      const owner = request.agent(app);
+      await registerAndLogin(owner, "deleteConvoOwner2", "pass123");
+      const convo = await createConversation(owner);
+
+      const intruder = request.agent(app);
+      await registerAndLogin(intruder, "deleteConvoIntruder", "pass456");
+      expect((await intruder.delete(`/api/protected/conversations/${convo.id}`)).status).toBe(404);
+      expect((await intruder.delete("/api/protected/conversations/99999")).status).toBe(404);
+      expect((await storage.getConversation(convo.id))?.id).toBe(convo.id);
+    });
+
+    it("returns 409 while a discussion is running", async () => {
+      const agent = request.agent(app);
+      await registerAndLogin(agent, "deleteConvoBusy", "pass123");
+      const convo = await createConversation(agent);
+
+      mockIsConversationBusy.mockReturnValue(true);
+      const res = await agent.delete(`/api/protected/conversations/${convo.id}`);
+      expect(res.status).toBe(409);
+      expect((await storage.getConversation(convo.id))?.id).toBe(convo.id);
     });
   });
 

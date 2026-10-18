@@ -35,10 +35,13 @@ export function generateComprehensiveMarkdown(data: {
 
     if (message.userId) {
       md += `### Message ${msgNum} - You (${timestamp})\n\n`;
-    } else if (message.expertId) {
-      const expert = data.experts.find(e => e.id === message.expertId);
-      if (expert) {
-        md += `### Message ${msgNum} - ${expert.name} (${expert.role}) (${timestamp})\n\n`;
+    } else {
+      // Removed experts have expertId null; fall back to the name stored on the message.
+      const expert = message.expertId ? data.experts.find(e => e.id === message.expertId) : undefined;
+      const name = expert?.name ?? message.expertName;
+      const role = expert?.role ?? message.expertRole;
+      if (name) {
+        md += `### Message ${msgNum} - ${name}${role ? ` (${role})` : ""} (${timestamp})\n\n`;
       }
     }
 

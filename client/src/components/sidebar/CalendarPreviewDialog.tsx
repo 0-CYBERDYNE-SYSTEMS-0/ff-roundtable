@@ -77,7 +77,7 @@ export default function CalendarPreviewDialog({ conversationId, start, fileId, o
   const gridStart = startOfWeek(startOfMonth(monthDate));
   const days = Array.from({ length: Math.ceil((endOfMonth(monthDate).getDate() + startOfMonth(monthDate).getDay()) / 7) * 7 }, (_, index) => addDays(gridStart, index));
   const readOnly = !!draft?.readOnlyReason;
-  const fieldClass = "w-full rounded-md border border-neutral-300 bg-white px-3 py-2 text-sm disabled:bg-neutral-50 disabled:text-neutral-600";
+  const fieldClass = "w-full rounded-md border border-neutral-300 bg-card px-3 py-2 text-sm disabled:bg-neutral-50 disabled:text-neutral-600";
 
   return <Dialog open onOpenChange={open => { if (!open && !busy && (!dirty || window.confirm("Discard unsaved calendar edits?"))) onClose(); }}>
     <DialogContent className="max-w-5xl w-[calc(100%-1rem)] max-h-[92vh] flex flex-col p-4 sm:p-6">
@@ -116,7 +116,7 @@ export default function CalendarPreviewDialog({ conversationId, start, fileId, o
             </div>
             <div className="overflow-x-auto"><div className="grid grid-cols-7 min-w-[560px]">
               {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map(day => <div key={day} className="text-center text-xs font-medium text-neutral-500 pb-2">{day}</div>)}
-              {days.map(day => { const date = format(day, "yyyy-MM-dd"); return <div key={date} className={`min-h-24 p-1.5 border border-neutral-100 ${day.getMonth() !== monthDate.getMonth() ? "bg-neutral-50 text-neutral-400" : "bg-white"}`}>
+              {days.map(day => { const date = format(day, "yyyy-MM-dd"); return <div key={date} className={`min-h-24 p-1.5 border border-neutral-100 ${day.getMonth() !== monthDate.getMonth() ? "bg-neutral-50 text-neutral-400" : "bg-card"}`}>
                 <span className="text-xs">{day.getDate()}</span>
                 {sorted.filter(event => event.startDate === date).map(event => <button key={event.uid} className="block w-full text-left text-xs bg-emerald-50 text-emerald-900 rounded p-1 mt-1 break-words" onClick={() => { setView("agenda"); window.requestAnimationFrame(() => document.getElementById(`calendar-event-${sorted.indexOf(event)}`)?.scrollIntoView({ block: "center" })); }}>{event.summary}</button>)}
               </div>; })}

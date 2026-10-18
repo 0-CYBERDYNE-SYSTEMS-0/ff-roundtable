@@ -843,6 +843,23 @@ export function getConversationState(conversationId: number): ConversationState 
     return conversationStates.get(conversationId);
 }
 
+// True while a discussion is running or paused mid-run. Turn loops read the
+// in-memory roster and conversation row throughout, so roster/conversation
+// deletion must wait. A state with no progress for STALE_PROCESSING_MS is
+// treated as abandoned.
+export function isConversationBusy(conversationId: number): boolean {
+    const state = conversationStates.get(conversationId);
+    if (!state || state.mode === "idle") return false;
+    return Date.now() - state.lastProgressAt < STALE_PROCESSING_MS;
+}
+
+/** Drop in-memory state so the next message rebuilds it from storage. */
+export async function discardConversationState(conversationId: number): Promise<void> {
+    await snapshotWriteChains.get(conversationId)?.catch(() => {});
+    conversationStates.delete(conversationId);
+    snapshotWriteChains.delete(conversationId);
+}
+
 // Updated state update function to broadcast mode changes and autonomous status
 function updateConversationState(
     conversationId: number, 

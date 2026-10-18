@@ -4,6 +4,7 @@ import { queryClient } from "./lib/queryClient";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
 import { AuthProvider } from "@/hooks/use-auth";
+import { Wheat } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import NotFound from "@/pages/not-found";
 import HomePage from "@/pages/home-page";
@@ -39,7 +40,7 @@ class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
       return (
         <div className="min-h-screen flex flex-col items-center justify-center bg-neutral-50 p-8">
           <div className="max-w-md w-full bg-white rounded-xl shadow-lg p-8 text-center">
-            <div className="text-6xl mb-4">🌾</div>
+            <Wheat className="mx-auto mb-4 h-16 w-16 text-farm-dark-green" aria-hidden="true" />
             <h1 className="text-2xl font-serif font-bold text-farm-blue mb-2">Something went wrong</h1>
             <p className="text-neutral-600 mb-6">
               Farm Friend Roundtable encountered an unexpected error. Please try reloading the application.

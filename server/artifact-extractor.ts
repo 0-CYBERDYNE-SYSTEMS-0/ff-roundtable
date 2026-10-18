@@ -85,7 +85,8 @@ export function extractArtifacts(content: string): { artifacts: Artifact[]; clea
     if (type === "html") {
       artifactType = "html";
     } else if (type === "json") {
-      artifactType = "json";
+      // Models often fence charts as json; the vega-lite marker identifies them.
+      artifactType = /"type"\s*:\s*"vega-lite"/.test(rawContent) ? "chart" : "json";
     } else if (type === "chart") {
       artifactType = "chart";
       language = "json";

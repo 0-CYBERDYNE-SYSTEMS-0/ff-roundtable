@@ -14,8 +14,8 @@ import { Expert, Message, Insight, File as FileType, Conversation, FarmProfile, 
 import FarmProfileModal from "@/components/farm/FarmProfileModal";
 import { useWebSocket, sendWebSocketSubscription, sendWebSocketUnsubscription } from "@/lib/websocket-utils";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import { ZapIcon, ZapOffIcon, Menu, PauseIcon, PlayIcon, ScrollText, XIcon, ChevronLeft, ChevronRight } from "lucide-react";
+import { Switch } from "@/components/ui/switch";
+import { PauseIcon, PlayIcon, ScrollText, XIcon, ChevronLeft, ChevronRight } from "lucide-react";
 import { parseNewCommand } from "@/lib/new-command";
 import AiBudgetNotice from "@/components/billing/AiBudgetNotice";
 
@@ -48,6 +48,26 @@ function getMaxLeftSidebarWidth() {
   return Math.max(MIN_LEFT_SIDEBAR_WIDTH, Math.min(MAX_LEFT_SIDEBAR_WIDTH, Math.floor(viewportWidth * 0.3)));
 }
 
+function readLeftSidebarWidth() {
+  try {
+    const storedWidth = Number(localStorage.getItem("ffLeftSidebarWidth"));
+    if (Number.isFinite(storedWidth) && storedWidth >= MIN_LEFT_SIDEBAR_WIDTH) {
+      return Math.max(MIN_LEFT_SIDEBAR_WIDTH, Math.min(getMaxLeftSidebarWidth(), storedWidth));
+    }
+  } catch {
+    // Use the default width when browser storage is unavailable.
+  }
+  return Math.min(DEFAULT_LEFT_SIDEBAR_WIDTH, getMaxLeftSidebarWidth());
+}
+
+function readLeftSidebarCollapsed() {
+  try {
+    return localStorage.getItem("ffLeftSidebarCollapsed") === "1";
+  } catch {
+    return false;
+  }
+}
+
 export default function HomePage() {
   const { user } = useAuth();
   const { toast } = useToast();
@@ -56,15 +76,31 @@ export default function HomePage() {
   const [selectedExperts, setSelectedExperts] = useState<Expert[]>([]);
   const [showExpertSelector, setShowExpertSelector] = useState(false);
   const [showFarmProfileModal, setShowFarmProfileModal] = useState(false);
-  const [farmProfileModalDismissed, setFarmProfileModalDismissed] = useState(false);
+  const [farmProfileModalDismissed, setFarmProfileModalDismissed] = useState(() => {
+    try {
+      return user ? localStorage.getItem(`ffFarmProfileDismissed:${user.id}`) === "1" : false;
+    } catch {
+      return false;
+    }
+  });
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [isLeftSidebarCollapsed, setIsLeftSidebarCollapsed] = useState(false);
-  const [leftSidebarWidth, setLeftSidebarWidth] = useState(() => Math.min(DEFAULT_LEFT_SIDEBAR_WIDTH, getMaxLeftSidebarWidth()));
+  const [isLeftSidebarCollapsed, setIsLeftSidebarCollapsed] = useState(readLeftSidebarCollapsed);
+  const [leftSidebarWidth, setLeftSidebarWidth] = useState(readLeftSidebarWidth);
   const [maxLeftSidebarWidth, setMaxLeftSidebarWidth] = useState(() => getMaxLeftSidebarWidth());
   const [isResizingLeftSidebar, setIsResizingLeftSidebar] = useState(false);
   const leftSidebarResizeRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const sidebarDrawerRef = useRef<HTMLDivElement>(null);
   const sidebarToggleRef = useRef<HTMLButtonElement>(null);
+
+  const dismissFarmProfileModal = () => {
+    setShowFarmProfileModal(false);
+    setFarmProfileModalDismissed(true);
+    try {
+      if (user) localStorage.setItem(`ffFarmProfileDismissed:${user.id}`, "1");
+    } catch {
+      // Keep the modal dismissed for this session when storage is unavailable.
+    }
+  };
 
   useEffect(() => {
     const updateSidebarMaxWidth = () => {
@@ -75,6 +111,22 @@ export default function HomePage() {
     window.addEventListener("resize", updateSidebarMaxWidth);
     return () => window.removeEventListener("resize", updateSidebarMaxWidth);
   }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("ffLeftSidebarCollapsed", isLeftSidebarCollapsed ? "1" : "0");
+    } catch {
+      // Keep the current layout for this session when storage is unavailable.
+    }
+  }, [isLeftSidebarCollapsed]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("ffLeftSidebarWidth", String(leftSidebarWidth));
+    } catch {
+      // Keep the current layout for this session when storage is unavailable.
+    }
+  }, [leftSidebarWidth]);
 
   const handleLeftSidebarResizeStart = (event: React.PointerEvent<HTMLDivElement>) => {
     if (isMobile) return;
@@ -183,9 +235,6 @@ export default function HomePage() {
       queryClient.invalidateQueries({ queryKey: ["/api/protected/conversations"] });
       setHasQueuedMessage(false);
       setActiveConversation(newConversation.id);
-      toast({
-        title: "New conversation created",
-      });
     },
     onError: (error: Error) => {
       toast({
@@ -206,10 +255,6 @@ export default function HomePage() {
       queryClient.invalidateQueries({ queryKey: ["/api/protected/conversations"] });
       setHasQueuedMessage(false);
       setActiveConversation(data.conversationId);
-      toast({
-        title: "Roundtable ready",
-        description: `Loaded ${data.expertCount} experts`,
-      });
     },
     onError: (error: Error) => {
       toast({
@@ -269,8 +314,6 @@ export default function HomePage() {
   // Fetch insights for active conversation
   const {
     data: insights,
-    isLoading: isLoadingInsights,
-    isError: insightsError,
   } = useQuery<Insight[]>({
     queryKey: [`/api/protected/conversations/${activeConversation}/insights`],
     enabled: !!activeConversation,
@@ -445,9 +488,6 @@ export default function HomePage() {
       // The server stores an "[Uploaded file: …]" chat message — refresh the
       // transcript so it appears without waiting for a conversation switch.
       queryClient.invalidateQueries({ queryKey: [`/api/protected/conversations/${activeConversation}/messages`] });
-      toast({
-        title: "File uploaded successfully",
-      });
     },
     onError: (error: Error) => {
       toast({
@@ -467,9 +507,6 @@ export default function HomePage() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: [`/api/protected/conversations/${activeConversation}/insights`] });
-      toast({
-        title: "Insights generated",
-      });
     },
     onError: (error: Error) => {
       toast({
@@ -496,9 +533,6 @@ export default function HomePage() {
       return await res.json();
     },
     onSuccess: () => {
-      toast({
-        title: "Autonomous mode enabled",
-      });
       setIsAutonomousEnabled(true);
        // State update will come via WebSocket
     },
@@ -520,9 +554,6 @@ export default function HomePage() {
       return await res.json();
     },
     onSuccess: () => {
-      toast({
-        title: "Autonomous mode disabled",
-      });
       setIsAutonomousEnabled(false);
        // State update will come via WebSocket
     },
@@ -635,6 +666,8 @@ export default function HomePage() {
     if (createConversationMutation.isPending) return;
     try {
       await createConversationMutation.mutateAsync();
+      // Drop the previous conversation's roster so remaining slots are computed for the new one.
+      setSelectedExperts([]);
       setShowExpertSelector(true);
     } catch {
       // The mutation owns the user-facing error toast.
@@ -682,6 +715,101 @@ export default function HomePage() {
     setIsConcluding(false);
     setSidebarOpen(false);
   };
+
+  const renameConversationMutation = useMutation({
+    mutationFn: async ({ conversationId, title }: { conversationId: number; title: string }) => {
+      await apiRequest("PUT", `/api/protected/conversations/${conversationId}`, { title });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/protected/conversations"] });
+    },
+    onError: (error: Error) => {
+      toast({ title: "Failed to rename conversation", description: error.message, variant: "destructive" });
+    },
+  });
+
+  const deleteConversationMutation = useMutation({
+    mutationFn: async (conversationId: number) => {
+      const response = await fetch(`/api/protected/conversations/${conversationId}`, {
+        method: "DELETE",
+        credentials: "include",
+      });
+      if (!response.ok) {
+        let message = response.status === 404 ? "Conversation not found." : response.statusText;
+        try {
+          const body = await response.json() as { message?: string };
+          message = body.message || message;
+        } catch {
+          // Keep the status-based message when no JSON error body is returned.
+        }
+        throw new Error(message || "Failed to delete conversation.");
+      }
+      return conversationId;
+    },
+    onSuccess: (_deletedId, conversationId) => {
+      const conversationQueryKey = ["/api/protected/conversations"];
+      const remaining = (queryClient.getQueryData<Conversation[]>(conversationQueryKey) ?? conversations ?? [])
+        .filter((conversation) => conversation.id !== conversationId);
+      queryClient.setQueryData<Conversation[]>(conversationQueryKey, remaining);
+      for (const section of ["messages", "experts", "insights", "files", "open-questions"]) {
+        queryClient.removeQueries({ queryKey: [`/api/protected/conversations/${conversationId}/${section}`] });
+      }
+      if (activeConversation === conversationId) {
+        if (remaining.length > 0) {
+          handleSelectConversation(remaining[0].id);
+        } else {
+          setActiveConversation(null);
+          setSelectedExperts([]);
+          setStreamingMessages(new Map());
+          setTypingExpertIds(new Set());
+          setUpNextExpertId(null);
+          setInteractionMode("idle");
+          setIsProcessing(false);
+          setHasQueuedMessage(false);
+          setIsConcluding(false);
+        }
+      }
+      queryClient.invalidateQueries({ queryKey: conversationQueryKey });
+    },
+    onError: (error: Error) => {
+      toast({ title: "Failed to delete conversation", description: error.message, variant: "destructive" });
+    },
+  });
+
+  const removeExpertMutation = useMutation({
+    mutationFn: async ({ conversationId, expertId }: { conversationId: number; expertId: number }) => {
+      const response = await fetch(`/api/protected/conversations/${conversationId}/experts/${expertId}`, {
+        method: "DELETE",
+        credentials: "include",
+      });
+      if (!response.ok) {
+        let message = response.status === 404 ? "Expert not found in this conversation." : response.statusText;
+        try {
+          const body = await response.json() as { message?: string };
+          message = body.message || message;
+        } catch {
+          // Keep the status-based message when no JSON error body is returned.
+        }
+        throw new Error(message || "Failed to remove expert.");
+      }
+      return conversationId;
+    },
+    onSuccess: (_conversationId, variables) => {
+      queryClient.invalidateQueries({ queryKey: [`/api/protected/conversations/${variables.conversationId}/experts`] });
+      queryClient.invalidateQueries({ queryKey: [`/api/protected/conversations/${variables.conversationId}/messages`] });
+    },
+    onError: (error: Error) => {
+      toast({ title: "Failed to remove expert", description: error.message, variant: "destructive" });
+    },
+  });
+
+  const handleManageExperts = () => {
+    if (activeConversation) setShowExpertSelector(true);
+  };
+
+  const handleRemoveExpert = (expertId: number) => {
+    if (activeConversation) removeExpertMutation.mutate({ conversationId: activeConversation, expertId });
+  };
   
   // Effect to set active conversation if none is selected but conversations exist
   useEffect(() => {
@@ -689,6 +817,16 @@ export default function HomePage() {
       setActiveConversation(conversations[0].id);
     }
   }, [activeConversation, conversations]);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("openFarmProfile") === "1") {
+      setShowFarmProfileModal(true);
+      params.delete("openFarmProfile");
+      const query = params.toString();
+      window.history.replaceState(null, "", `${window.location.pathname}${query ? `?${query}` : ""}${window.location.hash}`);
+    }
+  }, []);
 
   // Effect to auto-open farm profile modal when no profile exists
   useEffect(() => {
@@ -1023,22 +1161,39 @@ export default function HomePage() {
          debugLog("[UI Click] Disable Autonomous condition not met (no active conversation).");
     }
   };
+
+  const statusMessage = socketStatus !== "connected"
+    ? `${socketStatus === "reconnecting" ? "Connection interrupted. Reconnecting…" : "Connecting to the roundtable…"}${reconnectAttempts > 0 ? ` Attempt ${reconnectAttempts}.` : ""}`
+    : isConcluding
+      ? "The council is concluding…"
+      : hasQueuedMessage
+        ? interactionMode === "idle" ? "The discussion stopped; your message is saved." : "The council will pick this up next."
+        : interactionMode === "paused"
+          ? "Paused"
+          : interactionMode === "processing_sequential" || interactionMode === "autonomous"
+            ? "Experts are discussing…"
+            : "Waiting for you";
   
   return (
     <div className="flex flex-col h-screen">
-      <Header />
+      <Header
+        onOpenFarmProfile={() => setShowFarmProfileModal(true)}
+        onToggleSidebar={() => setSidebarOpen((open) => !open)}
+        isSidebarOpen={sidebarOpen}
+        sidebarToggleRef={sidebarToggleRef}
+      />
       
       <div className="flex-1 flex min-h-0 overflow-hidden relative">
         {/* Left Sidebar - hidden on mobile unless toggled */}
         <div
           ref={sidebarDrawerRef}
           id="left-sidebar-drawer"
-          className={`relative h-full min-h-0 shrink-0 ${isMobile ? 'absolute inset-y-0 left-0 z-30 transition-transform duration-300' : ''} ${isMobile && !sidebarOpen ? '-translate-x-full' : ''}`}
+          className={`h-full min-h-0 shrink-0 ${isMobile ? 'absolute inset-y-0 left-0 z-30 transition-transform duration-300' : 'relative'} ${isMobile && !sidebarOpen ? '-translate-x-full' : ''}`}
           style={{ width: isMobile ? DEFAULT_LEFT_SIDEBAR_WIDTH : isLeftSidebarCollapsed ? COLLAPSED_SIDEBAR_RAIL_WIDTH : leftSidebarWidth }}
           aria-hidden={isMobile && !sidebarOpen}
         >
           {!isMobile && isLeftSidebarCollapsed ? (
-            <div className="flex h-full justify-center border-r border-farm-tan/30 bg-white">
+            <div className="flex h-full justify-center border-r border-farm-tan/30 bg-card">
               <Button
                 type="button"
                 variant="ghost"
@@ -1056,25 +1211,21 @@ export default function HomePage() {
           ) : (
             <SidebarPanel
               conversations={conversations || []}
-              insights={insights || []}
               files={files || []}
               onStartNewSession={handleStartNewSession}
               onExportMarkdown={exportMarkdown}
               canExportIcs={hasSchedulableSource}
               onFileUpload={handleFileUpload}
               onSelectConversation={handleSelectConversation}
+              onRenameConversation={(conversationId, title) => renameConversationMutation.mutate({ conversationId, title })}
+              onDeleteConversation={(conversationId) => deleteConversationMutation.mutate(conversationId)}
               activeConversationId={activeConversation}
-              onRefreshInsights={() => generateInsightsMutation.mutate()}
-              isLoadingInsights={generateInsightsMutation.isPending}
               isLoadingConversations={isLoadingConversations}
               conversationsError={conversationsError}
-              isLoadingInsightsData={isLoadingInsights}
-              insightsError={insightsError}
               isLoadingFiles={isLoadingFiles}
               filesError={filesError}
               isStartingNewSession={createConversationMutation.isPending}
               isUploading={uploadFileMutation.isPending}
-              experts={experts || []}
               onCollapse={!isMobile ? () => setIsLeftSidebarCollapsed(true) : undefined}
             />
           )}
@@ -1109,173 +1260,79 @@ export default function HomePage() {
         
         {/* Main Content Area */}
         <div className="flex-1 flex flex-col overflow-hidden min-h-0">
-            {socketStatus !== "connected" && (
-              <div
-                role="status"
-                aria-live="polite"
-                className="flex flex-wrap items-center gap-2 px-4 py-2 text-sm bg-farm-yellow/20 text-yellow-900 border-b border-farm-yellow/40"
-              >
-                <span>{socketStatus === "reconnecting" ? "Connection interrupted. Reconnecting…" : "Connecting to the roundtable…"}</span>
-                {reconnectAttempts > 0 && <span className="text-xs">Attempt {reconnectAttempts}</span>}
-              </div>
-            )}
-            {hasQueuedMessage && (
-              <div
-                role="status"
-                aria-live="polite"
-                className="flex items-center px-4 py-1.5 text-xs bg-farm-powder/20 text-farm-blue border-b border-farm-tan/20"
-              >
-                <span>{interactionMode === "idle"
-                  ? "The discussion stopped; your message is saved."
-                  : "The council will pick this up next."}</span>
-              </div>
-            )}
-            {isConcluding && (
-              <div
-                role="status"
-                aria-live="polite"
-                className="flex flex-wrap items-center gap-2 px-4 py-2 text-sm bg-farm-yellow/20 text-yellow-900 border-b border-farm-yellow/40"
-              >
-                <span>The council is concluding…</span>
-              </div>
-            )}
-            {/* === Interaction Control Bar (Positioned at the top of this column) === */}
-            {activeConversation && (
-                 <div className="flex-shrink-0 flex flex-wrap items-center justify-between gap-2 px-3 md:px-6 py-3 border-b border-farm-tan/30 bg-gradient-to-r from-farm-powder/20 to-white shadow-sm">
-                     <div className="flex flex-wrap items-center gap-2 md:gap-3">
-                         {isMobile && (
-                           <Button
-                             variant="ghost" 
-                             size="icon"
-                             ref={sidebarToggleRef}
-                             className="md:hidden"
-                             onClick={() => setSidebarOpen(!sidebarOpen)}
-                             aria-label="Toggle sidebar"
-                             aria-expanded={sidebarOpen}
-                             aria-controls="left-sidebar-drawer"
-                           >
-                             <Menu className="h-5 w-5" />
-                           </Button>
-                         )}
-                         <span className="text-sm font-semibold text-farm-blue">Status:</span>
-                         <Badge variant={interactionMode === 'paused' ? 'secondary' : interactionMode === 'idle' ? 'outline' : 'default'}
-                                className={`${interactionMode === 'autonomous' || interactionMode === 'processing_sequential' ? 'bg-farm-green/20 text-farm-dark-green border-farm-green' : ''}
-                                          ${interactionMode === 'paused' ? 'bg-farm-yellow/20 text-yellow-800 border-farm-yellow' : ''}
-                                          font-medium capitalize`}>
-                             {interactionMode.replace('_', ' ')}
-                         </Badge>
-                          <span className="text-sm font-semibold text-farm-blue md:ml-4">Autonomous:</span>
-                         <Badge variant={isAutonomousEnabled ? 'default' : 'secondary'}
-                                className={`${isAutonomousEnabled ? 'bg-farm-blue/20 text-farm-blue border-farm-blue' : 'bg-neutral-200 text-neutral-600'} font-medium`}>
-                             {isAutonomousEnabled ? 'Enabled' : 'Disabled'}
-                         </Badge>
-                         {expertTurnCounts && (
-                           <span className="text-xs text-neutral-600" aria-live="polite">
-                             Expert turns: {expertTurnCounts.consumed} used · {expertTurnCounts.remaining} remaining
-                           </span>
-                         )}
-                         {activeHasCharter && (
-                           <Badge
-                             variant="outline"
-                             aria-label="This conversation has a council charter"
-                             className="bg-farm-tan/30 text-yellow-900 border-farm-tan/50 font-medium"
-                           >
-                             <ScrollText className="h-3 w-3 mr-1" />
-                             Charter
-                           </Badge>
-                         )}
-                     </div>
-                     <div className="flex flex-wrap items-center gap-2 md:gap-3">
-                          {/* G6: view/edit the council charter for the active conversation */}
-                          <Button
-                              variant="outline"
-                              size="sm"
-                              onClick={() => setCharterDialogOpen(true)}
-                              aria-label="Edit the council charter"
-                              className="border-farm-tan/60 text-yellow-900 hover:bg-farm-tan/40 hover:text-neutral-900 transition-all duration-200 font-medium"
-                          >
-                              <ScrollText className="h-4 w-4 mr-1.5" />
-                              Charter
-                          </Button>
-
-                          {/* Pause the running round — the current expert finishes, then the council parks */}
-                          {(interactionMode === "processing_sequential" || interactionMode === "autonomous") && (
-                            <Button
-                                variant="outline"
-                                size="sm"
-                                onClick={() => pauseMutation.mutate()}
-                                disabled={pauseMutation.isPending}
-                                aria-label="Pause the roundtable"
-                                className="border-farm-yellow text-yellow-800 hover:bg-farm-yellow hover:text-neutral-900 transition-all duration-200 font-medium"
-                            >
-                                <PauseIcon className="h-4 w-4 mr-1.5" />
-                                Pause
-                            </Button>
-                          )}
-
-                          {/* Resume a paused round */}
-                          {interactionMode === "paused" && (
-                            <Button
-                                variant="outline"
-                                size="sm"
-                                onClick={() => resumeMutation.mutate()}
-                                disabled={resumeMutation.isPending}
-                                aria-label="Resume the roundtable"
-                                className="border-farm-green text-farm-green hover:bg-farm-green hover:text-white transition-all duration-200 font-medium"
-                            >
-                                <PlayIcon className="h-4 w-4 mr-1.5" />
-                                Resume
-                            </Button>
-                          )}
-
-                          {/* Conditionally Render Disable Button */}
-                         {isAutonomousEnabled && (
-                            <Button
-                                variant="outline"
-                                size="sm"
-                                onClick={handleDisableAutonomous}
-                                disabled={disableAutoMutation.isPending}
-                                aria-label="Disable Autonomous Mode"
-                                className="border-farm-blue text-farm-blue hover:bg-farm-blue hover:text-white transition-all duration-200 font-medium"
-                                >
-                                <ZapOffIcon className="h-4 w-4 mr-1.5" />
-                                Disable Auto
-                            </Button>
-                         )}
-
-                         {/* Conditionally Render Enable Button */}
-                         {!isAutonomousEnabled && (
-                             <Button
-                                 variant="outline"
-                                 size="sm"
-                                 onClick={handleEnableAutonomous}
-                                 disabled={enableAutoMutation.isPending}
-                                 aria-label="Enable Autonomous Mode"
-                                 className="border-farm-green text-farm-green hover:bg-farm-green hover:text-white transition-all duration-200 font-medium"
-                                 >
-                                 <ZapIcon className="h-4 w-4 mr-1.5" />
-                                 Enable Auto
-                             </Button>
-                         )}
-                     </div>
+            {(socketStatus !== "connected" || activeConversation) && (
+              <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border bg-card px-3 py-2 md:px-6">
+                <div className="flex min-w-0 basis-full flex-wrap items-center gap-2 text-sm md:flex-1 md:basis-0">
+                  <span role="status" aria-live="polite" className="font-medium text-neutral-800">{statusMessage}</span>
+                  {expertTurnCounts && (
+                    <span className="text-xs text-neutral-600" aria-live="polite">
+                      Expert turns: {expertTurnCounts.consumed} used · {expertTurnCounts.remaining} remaining
+                    </span>
+                  )}
+                  {showCharterNudge && (
+                    <span className="flex items-center gap-1 text-xs text-neutral-700">
+                      <ScrollText className="h-3.5 w-3.5 shrink-0" />
+                      Set a council charter so your experts share one goal.
+                      <button
+                        type="button"
+                        onClick={handleDismissCharterNudge}
+                        aria-label="Dismiss charter suggestion"
+                        className="rounded p-1 hover:bg-muted motion-reduce:transition-none"
+                      >
+                        <XIcon className="h-3.5 w-3.5" />
+                      </button>
+                    </span>
+                  )}
                 </div>
-             )}
-
-            {/* G6: one-time nudge to set a charter — dismissed via X and persisted */}
-            {showCharterNudge && (
-              <div className="flex items-center justify-between gap-2 px-4 py-1.5 text-xs bg-farm-powder/30 text-farm-blue border-b border-farm-tan/30">
-                <span className="flex items-center gap-1.5 min-w-0">
-                  <ScrollText className="h-3.5 w-3.5 flex-shrink-0" />
-                  <span className="truncate">Set a council charter so your experts share one goal and know when to conclude.</span>
-                </span>
-                <button
-                  type="button"
-                  onClick={handleDismissCharterNudge}
-                  aria-label="Dismiss charter suggestion"
-                  className="p-1 rounded hover:bg-farm-powder/50 transition-colors flex-shrink-0"
-                >
-                  <XIcon className="h-3.5 w-3.5" />
-                </button>
+                {activeConversation && (
+                  <div className="flex flex-wrap items-center gap-2 md:gap-3" role="group" aria-label="Roundtable controls">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setCharterDialogOpen(true)}
+                      aria-label="Edit the council charter"
+                      className="border-farm-tan/60 text-yellow-900 dark:text-yellow-200 hover:bg-farm-tan/40 hover:text-neutral-900 transition-all duration-200 font-medium"
+                    >
+                      <ScrollText className="mr-1.5 h-4 w-4" />
+                      Charter
+                    </Button>
+                    {(interactionMode === "processing_sequential" || interactionMode === "autonomous") && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => pauseMutation.mutate()}
+                        disabled={pauseMutation.isPending}
+                        aria-label="Pause the roundtable"
+                        className="border-farm-yellow text-yellow-800 hover:bg-farm-yellow hover:text-neutral-900 dark:text-yellow-200 dark:hover:text-black transition-all duration-200 font-medium"
+                      >
+                        <PauseIcon className="mr-1.5 h-4 w-4" />
+                        Pause
+                      </Button>
+                    )}
+                    {interactionMode === "paused" && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => resumeMutation.mutate()}
+                        disabled={resumeMutation.isPending}
+                        aria-label="Resume the roundtable"
+                        className="border-farm-dark-green text-farm-dark-green hover:bg-farm-dark-green hover:text-white transition-all duration-200 font-medium"
+                      >
+                        <PlayIcon className="mr-1.5 h-4 w-4" />
+                        Resume
+                      </Button>
+                    )}
+                    <label htmlFor="autonomous-mode-switch" title="When enabled, experts can continue discussing without waiting for a new message." className="flex items-center gap-2 text-sm font-medium text-neutral-800">
+                      <span>Autonomous mode</span>
+                      <Switch
+                        id="autonomous-mode-switch"
+                        checked={isAutonomousEnabled}
+                        disabled={enableAutoMutation.isPending || disableAutoMutation.isPending}
+                        onCheckedChange={(enabled) => enabled ? handleEnableAutonomous() : handleDisableAutonomous()}
+                      />
+                    </label>
+                  </div>
+                )}
               </div>
             )}
 
@@ -1295,13 +1352,16 @@ export default function HomePage() {
                         messagesError={messagesError}
                         user={user}
                         insights={insights || []}
-                        visualizations={[]}
                         streamingMessages={streamingMessages}
                         typingExpertIds={typingExpertIds}
                         upNextExpertId={upNextExpertId}
+                        onManageExperts={handleManageExperts}
+                        onRemoveExpert={handleRemoveExpert}
+                        onRefreshInsights={() => generateInsightsMutation.mutate()}
+                        isRefreshingInsights={generateInsightsMutation.isPending}
                     />
                 ) : (
-                    <div className="flex-1 flex items-center justify-center bg-gradient-to-br from-farm-powder/10 via-white to-farm-tan/10">
+                    <div className="flex-1 flex items-center justify-center bg-gradient-to-br from-farm-powder/10 via-card to-farm-tan/10">
                         <div className="text-center max-w-2xl px-8">
                             <h2 className="text-3xl font-bold text-farm-blue mb-3 tracking-tight">Welcome to Farm Friend Roundtable</h2>
                             <p className="text-lg text-neutral-600 mb-8 leading-relaxed">Start a new conversation to begin chatting with agricultural experts who can help with your farming needs</p>
@@ -1309,17 +1369,19 @@ export default function HomePage() {
                                 <button
                                     onClick={handleStartNewSession}
                                     disabled={createConversationMutation.isPending}
-                                    className="bg-farm-green text-white px-6 py-3 rounded-lg hover:bg-farm-dark-green transition-all duration-200 shadow-md hover:shadow-lg font-semibold"
+                                    className="bg-farm-dark-green text-white px-6 py-3 rounded-lg hover:bg-farm-blue transition-all duration-200 shadow-md hover:shadow-lg font-semibold"
                                 >
                                     Start New Roundtable
                                 </button>
-                                <button
-                                    onClick={() => quickSetupMutation.mutate()}
-                                    disabled={quickSetupMutation.isPending}
-                                    className="bg-farm-yellow text-neutral-800 px-6 py-3 rounded-lg hover:bg-yellow-400 transition-all duration-200 shadow-md hover:shadow-lg disabled:opacity-50 flex items-center gap-2 font-semibold"
-                                >
-                                    ⚡ Quick Test
-                                </button>
+                                {import.meta.env.DEV && (
+                                  <button
+                                      onClick={() => quickSetupMutation.mutate()}
+                                      disabled={quickSetupMutation.isPending}
+                                      className="bg-farm-yellow text-neutral-800 px-6 py-3 rounded-lg hover:bg-yellow-400 transition-all duration-200 shadow-md hover:shadow-lg disabled:opacity-50 flex items-center gap-2 font-semibold"
+                                  >
+                                      Quick Test
+                                  </button>
+                                )}
                             </div>
                         </div>
                     </div>
@@ -1340,12 +1402,9 @@ export default function HomePage() {
       {/* Farm Profile Modal — shown on first login when no profile exists */}
       <FarmProfileModal
         isOpen={showFarmProfileModal}
-        onClose={() => {
-          setShowFarmProfileModal(false);
-          setFarmProfileModalDismissed(true);
-        }}
+        onClose={dismissFarmProfileModal}
         onSaved={() => {
-          setShowFarmProfileModal(false);
+          dismissFarmProfileModal();
           queryClient.invalidateQueries({ queryKey: ["/api/protected/farm-profile"] });
         }}
       />

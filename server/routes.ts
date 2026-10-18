@@ -6,7 +6,7 @@ import { createServer, type Server } from "http";
 import { storage, DeliverableConflictError } from "./storage";
 import { setupAuth } from "./auth";
 import { callOpenRouterAPI, callPerplexityAPI, generateSystemPrompt, getExpertResponse, generateInsights } from "./ai";
-import { processMessageTurnBased, InteractionOrchestrator, getConversationState, getFarmerFileIntent, persistAutonomySettings, restorePausedFromSnapshot } from "./orchestrator";
+import { processMessageTurnBased, InteractionOrchestrator, getConversationState, getFarmerFileIntent, persistAutonomySettings, restorePausedFromSnapshot, isConversationBusy, discardConversationState } from "./orchestrator";
 import { encryptApiKey, decryptApiKey, maskApiKey } from "./crypto";
 import multer from "multer";
 import path from "path";
@@ -1175,6 +1175,34 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
   
+  // Delete a conversation and everything in it. Refused while a discussion
+  // is running; same 404-on-mismatch ownership rule as the sibling routes.
+  app.delete("/api/protected/conversations/:id", async (req, res) => {
+    try {
+      const conversationId = parseInt(req.params.id);
+      const conversation = await storage.getConversation(conversationId);
+
+      if (!conversation || conversation.userId !== req.user!.id) {
+        return res.status(404).json({ message: "Conversation not found" });
+      }
+      if (isConversationBusy(conversationId)) {
+        return res.status(409).json({ message: "Wait for the discussion to finish before deleting this conversation." });
+      }
+
+      const conversationFiles = await storage.getConversationFiles(conversationId);
+      await discardConversationState(conversationId);
+      await storage.deleteConversation(conversationId);
+      // Best-effort: the rows are gone, so a leftover file must not fail the request.
+      for (const file of conversationFiles) {
+        const filePath = getStoredUploadPath(file);
+        if (filePath) await fs.promises.unlink(filePath).catch(() => {});
+      }
+      res.status(204).end();
+    } catch (error: any) {
+      res.status(500).json({ message: error.message });
+    }
+  });
+
   // Expert endpoints
   app.post("/api/protected/conversations/:id/experts", async (req, res) => {
     try {
@@ -1255,6 +1283,37 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       const experts = await storage.getConversationExperts(conversationId);
       res.json(experts);
+    } catch (error: any) {
+      res.status(500).json({ message: error.message });
+    }
+  });
+
+  // Remove an expert from a conversation. Refused while a discussion is
+  // running, since the turn loop holds the roster in memory.
+  app.delete("/api/protected/conversations/:conversationId/experts/:expertId", async (req, res) => {
+    try {
+      const conversationId = parseInt(req.params.conversationId);
+      const expertId = parseInt(req.params.expertId);
+      const conversation = await storage.getConversation(conversationId);
+
+      if (!conversation || conversation.userId !== req.user!.id) {
+        return res.status(404).json({ message: "Conversation not found" });
+      }
+      const expert = await storage.getExpertById(expertId);
+      if (!expert || expert.conversationId !== conversationId) {
+        return res.status(404).json({ message: "Expert not found" });
+      }
+      if (isConversationBusy(conversationId)) {
+        return res.status(409).json({ message: "Wait for the discussion to finish before removing an expert." });
+      }
+
+      await storage.deleteExpert(expertId);
+      // Idle state caches the roster; drop it so the next message rebuilds it.
+      await discardConversationState(conversationId);
+      // A persisted paused snapshot indexes the old roster; clear it so
+      // resume cannot restore a stale expert index.
+      await storage.updateConversation(conversationId, { orchestratorState: null });
+      res.status(204).end();
     } catch (error: any) {
       res.status(500).json({ message: error.message });
     }

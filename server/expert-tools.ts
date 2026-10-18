@@ -195,7 +195,7 @@ title: <short descriptive title>
 <markdown content>
 \`\`\`
 Reusing the same title revises that document as a new version. You may only revise documents you wrote (or that the farmer explicitly asked you to change); otherwise your block is saved as a proposal for the owner.
-- Charts: only from numbers the farmer gave, the weather data provided, or the research results. Every chart JSON must include "title" (specific, e.g. "June rainfall vs. 30-yr normal, Ames IA") and "sources" (list of URLs from RESEARCH RESULTS, or "farmer" / "weather"). If you have no real data, do not make a chart. Never use example or illustrative numbers.`;
+- Charts: put the chart JSON in a fenced block tagged \`chart\` (\`\`\`chart ... \`\`\`), never \`json\`, with every brace closed. Only from numbers the farmer gave, the weather data provided, or the research results. Every chart JSON must include "title" (specific, e.g. "June rainfall vs. 30-yr normal, Ames IA") and "sources" (list of URLs from RESEARCH RESULTS, or "farmer" / "weather"). If you have no real data, do not make a chart. Never use example or illustrative numbers.`;
 }
 
 // ---------- Deliverables ----------
@@ -320,6 +320,26 @@ export async function saveExpertDeliverable(
 
 const GENERIC_TITLES = /^(chart( artifact)?|visual aid|data|trend|untitled|seasonal agricultural trends)$/i;
 
+/** Models often drop trailing closers from long JSON; add the missing ones before giving up. */
+function parseChartJson(text: string): unknown {
+  try { return JSON.parse(text); } catch (error) {
+    const closers: string[] = [];
+    let inString = false;
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i];
+      if (inString) {
+        if (c === "\\") i++;
+        else if (c === '"') inString = false;
+      } else if (c === '"') inString = true;
+      else if (c === "{") closers.push("}");
+      else if (c === "[") closers.push("]");
+      else if (c === "}" || c === "]") { if (closers.pop() !== c) throw error; }
+    }
+    if (inString || !closers.length) throw error;
+    return JSON.parse(text + closers.reverse().join(""));
+  }
+}
+
 export type ChartArtifactRejectionReason =
   | "invalid-json"
   | "invalid-vega-envelope"
@@ -366,7 +386,7 @@ export function validateChartArtifactDetailed(
   evidence: ChartEvidence = {},
 ): ChartValidationResult {
   let chart: any;
-  try { chart = JSON.parse(chartJson); } catch { return { ok: false, reason: "invalid-json" }; }
+  try { chart = parseChartJson(chartJson); } catch { return { ok: false, reason: "invalid-json" }; }
   if (!chart || typeof chart !== "object" || Array.isArray(chart)) return { ok: false, reason: "invalid-json" };
 
   const title = typeof chart.title === "string" ? chart.title.trim() : "";

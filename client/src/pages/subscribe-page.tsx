@@ -108,7 +108,7 @@ export default function SubscribePage() {
             </CardContent>
             <CardFooter>
               <Button className="w-full" onClick={startCheckout} disabled={isAuthLoading || isRedirecting}>
-                {isRedirecting ? (<><Loader2 className="mr-2 h-4 w-4 animate-spin" />Opening checkout...</>) : `Subscribe - ${plan.price}`}
+                {isRedirecting ? (<><Loader2 className="mr-2 h-4 w-4 animate-spin motion-reduce:animate-none" />Opening checkout...</>) : `Subscribe - ${plan.price}`}
               </Button>
             </CardFooter>
           </Card>

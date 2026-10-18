@@ -1,9 +1,21 @@
 import { formatLocalDateTime } from "@/lib/format-local-time";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Plus, RefreshCw, Download, Upload, FileDown, FileText, Image, ArrowRight, CalendarDays, ChevronDown, ChevronLeft } from "lucide-react";
-import { Insight, File as FileSchema, Conversation, Expert } from "@shared/schema";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { Plus, Download, Upload, FileDown, FileText, Image, CalendarDays, ChevronDown, ChevronLeft, Check, ClipboardList, FolderOpen, Lightbulb, Pencil, Search, Trash2, X } from "lucide-react";
+import { File as FileSchema, Conversation } from "@shared/schema";
 import { addDays, format } from "date-fns";
 import CalendarPreviewDialog from "./CalendarPreviewDialog";
 import type { CalendarDraft } from "@shared/calendar-draft";
@@ -31,9 +43,11 @@ function readCalendarStart(conversationId: number | null): string | null {
   }
 }
 
+// The conversations list API adds a computed updatedAt (latest message time).
+export type ConversationSummary = Conversation & { updatedAt?: Date | string | null };
+
 interface SidebarPanelProps {
-  conversations: Conversation[];
-  insights: Insight[];
+  conversations: ConversationSummary[];
   files: FileSchema[];
   onStartNewSession: () => void;
   onExportMarkdown: () => void;
@@ -41,23 +55,19 @@ interface SidebarPanelProps {
   canExportIcs?: boolean;
   onFileUpload: (file: File) => void;
   onSelectConversation: (id: number) => void;
+  onRenameConversation: (id: number, title: string) => void;
+  onDeleteConversation: (id: number) => void;
   activeConversationId: number | null;
-  onRefreshInsights: () => void;
-  isLoadingInsights: boolean;
   isLoadingConversations?: boolean;
   conversationsError?: boolean;
-  isLoadingInsightsData?: boolean;
-  insightsError?: boolean;
   isLoadingFiles?: boolean;
   filesError?: boolean;
   isStartingNewSession?: boolean;
   isUploading?: boolean;
-  experts?: Expert[];
 }
 
 export default function SidebarPanel({
   conversations,
-  insights,
   files,
   onStartNewSession,
   onExportMarkdown,
@@ -65,20 +75,20 @@ export default function SidebarPanel({
   canExportIcs = true,
   onFileUpload,
   onSelectConversation,
+  onRenameConversation,
+  onDeleteConversation,
   activeConversationId,
-  onRefreshInsights,
-  isLoadingInsights,
   isLoadingConversations = false,
   conversationsError = false,
-  isLoadingInsightsData = false,
-  insightsError = false,
   isLoadingFiles = false,
   filesError = false,
   isStartingNewSession = false,
   isUploading = false,
-  experts = []
 }: SidebarPanelProps) {
-  const [activeTab, setActiveTab] = useState<'conversations' | 'insights' | 'files'>('insights');
+  const [conversationSearch, setConversationSearch] = useState("");
+  const [editingConversationId, setEditingConversationId] = useState<number | null>(null);
+  const [editingTitle, setEditingTitle] = useState("");
+  const [deleteTarget, setDeleteTarget] = useState<ConversationSummary | null>(null);
   const [calendarStart, setCalendarStart] = useState(() => readCalendarStart(activeConversationId) ?? nextMondayDate());
   const [calendarPreview, setCalendarPreview] = useState<CalendarPreview | null>(null);
   const [isLoadingCalendarPreview, setIsLoadingCalendarPreview] = useState(false);
@@ -170,9 +180,16 @@ export default function SidebarPanel({
       e.target.value = '';
     }
   };
+
+  // The search input only renders at 10+ conversations, so only filter then.
+  const displayedConversations = conversations.length >= 10
+    ? conversations.filter((conversation) =>
+        (conversation.title ?? "").toLowerCase().includes(conversationSearch.trim().toLowerCase())
+      )
+    : conversations;
   
   return (
-    <aside className="w-full min-w-0 h-full min-h-0 overflow-hidden bg-white bg-gradient-to-b from-farm-powder/5 to-white border-r border-farm-tan/30 flex flex-col z-10 shadow-lg">
+    <aside className="w-full min-w-0 h-full min-h-0 overflow-hidden bg-card bg-gradient-to-b from-farm-powder/5 to-card border-r border-farm-tan/30 flex flex-col z-10 shadow-lg">
       <div className="flex flex-col h-full min-h-0">
         {/* Session Controls */}
         <div className="shrink-0 p-4 border-b border-farm-tan/30 [@media(max-height:500px)]:max-h-[45vh] [@media(max-height:500px)]:overflow-y-auto">
@@ -195,7 +212,7 @@ export default function SidebarPanel({
             )}
           </div>
           <Button
-            className="w-full bg-gradient-to-r from-farm-green to-farm-dark-green hover:from-farm-dark-green hover:to-farm-green text-white rounded-lg px-4 py-2.5 flex items-center justify-center mb-2 shadow-md hover:shadow-lg transition-all duration-200 font-semibold"
+            className="w-full bg-farm-dark-green hover:bg-farm-blue text-white rounded-lg px-4 py-2.5 flex items-center justify-center mb-2 shadow-md hover:shadow-lg transition-all duration-200 font-semibold"
             onClick={onStartNewSession}
             disabled={isStartingNewSession}
           >
@@ -214,7 +231,7 @@ export default function SidebarPanel({
             type="button"
             aria-expanded={isCalendarSectionOpen}
             aria-controls="calendar-plan-controls"
-            className="mt-3 flex w-full items-center justify-between rounded-md py-1 text-left text-sm font-semibold text-farm-blue hover:text-farm-green focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-farm-blue"
+            className="mt-3 flex w-full items-center justify-between rounded-md py-1 text-left text-sm font-semibold text-farm-blue hover:text-farm-dark-green focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-farm-blue"
             onClick={() => setIsCalendarSectionOpen((open) => !open)}
           >
             <span className="flex items-center gap-2"><CalendarDays className="h-4 w-4" />Calendar plan</span>
@@ -255,7 +272,7 @@ export default function SidebarPanel({
             </p>
             <Button
               variant="outline"
-              className="w-full mt-2 border-2 border-farm-green text-farm-green hover:bg-farm-green hover:text-white rounded-lg px-4 py-2.5 flex items-center justify-center transition-all duration-200 font-medium"
+              className="w-full mt-2 border-2 border-farm-dark-green text-farm-dark-green hover:bg-farm-dark-green hover:text-white rounded-lg px-4 py-2.5 flex items-center justify-center transition-all duration-200 font-medium"
               onClick={() => setOpenCalendar({})}
               disabled={!activeConversationId || !calendarStart}
               title="Review and edit your calendar before exporting (.ics)"
@@ -266,216 +283,232 @@ export default function SidebarPanel({
           </div>
         </div>
 
-        {/* Tabs */}
-        <div className="flex shrink-0 border-b border-farm-tan/30 bg-white">
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeTab === 'conversations'}
-            className={`flex-1 py-3 text-center font-semibold text-sm transition-all duration-200 ${activeTab === 'conversations' ? 'text-farm-blue border-b-2 border-farm-blue bg-farm-powder/10' : 'text-neutral-600 hover:text-farm-blue hover:bg-farm-powder/5'}`}
-            onClick={() => setActiveTab('conversations')}
-          >
-            Conversations
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeTab === 'insights'}
-            className={`flex-1 py-3 text-center font-semibold text-sm transition-all duration-200 ${activeTab === 'insights' ? 'text-farm-blue border-b-2 border-farm-blue bg-farm-powder/10' : 'text-neutral-600 hover:text-farm-blue hover:bg-farm-powder/5'}`}
-            onClick={() => setActiveTab('insights')}
-          >
-            Insights
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeTab === 'files'}
-            className={`flex-1 py-3 text-center font-semibold text-sm transition-all duration-200 ${activeTab === 'files' ? 'text-farm-blue border-b-2 border-farm-blue bg-farm-powder/10' : 'text-neutral-600 hover:text-farm-blue hover:bg-farm-powder/5'}`}
-            onClick={() => setActiveTab('files')}
-          >
-            Files
-          </button>
-        </div>
-        
-        {/* Tab Content */}
-        <ScrollArea className="flex-1 min-h-0 p-4">
-          {activeTab === 'conversations' && (
-            <div>
-              <div className="flex justify-between items-center mb-4">
-                <h2 className="font-serif font-bold text-lg text-farm-blue">Your Conversations</h2>
-              </div>
+        <Tabs defaultValue="conversations" className="flex min-h-0 flex-1 flex-col">
+          <TabsList className="h-auto w-full shrink-0 rounded-none border-b border-farm-tan/30 bg-card p-0">
+            <TabsTrigger value="conversations" className="flex-1 rounded-none py-3 font-semibold text-sm">Conversations</TabsTrigger>
+            <TabsTrigger value="files" className="flex-1 rounded-none py-3 font-semibold text-sm">Files</TabsTrigger>
+          </TabsList>
 
-              {isLoadingConversations ? (
-                <p className="py-8 text-center text-sm text-neutral-500">Loading conversations…</p>
-              ) : conversationsError ? (
-                <p role="alert" className="py-8 text-center text-sm text-red-600">Couldn’t load conversations. Please refresh the page.</p>
-              ) : conversations.length === 0 ? (
-                <div className="text-center py-8 text-neutral-500 space-y-4">
-                  <div className="bg-farm-powder/20 rounded-xl p-6 border border-farm-tan/30">
-                    <div className="text-4xl mb-3">📋</div>
-                    <p className="font-semibold text-farm-blue">No conversations yet</p>
-                    <p className="text-sm mt-2 text-neutral-600">Click "New Roundtable" above to start your first conversation</p>
-                  </div>
-                  <div className="bg-farm-green/10 rounded-xl p-4 border border-farm-green/30">
-                    <p className="text-xs text-farm-dark-green leading-relaxed">💡 Tip: Each roundtable brings together multiple experts to discuss your agricultural topics.</p>
-                  </div>
+          <ScrollArea className="flex-1 min-h-0 p-4">
+            <TabsContent value="conversations" className="m-0 focus-visible:ring-0">
+              <div>
+                <div className="flex justify-between items-center mb-4">
+                  <h2 className="font-serif font-bold text-lg text-farm-blue">Your Conversations</h2>
                 </div>
-              ) : (
-                <div className="space-y-2">
-                  {conversations.map(conversation => (
-                    <button
-                      key={conversation.id}
-                      type="button"
-                      className={`w-full text-left p-3 rounded-lg cursor-pointer transition-all duration-200 ${activeConversationId === conversation.id ? 'bg-farm-powder/30 border-2 border-farm-blue shadow-md' : 'bg-white border border-farm-tan/30 hover:bg-farm-powder/10 hover:border-farm-blue/30'}`}
-                      onClick={() => onSelectConversation(conversation.id)}
-                    >
-                      <h3 className="font-semibold text-farm-blue">{conversation.title}</h3>
-                      <p className="text-xs text-neutral-600 mt-1">
-                        {conversation.createdAt ? format(new Date(conversation.createdAt), 'MMM d, yyyy • h:mm a') : 'Unknown date'}
-                      </p>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-          
-          {activeTab === 'insights' && (
-            <div>
-              <div className="flex justify-between items-center mb-4">
-                <h2 className="font-serif font-bold text-lg text-farm-blue">Key Insights</h2>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="text-farm-blue hover:text-farm-green hover:bg-farm-powder/30 cursor-pointer h-8 w-8 transition-all duration-200"
-                  title="Refresh insights"
-                  onClick={onRefreshInsights}
-                  disabled={isLoadingInsights || isLoadingInsightsData}
-                  aria-label="Refresh insights"
-                >
-                  <RefreshCw className={`h-4 w-4 ${isLoadingInsights ? 'animate-spin' : ''}`} />
-                </Button>
-              </div>
 
-              {isLoadingInsightsData ? (
-                <p className="py-8 text-center text-sm text-neutral-500">Loading insights…</p>
-              ) : insightsError ? (
-                <p role="alert" className="py-8 text-center text-sm text-red-600">Couldn’t load insights. Please try refreshing.</p>
-              ) : insights.length === 0 ? (
-                <div className="text-center py-8 text-neutral-500 space-y-4">
-                  <div className="bg-farm-powder/20 rounded-xl p-6 border border-farm-tan/30">
-                    <div className="text-4xl mb-3">💡</div>
-                    <p className="font-semibold text-farm-blue">No insights generated yet</p>
-                    <p className="text-sm mt-2 text-neutral-600">Keep chatting with your experts to unlock valuable insights</p>
-                  </div>
-                  <div className="bg-farm-green/10 rounded-xl p-4 border border-farm-green/30">
-                    <p className="text-xs text-farm-dark-green leading-relaxed">🌱 Insights automatically generate as conversations grow and patterns emerge.</p>
-                  </div>
-                </div>
-              ) : (
-                <div className="space-y-3">
-                  {insights.map(insight => (
-                    <div key={insight.id} className="bg-gradient-to-br from-farm-powder/20 to-white rounded-xl p-4 border border-farm-tan/30 shadow-sm hover:shadow-md transition-shadow">
-                      <h3 className="font-semibold text-farm-blue mb-2">{insight.title}</h3>
-                      <ul className="text-sm">
-                        {insight.points && insight.points.map((point, index) => (
-                          <li key={index} className="flex items-start mb-2">
-                            <ArrowRight className="text-farm-green h-4 w-4 mr-2 mt-0.5 flex-shrink-0" />
-                            <span className="text-neutral-700 leading-relaxed">{point}</span>
-                          </li>
-                        ))}
-                      </ul>
+                {conversations.length >= 10 && (
+                  <label className="relative mb-3 block">
+                    <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" aria-hidden="true" />
+                    <Input
+                      type="search"
+                      value={conversationSearch}
+                      onChange={(event) => setConversationSearch(event.target.value)}
+                      placeholder="Search conversations"
+                      aria-label="Search conversations"
+                      className="pl-9"
+                    />
+                  </label>
+                )}
+
+                {isLoadingConversations ? (
+                  <p className="py-8 text-center text-sm text-neutral-500">Loading conversations…</p>
+                ) : conversationsError ? (
+                  <p role="alert" className="py-8 text-center text-sm text-red-600">Couldn’t load conversations. Please refresh the page.</p>
+                ) : conversations.length === 0 ? (
+                  <div className="text-center py-8 text-neutral-500 space-y-4">
+                    <div className="bg-farm-powder/20 rounded-xl p-6 border border-farm-tan/30">
+                      <ClipboardList className="mx-auto mb-3 h-8 w-8 text-farm-dark-green" aria-hidden="true" />
+                      <p className="font-semibold text-farm-blue">No conversations yet</p>
+                      <p className="text-sm mt-2 text-neutral-600">Click "New Roundtable" above to start your first conversation</p>
                     </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-          
-          {activeTab === 'files' && (
-            <div>
-              <div className="flex justify-between items-center mb-4">
-                <h2 className="font-serif font-bold text-lg text-farm-blue">Attachments</h2>
-                <div>
-                  <input
-                    type="file"
-                    ref={fileInputRef}
-                    className="hidden"
-                    onChange={handleFileInputChange}
-                  />
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    className="text-farm-blue hover:text-farm-green hover:bg-farm-powder/30 cursor-pointer h-8 w-8 transition-all duration-200"
-                    title="Upload File"
-                    onClick={handleFileUploadClick}
-                    disabled={isUploading || !activeConversationId}
-                    aria-label={isUploading ? "Uploading file" : "Upload file"}
-                  >
-                    <Upload className="h-4 w-4" />
-                  </Button>
-                </div>
-              </div>
+                    <div className="bg-farm-green/10 rounded-xl p-4 border border-farm-green/30">
+                      <p className="flex items-start gap-2 text-xs text-farm-dark-green leading-relaxed"><Lightbulb className="h-4 w-4 shrink-0" aria-hidden="true" />Tip: Each roundtable brings together multiple experts to discuss your agricultural topics.</p>
+                    </div>
+                  </div>
+                ) : displayedConversations.length === 0 ? (
+                  <p className="py-8 text-center text-sm text-neutral-600">No conversations match that search.</p>
+                ) : (
+                  <div className="space-y-2">
+                    {displayedConversations.map((conversation) => {
+                      const lastActivity = conversation.updatedAt ?? conversation.createdAt;
+                      const title = conversation.title || "Untitled conversation";
+                      const rowClass = `flex items-center gap-1 rounded-lg border p-1 ${activeConversationId === conversation.id ? "border-farm-blue bg-farm-powder/30" : "border-border bg-card hover:bg-farm-powder/10"}`;
 
-              {isLoadingFiles ? (
-                <p className="py-8 text-center text-sm text-neutral-500">Loading files…</p>
-              ) : filesError ? (
-                <p role="alert" className="py-8 text-center text-sm text-red-600">Couldn’t load files. Please try again.</p>
-              ) : files.length === 0 ? (
-                <div className="text-center py-8 text-neutral-500 space-y-4">
-                  <div className="bg-farm-powder/20 rounded-xl p-6 border border-farm-tan/30">
-                    <div className="text-4xl mb-3">📁</div>
-                    <p className="font-semibold text-farm-blue">No files uploaded yet</p>
-                    <p className="text-sm mt-2 text-neutral-600">Click the upload button to add documents or images</p>
-                  </div>
-                  <div className="bg-farm-yellow/20 rounded-xl p-4 border border-farm-yellow/40">
-                    <p className="text-xs text-neutral-700 leading-relaxed">📄 Share files with experts to get tailored advice based on your specific documents.</p>
-                  </div>
-                </div>
-              ) : (
-                <div className="space-y-2">
-                  {files.map(file => (
-                    <div key={file.id} className="flex justify-between items-center p-3 hover:bg-farm-powder/20 rounded-lg border border-farm-tan/30 bg-white transition-all duration-200">
-                      <div className="flex items-center gap-2">
-                        {file.fileType.includes('image') ? (
-                          <Image className="text-farm-blue h-5 w-5" />
-                        ) : (
-                          <FileText className="text-farm-blue h-5 w-5" />
-                        )}
-                        <div className="min-w-0">
-                          <span className="block text-sm truncate max-w-[160px] font-medium text-neutral-700">{file.filename}</span>
-                          {file.deliverableId && file.version != null && (
-                            <span className="block text-xs text-neutral-500">
-                              v{file.version} · {file.supersededAt ? "Superseded" : "Current"} · {formatLocalDateTime(file.uploadedAt ?? Date.now())}
-                            </span>
+                      return (
+                        <div key={conversation.id} className={rowClass}>
+                          {editingConversationId === conversation.id ? (
+                            <form
+                              className="flex min-w-0 flex-1 items-center gap-1"
+                              onSubmit={(event) => {
+                                event.preventDefault();
+                                const nextTitle = editingTitle.trim();
+                                if (!nextTitle) return;
+                                onRenameConversation(conversation.id, nextTitle);
+                                setEditingConversationId(null);
+                              }}
+                            >
+                              <Input
+                                autoFocus
+                                value={editingTitle}
+                                onChange={(event) => setEditingTitle(event.target.value)}
+                                aria-label="Conversation title"
+                                className="h-9 min-w-0"
+                              />
+                              <Button type="submit" variant="ghost" size="icon" aria-label="Save conversation title" disabled={!editingTitle.trim()}>
+                                <Check className="h-4 w-4" />
+                              </Button>
+                              <Button type="button" variant="ghost" size="icon" aria-label="Cancel rename" onClick={() => setEditingConversationId(null)}>
+                                <X className="h-4 w-4" />
+                              </Button>
+                            </form>
+                          ) : (
+                            <>
+                              <button
+                                type="button"
+                                className="min-w-0 flex-1 p-2 text-left"
+                                onClick={() => onSelectConversation(conversation.id)}
+                              >
+                                <h3 className="truncate font-semibold text-farm-blue">{title}</h3>
+                                <p className="mt-1 text-xs text-neutral-600">
+                                  {lastActivity ? format(new Date(lastActivity), "MMM d, yyyy • h:mm a") : "Unknown date"}
+                                </p>
+                              </button>
+                              <div className="flex shrink-0 items-center">
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="icon"
+                                  aria-label={`Rename ${title}`}
+                                  title="Rename conversation"
+                                  onClick={() => {
+                                    setEditingConversationId(conversation.id);
+                                    setEditingTitle(conversation.title ?? "");
+                                  }}
+                                >
+                                  <Pencil className="h-4 w-4" />
+                                </Button>
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="icon"
+                                  aria-label={`Delete ${title}`}
+                                  title="Delete conversation"
+                                  onClick={() => setDeleteTarget(conversation)}
+                                >
+                                  <Trash2 className="h-4 w-4" />
+                                </Button>
+                              </div>
+                            </>
                           )}
                         </div>
-                      </div>
-                      {file.filename.toLowerCase().endsWith(".ics") && <Button size="sm" variant="ghost" onClick={() => setOpenCalendar({ fileId: file.id })}>Preview</Button>}
-                      <a
-                        href={file.fileUrl}
-                        download
-                        className="text-farm-blue hover:text-farm-green transition-colors"
-                        title="Download File"
-                        aria-label={`Download ${file.filename}`}
-                      >
-                        <FileDown className="h-4 w-4" />
-                      </a>
-                    </div>
-                  ))}
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </TabsContent>
+
+            <TabsContent value="files" className="m-0 focus-visible:ring-0">
+              <div>
+                <div className="flex justify-between items-center mb-4">
+                  <h2 className="font-serif font-bold text-lg text-farm-blue">Attachments</h2>
+                  <div>
+                    <input
+                      type="file"
+                      ref={fileInputRef}
+                      className="hidden"
+                      onChange={handleFileInputChange}
+                    />
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="text-farm-blue hover:text-farm-dark-green hover:bg-farm-powder/30 cursor-pointer h-8 w-8 transition-all duration-200"
+                      title="Upload File"
+                      onClick={handleFileUploadClick}
+                      disabled={isUploading || !activeConversationId}
+                      aria-label={isUploading ? "Uploading file" : "Upload file"}
+                    >
+                      <Upload className="h-4 w-4" />
+                    </Button>
+                  </div>
                 </div>
-              )}
-            </div>
-          )}
-        </ScrollArea>
-        
-        {/* Version Info */}
-        <div className="shrink-0 p-4 text-xs text-neutral-600 mt-auto border-t border-farm-tan/30 bg-gradient-to-br from-farm-powder/10 to-farm-tan/10 [@media(max-height:500px)]:hidden">
-          <p className="font-semibold text-farm-blue">Farm Friend Roundtable v1.0.0</p>
-          <p className="mt-1">© 2026 Farm Friend Technologies</p>
-        </div>
+
+                {isLoadingFiles ? (
+                  <p className="py-8 text-center text-sm text-neutral-500">Loading files…</p>
+                ) : filesError ? (
+                  <p role="alert" className="py-8 text-center text-sm text-red-600">Couldn’t load files. Please try again.</p>
+                ) : files.length === 0 ? (
+                  <div className="text-center py-8 text-neutral-500 space-y-4">
+                    <div className="bg-farm-powder/20 rounded-xl p-6 border border-farm-tan/30">
+                      <FolderOpen className="mx-auto mb-3 h-8 w-8 text-farm-dark-green" aria-hidden="true" />
+                      <p className="font-semibold text-farm-blue">No files uploaded yet</p>
+                      <p className="text-sm mt-2 text-neutral-600">Click the upload button to add documents or images</p>
+                    </div>
+                    <div className="bg-farm-yellow/20 rounded-xl p-4 border border-farm-yellow/40">
+                      <p className="flex items-start gap-2 text-xs text-neutral-700 leading-relaxed"><FileText className="h-4 w-4 shrink-0" aria-hidden="true" />Share files with experts to get tailored advice based on your specific documents.</p>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {files.map((file) => (
+                      <div key={file.id} className="flex justify-between items-center p-3 hover:bg-farm-powder/20 rounded-lg border border-farm-tan/30 bg-card transition-all duration-200">
+                        <div className="flex items-center gap-2">
+                          {file.fileType.includes("image") ? (
+                            <Image className="text-farm-blue h-5 w-5" />
+                          ) : (
+                            <FileText className="text-farm-blue h-5 w-5" />
+                          )}
+                          <div className="min-w-0">
+                            <span className="block text-sm truncate max-w-[160px] font-medium text-neutral-700">{file.filename}</span>
+                            {file.deliverableId && file.version != null && (
+                              <span className="block text-xs text-neutral-500">
+                                v{file.version} · {file.supersededAt ? "Superseded" : "Current"} · {formatLocalDateTime(file.uploadedAt ?? Date.now())}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                        {file.filename.toLowerCase().endsWith(".ics") && <Button size="sm" variant="ghost" onClick={() => setOpenCalendar({ fileId: file.id })}>Preview</Button>}
+                        <a
+                          href={file.fileUrl}
+                          download
+                          className="text-farm-blue hover:text-farm-dark-green transition-colors"
+                          title="Download File"
+                          aria-label={`Download ${file.filename}`}
+                        >
+                          <FileDown className="h-4 w-4" />
+                        </a>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </TabsContent>
+          </ScrollArea>
+        </Tabs>
       </div>
+      <AlertDialog open={!!deleteTarget} onOpenChange={(open) => !open && setDeleteTarget(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete this conversation?</AlertDialogTitle>
+            <AlertDialogDescription>
+              “{deleteTarget?.title || "Untitled conversation"}” and its saved content will be deleted.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={() => {
+                if (deleteTarget) onDeleteConversation(deleteTarget.id);
+                setDeleteTarget(null);
+              }}
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
       {openCalendar && activeConversationId && <CalendarPreviewDialog key={`${activeConversationId}:${openCalendar.fileId ?? "plan"}`} conversationId={activeConversationId} start={calendarStart} fileId={openCalendar.fileId} onClose={() => setOpenCalendar(null)} />}
     </aside>
   );

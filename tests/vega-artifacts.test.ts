@@ -64,4 +64,16 @@ describe("themed Vega-Lite artifacts", () => {
     expect(validateChartArtifact(JSON.stringify({ ...chart, spec: { layer: "invalid" } }), [])).toBeNull();
     expect(parseVegaChart({ ...chart, data: [] })).toBeNull();
   });
+  it("treats a json-fenced vega-lite block as a chart but leaves other json alone", () => {
+    expect(extractArtifacts("```json\n" + JSON.stringify(chart) + "\n```").artifacts[0].type).toBe("chart");
+    expect(extractArtifacts('```json\n{"a":1}\n```').artifacts[0].type).toBe("json");
+  });
+  it("repairs missing trailing closers but rejects other malformed JSON", () => {
+    const text = JSON.stringify(chart);
+    expect(validateChartArtifact(text.slice(0, -1), [])).not.toBeNull();
+    expect(validateChartArtifact(text.slice(0, -2), [])).not.toBeNull();
+    expect(validateChartArtifact(text.slice(0, 40), [])).toBeNull();
+    expect(validateChartArtifact(text.replace('"Corn"', '"Co}rn"').slice(0, -1), [])).not.toBeNull();
+    expect(validateChartArtifact(text + "}", [])).toBeNull();
+  });
 });
