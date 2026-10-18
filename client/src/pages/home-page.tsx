@@ -17,6 +17,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ZapIcon, ZapOffIcon, Menu, PauseIcon, PlayIcon, ScrollText, XIcon, ChevronLeft, ChevronRight } from "lucide-react";
 import { parseNewCommand } from "@/lib/new-command";
+import AiBudgetNotice from "@/components/billing/AiBudgetNotice";
 
 // G9 quiet console: per-event chatter is gated behind a debug flag so the
 // browser console stays readable in production. Force it per-tab with
@@ -1280,6 +1281,7 @@ export default function HomePage() {
 
             {/* === Chat Area (Takes remaining space) === */}
              <div className="flex-1 overflow-y-auto">
+                 <AiBudgetNotice />
                  {activeConversation ? (
                     <ChatInterface
                         messages={messages || []}

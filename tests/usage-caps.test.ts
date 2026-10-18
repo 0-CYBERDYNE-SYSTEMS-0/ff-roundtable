@@ -25,8 +25,10 @@ import {
   isHouseKeyAllowedModel,
   HOUSE_KEY_PAID_MODEL_ALLOWLIST,
   UsageCapError,
+  BUDGET_FALLBACK_MODEL,
+  EXPERT_REPLY_MAX_TOKENS,
 } from "../server/usage-caps";
-import { OpenRouterProvider } from "../server/ai-providers";
+import { OpenRouterProvider, FREE_MODEL_FALLBACKS } from "../server/ai-providers";
 import { REQUESTED_OPENROUTER_MODELS } from "../client/src/lib/openrouter-model-options";
 
 const okResponse = (cost: number) => ({
@@ -50,6 +52,10 @@ describe("usage caps: pure rules", () => {
     expect(checkMessageAllowance("pro", 1000)).toMatchObject({ status: 429, code: "message_limit_reached" });
   });
 
+  it("falls back to a free model the app already uses", () => {
+    expect(FREE_MODEL_FALLBACKS).toContain(BUDGET_FALLBACK_MODEL);
+  });
+
   it("keeps the server allowlist in sync with the picker's pinned models", () => {
     expect([...HOUSE_KEY_PAID_MODEL_ALLOWLIST].sort()).toEqual(REQUESTED_OPENROUTER_MODELS.map(m => m.id).sort());
     expect(isHouseKeyAllowedModel("z-ai/glm-5.3-flash")).toBe(true);
@@ -57,8 +63,8 @@ describe("usage caps: pure rules", () => {
     expect(isHouseKeyAllowedModel("openai/o1-pro")).toBe(false);
   });
 
-  it("budgets Pro at $8 by default, overridable by env; Free has no paid budget", () => {
-    expect(monthlyAiBudgetUsd("pro")).toBe(8);
+  it("budgets Pro at $4 by default, overridable by env; Free has no paid budget", () => {
+    expect(monthlyAiBudgetUsd("pro")).toBe(4);
     process.env.PRO_MONTHLY_AI_BUDGET_USD = "5";
     expect(monthlyAiBudgetUsd("pro")).toBe(5);
     expect(monthlyAiBudgetUsd("free")).toBe(0);
@@ -67,9 +73,9 @@ describe("usage caps: pure rules", () => {
   it("gates house-key calls by tier, allowlist and budget", () => {
     expect(checkHouseKeyCall("free", "nvidia/nemotron-3-super-120b-a12b:free", 0)).toBeNull();
     expect(checkHouseKeyCall("free", "z-ai/glm-5.3-flash", 0)?.code).toBe("paid_model_requires_pro");
-    expect(checkHouseKeyCall("pro", "z-ai/glm-5.3-flash", 7.99)).toBeNull();
+    expect(checkHouseKeyCall("pro", "z-ai/glm-5.3-flash", 3.99)).toBeNull();
     expect(checkHouseKeyCall("pro", "openai/o1-pro", 0)?.code).toBe("model_requires_own_key");
-    expect(checkHouseKeyCall("pro", "z-ai/glm-5.3-flash", 8)?.code).toBe("ai_budget_exhausted");
+    expect(checkHouseKeyCall("pro", "z-ai/glm-5.3-flash", 4)?.code).toBe("ai_budget_exhausted");
     expect(checkHouseKeyCall("pro", "google/gemma-4-31b-it:free", 100)).toBeNull();
     expect(checkHouseKeyCall("enterprise", "openai/o1-pro", 1e6)).toBeNull();
   });
@@ -91,11 +97,27 @@ describe("usage caps: OpenRouterProvider enforcement", () => {
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
-  it("blocks paid calls once the Pro budget is spent", async () => {
+  it("falls back to a free model (not an error) once the Pro budget is spent", async () => {
     store.getUser.mockResolvedValue({ id: 1, tier: "pro" });
-    store.getMonthlyUsage.mockResolvedValue({ messageCount: 3, aiSpendUsd: 8.01 });
-    await expect(new OpenRouterProvider(null).chat(messages, "z-ai/glm-5.3-flash", 1)).rejects.toThrow(/AI budget/);
-    expect(mockFetch).not.toHaveBeenCalled();
+    store.getMonthlyUsage.mockResolvedValue({ messageCount: 3, aiSpendUsd: 4.01 });
+    mockFetch.mockResolvedValue(okResponse(0));
+    const res = await new OpenRouterProvider(null).chat(messages, "z-ai/glm-5.3-flash", 1);
+    expect(res.message.content).toBe("hi");
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.model).toBe(BUDGET_FALLBACK_MODEL);
+    expect(body.model.endsWith(":free")).toBe(true);
+    await new Promise(r => setTimeout(r, 10));
+    expect(store.addMonthlyAiSpend).not.toHaveBeenCalled();
+  });
+
+  it("caps expert replies at the requested max_tokens", async () => {
+    store.getUser.mockResolvedValue({ id: 1, tier: "pro" });
+    mockFetch.mockResolvedValue(okResponse(0.001));
+    await new OpenRouterProvider(null).chat(messages, "z-ai/glm-5.3-flash", 1, false, { maxTokens: EXPERT_REPLY_MAX_TOKENS });
+    expect(JSON.parse(mockFetch.mock.calls[0][1].body).max_tokens).toBe(1200);
+    mockFetch.mockClear();
+    await new OpenRouterProvider(null).chat(messages, "z-ai/glm-5.3-flash", 1);
+    expect(JSON.parse(mockFetch.mock.calls[0][1].body).max_tokens).toBe(4096);
   });
 
   it("records house-key spend per user per month", async () => {

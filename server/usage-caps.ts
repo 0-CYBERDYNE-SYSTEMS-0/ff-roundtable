@@ -1,5 +1,5 @@
 /**
- * Pro $20 pricing caps (see /docs or PR "pricing-caps-pro20").
+ * Pro pricing caps ($10/month or $96/year, $4 monthly AI budget). See PR "pricing-caps-pro20".
  *
  * Definitions:
  * - A "message" is ONE farmer (user) message stored in a conversation,
@@ -20,6 +20,14 @@ export const HOUSE_KEY_PAID_MODEL_ALLOWLIST = [
   "openai/gpt-6-luna",
 ] as const;
 
+/** Output cap for ordinary expert replies (documents keep maxOutputTokens()). */
+export const EXPERT_REPLY_MAX_TOKENS = 1200;
+
+/** Free model experts use once a Pro user's monthly AI budget is spent. */
+export const BUDGET_FALLBACK_MODEL = "dots-studio/dots-3-note-preview:free";
+
+export const BUDGET_EXHAUSTED_NOTICE = "You've used this month's included fast models; experts are on free models until the 1st.";
+
 export function isHouseKeyAllowedModel(model: string): boolean {
   return model.endsWith(":free") || (HOUSE_KEY_PAID_MODEL_ALLOWLIST as readonly string[]).includes(model);
 }
@@ -28,13 +36,13 @@ export function currentUsagePeriod(now: Date = new Date()): string {
   return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
 }
 
-/** Monthly house-key AI budget in USD by tier. Free is $0 (free models only). */
+/** Monthly house-key AI budget in USD by tier (Pro default $4). Free is $0 (free models only). */
 export function monthlyAiBudgetUsd(tier: string | null | undefined): number {
   const t = tier || "free";
   if (t === "enterprise") return Number.POSITIVE_INFINITY;
   if (t === "pro") {
     const parsed = Number(process.env.PRO_MONTHLY_AI_BUDGET_USD);
-    return Number.isFinite(parsed) && parsed >= 0 && process.env.PRO_MONTHLY_AI_BUDGET_USD?.trim() ? parsed : 8;
+    return Number.isFinite(parsed) && parsed >= 0 && process.env.PRO_MONTHLY_AI_BUDGET_USD?.trim() ? parsed : 4;
   }
   return 0;
 }
@@ -49,7 +57,7 @@ export function checkMessageAllowance(tier: string | null | undefined, usedThisM
     status: isFree ? 402 : 429,
     code: "message_limit_reached",
     message: isFree
-      ? `You've used all ${limits.maxMessages} messages on the Free plan this month. Upgrade to Pro ($20/month) for ${getTierLimits("pro").maxMessages} messages a month.`
+      ? `You've used all ${limits.maxMessages} messages on the Free plan this month. Upgrade to Pro ($10/month) for ${getTierLimits("pro").maxMessages} messages a month.`
       : `You've used all ${limits.maxMessages} ${limits.name} messages this month. Your limit resets on the 1st, or contact us about Enterprise.`,
     upgradeUrl: isFree ? "/subscribe" : undefined,
   };
@@ -78,6 +86,8 @@ export function checkHouseKeyCall(tier: string | null | undefined, model: string
     };
   }
   const budget = monthlyAiBudgetUsd(t);
+  // Budget exhaustion is graceful: callers fall back to BUDGET_FALLBACK_MODEL
+  // (see OpenRouterProvider.authorizeCall) instead of erroring.
   if (spentUsd >= budget) {
     return {
       status: 429,

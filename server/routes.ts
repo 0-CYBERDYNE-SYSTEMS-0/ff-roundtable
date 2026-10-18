@@ -26,7 +26,7 @@ import { getWeatherForFarm, formatWeatherContext } from './weather';
 import { isDuplicateUserSubmission } from './text-similarity';
 import { format } from 'date-fns';
 import { TIERS, getTierLimits, isPaidModel } from './tiers';
-import { checkMessageAllowance, currentUsagePeriod, isHouseKeyAllowedModel, HOUSE_KEY_PAID_MODEL_ALLOWLIST, UsageCapError } from './usage-caps';
+import { checkMessageAllowance, currentUsagePeriod, isHouseKeyAllowedModel, HOUSE_KEY_PAID_MODEL_ALLOWLIST, UsageCapError, monthlyAiBudgetUsd, BUDGET_EXHAUSTED_NOTICE } from './usage-caps';
 
 class OpenQuestionAnswerConflictError extends Error {}
 const rememberedAnswerTurnStarts = new Map<number, number>();
@@ -890,9 +890,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
         });
       }
 
-      const priceId = process.env.STRIPE_PRICE_ID_PRO;
+      // The client chooses an interval only; price ids stay server-side.
+      const interval = req.body?.interval ?? "month";
+      if (interval !== "month" && interval !== "year") {
+        return res.status(400).json({ message: 'interval must be "month" or "year"' });
+      }
+      const priceId = interval === "year" ? process.env.STRIPE_PRICE_ID_PRO_ANNUAL : process.env.STRIPE_PRICE_ID_PRO;
       if (!priceId) {
-        { const r = billingUnavailable("Stripe Pro price ID not configured"); return res.status(r.status).json(r.body); }
+        { const r = billingUnavailable(interval === "year" ? "Stripe annual Pro price ID not configured" : "Stripe Pro price ID not configured"); return res.status(r.status).json(r.body); }
       }
 
       const session = await stripe.checkout.sessions.create({
@@ -1078,6 +1083,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
         tier,
         limits,
         usage: { period: currentUsagePeriod(), messages: usage.messageCount },
+        // True once house-key paid calls are falling back to free models.
+        aiBudgetExhausted: tier === "pro" && !user?.openRouterKey && usage.aiSpendUsd >= monthlyAiBudgetUsd(tier),
+        aiBudgetNotice: BUDGET_EXHAUSTED_NOTICE,
         // Paid models usable on the house key (Pro); any model works with BYOK.
         houseKeyModels: HOUSE_KEY_PAID_MODEL_ALLOWLIST,
         hasOwnKey: Boolean(user?.openRouterKey),

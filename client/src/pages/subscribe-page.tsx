@@ -8,10 +8,14 @@ import { Loader2, CheckCircle2 } from "lucide-react";
 import { Redirect } from 'wouter';
 import Header from "@/components/layout/Header";
 
-// Pro checkout goes through Stripe Checkout (/api/create-checkout-session,
-// STRIPE_PRICE_ID_PRO). The old in-page PaymentElement flow
-// (/api/create-subscription) is retired.
-const PRO_PRICE_LABEL = "$20/month";
+// Pro checkout goes through Stripe Checkout (/api/create-checkout-session).
+// The client sends only an interval; the server maps it to
+// STRIPE_PRICE_ID_PRO (monthly) or STRIPE_PRICE_ID_PRO_ANNUAL (yearly).
+type BillingInterval = "month" | "year";
+const PLAN_LABELS: Record<BillingInterval, { price: string; note: string }> = {
+  month: { price: "$10/month", note: "Billed monthly. Cancel anytime." },
+  year: { price: "$96/year", note: "Save 20% (equal to $8/month). Billed yearly." },
+};
 
 // Enterprise is sales-led. TODO: set VITE_ENTERPRISE_CONTACT_URL to a
 // mailto: or Calendly link; no contact link exists in the repo yet.
@@ -33,7 +37,7 @@ function friendlyBillingMessage(err: unknown): string {
 const PRO_FEATURES = [
   "Up to 8 specialized AI agricultural experts",
   "1,000 messages a month (one message = one question you send)",
-  "Included fast models: GLM 5.3 Flash, DeepSeek V4.1 Flash, MiMo V2.6 Flash, GPT-6 Luna",
+  "Included fast models: GLM 5.3 Flash, DeepSeek V4.1 Flash, MiMo V2.6 Flash, GPT-6 Luna (monthly allowance; free models after that)",
   "Any other model with your own OpenRouter key",
   "File creation, web research and markdown export",
 ];
@@ -42,6 +46,8 @@ export default function SubscribePage() {
   const { user, isLoading: isAuthLoading } = useAuth();
   const { toast } = useToast();
   const [isRedirecting, setIsRedirecting] = useState(false);
+  const [interval, setBillingInterval] = useState<BillingInterval>("month");
+  const plan = PLAN_LABELS[interval];
 
   if (!isAuthLoading && !user) {
     return <Redirect to="/auth" />;
@@ -50,7 +56,7 @@ export default function SubscribePage() {
   const startCheckout = async () => {
     setIsRedirecting(true);
     try {
-      const res = await apiRequest("POST", "/api/create-checkout-session");
+      const res = await apiRequest("POST", "/api/create-checkout-session", { interval });
       const data = await res.json();
       if (data?.url) {
         window.location.href = data.url;
@@ -71,7 +77,24 @@ export default function SubscribePage() {
           <Card>
             <CardHeader>
               <CardTitle>Pro</CardTitle>
-              <CardDescription>{PRO_PRICE_LABEL}. Cancel anytime. No free trial; the Free plan stays free.</CardDescription>
+              <div className="inline-flex rounded-md border p-1 w-fit" role="group" aria-label="Billing interval">
+                {(["month", "year"] as const).map((value) => (
+                  <Button
+                    key={value}
+                    type="button"
+                    size="sm"
+                    variant={interval === value ? "default" : "ghost"}
+                    aria-pressed={interval === value}
+                    onClick={() => setBillingInterval(value)}
+                  >
+                    {value === "month" ? "Monthly" : "Annual (save 20%)"}
+                  </Button>
+                ))}
+              </div>
+              <CardDescription>
+                <span className="text-2xl font-semibold text-foreground">{plan.price}</span>{" "}
+                {plan.note} No free trial; the Free plan stays free.
+              </CardDescription>
             </CardHeader>
             <CardContent>
               <ul className="space-y-3">
@@ -85,7 +108,7 @@ export default function SubscribePage() {
             </CardContent>
             <CardFooter>
               <Button className="w-full" onClick={startCheckout} disabled={isAuthLoading || isRedirecting}>
-                {isRedirecting ? (<><Loader2 className="mr-2 h-4 w-4 animate-spin" />Opening checkout...</>) : `Subscribe - ${PRO_PRICE_LABEL}`}
+                {isRedirecting ? (<><Loader2 className="mr-2 h-4 w-4 animate-spin" />Opening checkout...</>) : `Subscribe - ${plan.price}`}
               </Button>
             </CardFooter>
           </Card>
