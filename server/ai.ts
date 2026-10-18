@@ -18,12 +18,23 @@ export { commitPendingDeliverable, discardPendingDeliverable } from "./pending-d
 import { enforceCitationIntegrity, removeUnsupportedCitedSentences, stripMetaLines, undecorate, mergeDuplicateFarmerQuestions, removeRepeatedExpertSentences } from "./response-hygiene";
 import {
   buildToolUsePrompt, buildToolPlanningPrompt, parseToolPlan, runToolCalls, formatToolResultsForPrompt,
-  toolCallLimitForTier, extractDeliverable, saveExpertDeliverable, filterChartArtifacts, type ToolRun,
+  toolCallLimitForTier, extractDeliverable, saveExpertDeliverable, filterChartArtifacts, type ChartArtifactRejectionReason, type ChartEvidence, type ToolRun,
 } from "./expert-tools";
 
 /** Expert tools are on by default; EXPERT_TOOLS=off disables them. Unit tests never hit the network. */
 export function expertToolsEnabled(): boolean {
   return process.env.EXPERT_TOOLS !== "off" && !process.env.VITEST;
+}
+
+const CHART_REJECTION_NOTICE = "\n\nI couldn't render the chart because its data, source, or specification failed validation. Please provide or confirm the source data, and I'll try again.";
+
+function logRejectedCharts(role: string, reasons: ChartArtifactRejectionReason[]): void {
+  if (!reasons.length) return;
+  const counts = reasons.reduce<Record<string, number>>((totals, reason) => {
+    totals[reason] = (totals[reason] ?? 0) + 1;
+    return totals;
+  }, {});
+  console.warn(`[CHARTS] rejected ${reasons.length} chart(s) from ${role}: ${JSON.stringify(counts)}`);
 }
 
 /** Paid OpenRouter web plugin only on explicit opt-in; free DuckDuckGo tools are the default. */
@@ -1277,13 +1288,21 @@ export async function getExpertResponseStream(
       : extractDeliverable(response.message.content);
     const extracted = extractArtifacts(deliverableSplit.cleanContent);
     const allowedChartUrls = toolRun?.sources.map(src => src.url) ?? [];
-    const { kept: artifacts, dropped: droppedCharts } = filterChartArtifacts(extracted.artifacts, allowedChartUrls);
-    if (droppedCharts) console.log(`[CHARTS] dropped ${droppedCharts} unsourced chart(s) from ${expert.role}`);
+    const chartEvidence: ChartEvidence = {
+      farmerText: history.filter(message => message.role === "user").map(message => message.content).join("\n"),
+      weatherText: weatherContext,
+    };
+    const { kept: artifacts, dropped: droppedCharts, droppedReasons } = filterChartArtifacts(extracted.artifacts, allowedChartUrls, chartEvidence);
+    logRejectedCharts(expert.role, droppedReasons);
     const finalized = expert.role === "File Creator" || expert.role === "Moderator"
       ? { content: extracted.cleanContent, addition: "" }
       : await finalizeExpertTools(expert, extracted.cleanContent, toolRun, deliverableSplit.deliverable, history);
     if (finalized.addition) onToken(finalized.addition);
-    const cleanContent = finalized.content;
+    let cleanContent = finalized.content;
+    if (droppedCharts) {
+      cleanContent += CHART_REJECTION_NOTICE;
+      onToken(CHART_REJECTION_NOTICE);
+    }
     const researchAnswer = expert.role === "Research Analyst"
       ? appendRetrievedCitationUrls(cleanContent, response.citations)
       : { content: cleanContent, addition: "" };
@@ -1421,8 +1440,12 @@ export async function getExpertResponse(
     
     requireNonEmptyAssistantContent(response);
     const extractedNonStream = extractArtifacts(response.message.content);
-    const { kept: artifacts } = filterChartArtifacts(extractedNonStream.artifacts, []);
-    const cleanContent = extractedNonStream.cleanContent;
+    const chartEvidence: ChartEvidence = {
+      farmerText: history.filter(message => message.role === "user").map(message => message.content).join("\n"),
+    };
+    const { kept: artifacts, dropped: droppedCharts, droppedReasons } = filterChartArtifacts(extractedNonStream.artifacts, [], chartEvidence);
+    logRejectedCharts(expert.role, droppedReasons);
+    const cleanContent = extractedNonStream.cleanContent + (droppedCharts ? CHART_REJECTION_NOTICE : "");
     const researchAnswer = expert.role === "Research Analyst"
       ? appendRetrievedCitationUrls(cleanContent, response.citations)
       : { content: cleanContent, addition: "" };

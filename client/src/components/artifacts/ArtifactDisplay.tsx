@@ -6,6 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { LineChart, Line, BarChart, Bar, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from "recharts";
 import DOMPurify from "isomorphic-dompurify";
 import { cn } from "@/lib/utils";
+import { formatJsonArtifact } from "@/lib/format-json-artifact";
 import VegaChart from "./VegaChart";
 
 interface ArtifactDisplayProps {
@@ -122,9 +123,18 @@ export default function ArtifactDisplay({ artifact }: ArtifactDisplayProps) {
         if (tableRender) {
           return tableRender;
         }
+        const formattedJson = formatJsonArtifact(artifact.content);
+        if (!formattedJson.valid) {
+          return (
+            <div className="bg-neutral-900 text-neutral-100 p-4 rounded overflow-x-auto">
+              <p className="mb-2 text-xs text-amber-300">Invalid JSON artifact. Showing the original content.</p>
+              <pre className="text-xs font-mono">{formattedJson.content}</pre>
+            </div>
+          );
+        }
         return (
           <div className="bg-neutral-900 text-neutral-100 p-4 rounded overflow-x-auto">
-            <pre className="text-xs font-mono">{JSON.stringify(JSON.parse(artifact.content), null, 2)}</pre>
+            <pre className="text-xs font-mono">{formattedJson.content}</pre>
           </div>
         );
 
