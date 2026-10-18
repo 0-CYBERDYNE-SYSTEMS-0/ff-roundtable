@@ -1,9 +1,8 @@
-import { catalogAvatar } from "@shared/expert-catalog";
 import { useState, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
-import { Check, Search, Star, Zap, Clock, Cpu, ChevronDown } from "lucide-react";
+import { Check, Search, Star, ChevronDown } from "lucide-react";
 import ModelBadge from "./ModelBadge";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import {
@@ -13,6 +12,7 @@ import {
 } from "@/components/ui/popover";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
+import { resolveExpertAvatar } from "@/lib/expert-avatar";
 
 // --- Define type for OpenRouter Model (Matching ExpertSelector) ---
 interface OpenRouterModel {
@@ -41,37 +41,14 @@ interface ExpertCardProps {
   onToggle: () => void;
   onChangeModel: (newModel: string) => void;
   userTier?: string;
+  isAtLimit: boolean;
+  limitReason: string;
 }
-
-// Helper to get model performance metrics (would be replaced with actual data in a production app)
-const getModelPerformance = (modelId: string) => {
-  // This is sample data - in a real app, you would have actual performance metrics
-  if (modelId.includes('gpt-4')) {
-    return { speed: 'Medium', quality: 'High', cost: 'High' };
-  } else if (modelId.includes('gpt-3.5')) {
-    return { speed: 'Fast', quality: 'Medium', cost: 'Low' };
-  } else if (modelId.includes('claude-3-sonnet')) {
-    return { speed: 'Medium', quality: 'High', cost: 'Medium' };
-  } else if (modelId.includes('claude-3-haiku')) {
-    return { speed: 'Fast', quality: 'Medium', cost: 'Low' };
-  } else if (modelId.includes('llama-3')) {
-    return { speed: 'Medium', quality: 'Medium', cost: 'Low' };
-  } else if (modelId.includes('gemini')) {
-    return { speed: 'Medium', quality: 'Medium', cost: 'Medium' };
-  }
-  return { speed: 'Medium', quality: 'Medium', cost: 'Medium' };
-};
 
 // Helper to categorize models for better organization
 const categorizeModel = (model: OpenRouterModel) => {
-  const id = model.id.toLowerCase();
-  if (id.includes('openai')) return 'OpenAI';
-  if (id.includes('anthropic')) return 'Anthropic';
-  if (id.includes('meta') || id.includes('llama')) return 'Meta';
-  if (id.includes('google') || id.includes('gemini')) return 'Google';
-  if (id.includes('mistral')) return 'Mistral';
-  if (id.includes('cohere')) return 'Cohere';
-  return 'Other';
+  const provider = model.id.split("/")[0];
+  return provider ? provider.charAt(0).toUpperCase() + provider.slice(1) : "Other";
 };
 
 export default function ExpertCard({
@@ -84,6 +61,8 @@ export default function ExpertCard({
   onToggle,
   onChangeModel,
   userTier,
+  isAtLimit,
+  limitReason,
 }: ExpertCardProps) {
   const [searchTerm, setSearchTerm] = useState("");
   const [modelCategory, setModelCategory] = useState<string | null>(null);
@@ -115,9 +94,6 @@ export default function ExpertCard({
     modelsByProvider[provider].push(model);
   });
 
-  // Get performance metrics for the selected model
-  const performance = getModelPerformance(selectedModel);
-  
   // Get categories present in filtered models
   const availableCategories = Array.from(
     new Set(filteredModels.map(model => categorizeModel(model)))
@@ -137,9 +113,9 @@ export default function ExpertCard({
       <div className="flex items-center mb-2">
         <div className="relative">
           <img 
-            src={expertData.avatarUrl || catalogAvatar(expertData.role)} 
+            src={resolveExpertAvatar(expertData.role, expertData.avatarUrl)}
             alt={expertData.role} 
-            onError={(e) => { const img = e.currentTarget; const fallback = catalogAvatar(expertData.role); if (img.src !== fallback) img.src = fallback; }}
+            onError={(e) => { const img = e.currentTarget; const fallback = resolveExpertAvatar(expertData.role); if (img.src !== fallback) img.src = fallback; }}
             className="w-12 h-12 rounded-full mr-3 object-cover border border-neutral-200"
           />
           {expertData.recommended && (
@@ -158,7 +134,7 @@ export default function ExpertCard({
           )}
         </div>
         <div className="flex-1">
-          <h3 className="font-medium">{expertData.role}</h3>
+          <h3 className="text-sm font-semibold">{expertData.role}</h3>
           {expertData.category && (
             <Badge variant="outline" className="text-xs font-normal mt-0.5">
               {expertData.category}
@@ -171,7 +147,9 @@ export default function ExpertCard({
             variant={isSelected ? "outline" : "default"} 
             size="sm"
             onClick={onToggle}
-            disabled={isLoadingModels}
+            disabled={isLoadingModels || (!isSelected && isAtLimit)}
+            title={!isSelected && isAtLimit ? limitReason : undefined}
+            aria-label={!isSelected && isAtLimit ? `Add ${expertData.role}. ${limitReason}` : undefined}
             className={isSelected ? "border-primary text-primary" : ""}
           >
             {isSelected ? "Remove" : "Add"}
@@ -309,21 +287,6 @@ export default function ExpertCard({
             </Popover>
           </div>
           
-          {/* Model Performance Indicators */}
-          <div className="flex items-center justify-between mt-1 text-xs text-gray-600">
-            <div className="flex items-center" title="Processing Speed">
-              <Clock className="h-3 w-3 mr-1" />
-              <span>{performance.speed}</span>
-            </div>
-            <div className="flex items-center" title="Output Quality">
-              <Star className="h-3 w-3 mr-1" />
-              <span>{performance.quality}</span>
-            </div>
-            <div className="flex items-center" title="Relative Cost">
-              <Zap className="h-3 w-3 mr-1" />
-              <span>{performance.cost}</span>
-            </div>
-          </div>
         </div>
       )}
       
@@ -335,4 +298,4 @@ export default function ExpertCard({
       )}
     </div>
   );
-} 
+}

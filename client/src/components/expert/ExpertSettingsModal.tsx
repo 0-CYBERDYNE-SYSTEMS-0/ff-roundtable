@@ -34,15 +34,18 @@ interface ExpertSettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
   onSave: (expertId: number, updates: Partial<Expert>) => Promise<void> | void;
+  onRemoveExpert: (expertId: number) => void;
 }
 
 export default function ExpertSettingsModal({
   expert,
   isOpen,
   onClose,
-  onSave
+  onSave,
+  onRemoveExpert,
 }: ExpertSettingsModalProps) {
   const [isSaving, setIsSaving] = useState(false);
+  const [confirmRemoval, setConfirmRemoval] = useState(false);
   const [customInstructions, setCustomInstructions] = useState("");
   const [name, setName] = useState(expert?.name || "");
   const [model, setModel] = useState(expert?.model || "");
@@ -53,6 +56,7 @@ export default function ExpertSettingsModal({
     setName(expert.name);
     setModel(expert.model);
     setCustomInstructions(expert.customInstructions || "");
+    setConfirmRemoval(false);
   }, [expert]);
 
   // The server blocks paid models for free-tier users (PATCH /api/experts/:id),
@@ -105,12 +109,18 @@ export default function ExpertSettingsModal({
     }
   };
 
+  const handleRemoveExpert = () => {
+    if (!confirmRemoval) return;
+    onRemoveExpert(expert.id);
+    onClose();
+  };
+
   return (
     <Dialog open={isOpen} onOpenChange={(open) => !open && !isSaving && onClose()}>
       <DialogContent className="max-w-2xl max-h-[85vh] overflow-hidden grid grid-rows-[auto_minmax(0,1fr)_auto] gap-4">
         <DialogHeader>
           <DialogTitle className="text-farm-blue flex items-center gap-2">
-            <div className="w-8 h-8 rounded-full bg-farm-green text-white flex items-center justify-center text-sm font-semibold">
+            <div className="w-8 h-8 rounded-full bg-farm-dark-green text-white flex items-center justify-center text-sm font-semibold">
               {expert.name.charAt(0)}
             </div>
             Edit Expert: {expert.role}
@@ -204,6 +214,31 @@ export default function ExpertSettingsModal({
                   <p><strong>Expert ID:</strong> {expert.id}</p>
                 </div>
               </div>
+
+              {confirmRemoval ? (
+                <div className="rounded-lg border border-red-200 bg-red-50 p-3" role="alert">
+                  <p className="text-sm text-neutral-800">
+                    Remove {expert.name} from this roundtable? Their past messages will remain.
+                  </p>
+                  <div className="mt-3 flex justify-end gap-2">
+                    <Button type="button" variant="outline" size="sm" onClick={() => setConfirmRemoval(false)}>
+                      Cancel
+                    </Button>
+                    <Button type="button" variant="destructive" size="sm" onClick={handleRemoveExpert}>
+                      Remove from roundtable
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <Button
+                  type="button"
+                  variant="destructive"
+                  onClick={() => setConfirmRemoval(true)}
+                  className="w-full"
+                >
+                  Remove from roundtable
+                </Button>
+              )}
             </div>
           </TabsContent>
         </Tabs>
@@ -216,7 +251,7 @@ export default function ExpertSettingsModal({
           <Button
             onClick={handleSave}
             disabled={isSaving || !name.trim() || !model}
-            className="bg-farm-green hover:bg-farm-dark-green text-white gap-2"
+            className="bg-farm-dark-green hover:bg-farm-blue text-white gap-2"
           >
             {isSaving ? <span className="text-sm">Saving…</span> : <><Save className="w-4 h-4" />Save Changes</>}
           </Button>

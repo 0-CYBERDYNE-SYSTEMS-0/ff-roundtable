@@ -1,12 +1,13 @@
 import { useState, useMemo } from "react";
 import { Artifact } from "@shared/schema";
-import { Copy, Download, Maximize2, Code, Table, BarChart3, FileJson, X } from "lucide-react";
+import { Copy, Download, Maximize2, Code, Table, BarChart3, FileJson } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { LineChart, Line, BarChart, Bar, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from "recharts";
 import DOMPurify from "isomorphic-dompurify";
 import { cn } from "@/lib/utils";
 import VegaChart from "./VegaChart";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
 interface ArtifactDisplayProps {
   artifact: Artifact;
@@ -14,6 +15,7 @@ interface ArtifactDisplayProps {
 
 export default function ArtifactDisplay({ artifact }: ArtifactDisplayProps) {
   const [showFullscreen, setShowFullscreen] = useState(false);
+  const [copyStatus, setCopyStatus] = useState<"copied" | "error" | null>(null);
 
   // Sanitize HTML content to prevent XSS attacks
   const sanitizedHTML = useMemo(() => {
@@ -26,8 +28,13 @@ export default function ArtifactDisplay({ artifact }: ArtifactDisplayProps) {
     return artifact.content;
   }, [artifact.content, artifact.type]);
 
-  const handleCopy = () => {
-    navigator.clipboard.writeText(artifact.content);
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(artifact.content);
+      setCopyStatus("copied");
+    } catch {
+      setCopyStatus("error");
+    }
   };
 
   const handleDownload = () => {
@@ -66,7 +73,7 @@ export default function ArtifactDisplay({ artifact }: ArtifactDisplayProps) {
               <thead>
                 <tr className="bg-primary/10 dark:bg-primary/20">
                   {keys.map((key, i) => (
-                    <th key={i} className="p-3 border-b border-primary/20 font-bold text-left text-primary uppercase tracking-wider text-xs">
+                    <th key={i} className="p-3 border-b border-primary/20 font-bold text-left text-farm-dark-green uppercase tracking-wider text-xs">
                       {String(key)}
                     </th>
                   ))}
@@ -287,32 +294,6 @@ export default function ArtifactDisplay({ artifact }: ArtifactDisplayProps) {
     }
   };
 
-  const FullscreenModal = () => (
-    <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-      <div className="bg-white rounded-lg max-w-4xl w-full max-h-[90vh] overflow-y-auto flex flex-col">
-        <div className="flex items-center justify-between p-6 border-b border-neutral-200 sticky top-0 bg-white">
-          <div className="flex items-center gap-3">
-            {getIcon()}
-            <h2 className="text-lg font-semibold">{artifact.title}</h2>
-            <span className="text-xs text-neutral-500 bg-neutral-100 px-2 py-1 rounded">{artifact.type}</span>
-          </div>
-          <div className="flex gap-2">
-            <Button size="sm" variant="ghost" onClick={handleCopy} title="Copy">
-              <Copy className="w-4 h-4" />
-            </Button>
-            <Button size="sm" variant="ghost" onClick={handleDownload} title="Download">
-              <Download className="w-4 h-4" />
-            </Button>
-            <Button size="sm" variant="ghost" onClick={() => setShowFullscreen(false)}>
-              <X className="w-4 h-4" />
-            </Button>
-          </div>
-        </div>
-        <div className="p-6 overflow-auto flex-1">{renderContent()}</div>
-      </div>
-    </div>
-  );
-
   return (
     <>
       <Card className="mb-4 overflow-hidden flex flex-col">
@@ -324,22 +305,52 @@ export default function ArtifactDisplay({ artifact }: ArtifactDisplayProps) {
               <span className="text-xs text-neutral-500 bg-neutral-100 px-2 py-1 rounded flex-shrink-0">{artifact.type}</span>
             </div>
             <div className="flex gap-1 flex-shrink-0">
-              <Button size="sm" variant="ghost" onClick={handleCopy} title="Copy content" className="h-8 w-8 p-0">
+              <Button size="sm" variant="ghost" onClick={handleCopy} title="Copy content" aria-label="Copy artifact content" className="h-8 w-8 p-0">
                 <Copy className="w-4 h-4" />
               </Button>
-              <Button size="sm" variant="ghost" onClick={handleDownload} title="Download" className="h-8 w-8 p-0">
+              <Button size="sm" variant="ghost" onClick={handleDownload} title="Download" aria-label="Download artifact" className="h-8 w-8 p-0">
                 <Download className="w-4 h-4" />
               </Button>
-              <Button size="sm" variant="ghost" onClick={() => setShowFullscreen(true)} title="Fullscreen" className="h-8 w-8 p-0">
+              <Button size="sm" variant="ghost" onClick={() => setShowFullscreen(true)} title="Fullscreen" aria-label="View artifact full screen" className="h-8 w-8 p-0">
                 <Maximize2 className="w-4 h-4" />
               </Button>
             </div>
           </div>
+          {copyStatus && (
+            <span className="mt-1 block text-right text-xs text-neutral-600" role="status" aria-live="polite">
+              {copyStatus === "copied" ? "Copied" : "Copy failed"}
+            </span>
+          )}
         </CardHeader>
         <CardContent className="overflow-auto flex-1 min-h-0 pb-4 pt-2">{renderContent()}</CardContent>
       </Card>
 
-      {showFullscreen && <FullscreenModal />}
+      <Dialog open={showFullscreen} onOpenChange={setShowFullscreen}>
+        <DialogContent className="flex max-h-[90vh] max-w-4xl flex-col overflow-y-auto">
+          <DialogHeader className="flex-row items-center justify-between pr-8">
+            <div className="flex min-w-0 items-center gap-3">
+              {getIcon()}
+              <DialogTitle className="truncate text-lg">{artifact.title}</DialogTitle>
+              <span className="rounded bg-neutral-100 px-2 py-1 text-xs text-neutral-600">{artifact.type}</span>
+            </div>
+            <div className="flex gap-2">
+              <Button size="sm" variant="ghost" onClick={handleCopy} aria-label="Copy artifact content" title="Copy">
+                <Copy className="h-4 w-4" />
+              </Button>
+              <Button size="sm" variant="ghost" onClick={handleDownload} aria-label="Download artifact" title="Download">
+                <Download className="h-4 w-4" />
+              </Button>
+            </div>
+          </DialogHeader>
+          <DialogDescription className="sr-only">Full screen view of the {artifact.type} artifact.</DialogDescription>
+          {copyStatus && (
+            <span className="text-xs text-neutral-600" role="status" aria-live="polite">
+              {copyStatus === "copied" ? "Copied" : "Copy failed"}
+            </span>
+          )}
+          <div className="flex-1 overflow-auto">{renderContent()}</div>
+        </DialogContent>
+      </Dialog>
     </>
   );
 }

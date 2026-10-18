@@ -1,11 +1,10 @@
-import { catalogAvatar } from "@shared/expert-catalog";
 import { useState, useRef, useEffect, useMemo } from "react";
 import type { ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { AtSign, Paperclip, Send, Loader2, Users, ScrollText, ChevronLeft } from "lucide-react";
+import { AtSign, Bot, Paperclip, Send, Loader2, Users, ScrollText, ChevronLeft, ChevronDown, ChevronUp, X } from "lucide-react";
 import { Message, Expert, User, OpenQuestion } from "@shared/schema";
 import { format } from "date-fns";
 import ReactMarkdown from "react-markdown";
@@ -19,6 +18,7 @@ import UserMessageContent from "./UserMessageContent";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { useQueryClient } from "@tanstack/react-query";
 import { useToast } from "@/hooks/use-toast";
+import { resolveExpertAvatar } from "@/lib/expert-avatar";
 
 interface ChatInterfaceProps {
   messages: Message[];
@@ -35,9 +35,12 @@ interface ChatInterfaceProps {
   visualizations: any[];
   streamingMessages?: Map<number | null, { content: string; expertName: string; expertRole: string }>;
   typingExpertIds?: Set<number | null>;
-  // G9: expert announced as the next turn — shown as an "up next" preview in
-  // the Expert Panel until their stream starts. Distinct from the mention
-  // pulse (whole-row ring) and the typing indicator (green ping dot).
+  onManageExperts: () => void;
+  onRemoveExpert: (expertId: number) => void;
+  onRefreshInsights: () => void;
+  isRefreshingInsights: boolean;
+  // G9: expert announced as the next turn — shown in the strip until their
+  // stream starts. Distinct from the mention ring and typing indicator.
   upNextExpertId?: number | null;
 }
 
@@ -63,7 +66,7 @@ const getMentionColorClasses = (expertId: number) => {
   return colors[expertId % colors.length];
 };
 
-// Ring palette for the Expert Panel mention pulse, same slot order.
+// Ring palette for expert mentions in the strip, keyed by the same slots.
 const getExpertRingColor = (expertId: number) => {
   const rings = [
     "ring-farm-powder",
@@ -187,17 +190,39 @@ export default function ChatInterface({
   messagesError = false,
   user,
   insights,
-  visualizations,
   streamingMessages = new Map(),
   typingExpertIds = new Set(),
   upNextExpertId = null,
+  onManageExperts,
+  onRemoveExpert,
+  onRefreshInsights,
+  isRefreshingInsights,
 }: ChatInterfaceProps) {
   const queryClient = useQueryClient();
   const { toast } = useToast();
   const [messageContent, setMessageContent] = useState("");
-  const [expertsCollapsed, setExpertsCollapsed] = useState(false);
-  const [rightSidebarWidth, setRightSidebarWidth] = useState(400);
-  const [isRightSidebarCollapsed, setIsRightSidebarCollapsed] = useState(false);
+  const [expertsCollapsed, setExpertsCollapsed] = useState(() => {
+    try {
+      return window.localStorage.getItem("ffExpertStripCollapsed") === "1";
+    } catch {
+      return false;
+    }
+  });
+  const [rightSidebarWidth, setRightSidebarWidth] = useState(() => {
+    try {
+      const savedWidth = Number(window.localStorage.getItem("ffRightSidebarWidth"));
+      return Number.isFinite(savedWidth) && savedWidth >= 300 ? Math.min(savedWidth, 800) : 400;
+    } catch {
+      return 400;
+    }
+  });
+  const [isRightSidebarCollapsed, setIsRightSidebarCollapsed] = useState(() => {
+    try {
+      return window.localStorage.getItem("ffRightSidebarCollapsed") === "1";
+    } catch {
+      return false;
+    }
+  });
   const [selectedExpert, setSelectedExpert] = useState<Expert | null>(null);
   const [isExpertModalOpen, setIsExpertModalOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -205,7 +230,9 @@ export default function ChatInterface({
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const isNearBottomRef = useRef(true);
   const isMobile = useIsMobile();
-  const [showMobileExpertPanel, setShowMobileExpertPanel] = useState(false);
+  const [showMobileRightSidebar, setShowMobileRightSidebar] = useState(false);
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
+  const [mentionPulseActive, setMentionPulseActive] = useState(false);
   const [showOpenQuestions, setShowOpenQuestions] = useState(false);
   const [selectedQuestionId, setSelectedQuestionId] = useState<number | null>(null);
   const selectedQuestion = openQuestions.find(question => question.id === selectedQuestionId) ?? null;
@@ -229,13 +256,12 @@ export default function ChatInterface({
     typeof window === "undefined" ? 0 : window.innerWidth - (isMobile ? 0 : 288),
   );
   const isCompactLayout = isMobile || layoutWidth < 876;
-  const minimumChatWidth = layoutWidth < 600 ? 256 : 320;
-  const maximumRightSidebarWidth = Math.max(
-    300,
-    layoutWidth - (isCompactLayout ? 0 : expertsCollapsed ? 48 : 256) - minimumChatWidth,
-  );
+  const minimumChatWidth = layoutWidth < 600 ? 256 : 560;
+  const maximumRightSidebarWidth = isCompactLayout
+    ? Math.max(300, Math.min(800, layoutWidth - 24))
+    : Math.max(300, Math.min(800, layoutWidth - minimumChatWidth));
   const effectiveRightSidebarWidth = Math.min(rightSidebarWidth, maximumRightSidebarWidth);
-  const isRightSidebarVisible = !isMobile && layoutWidth >= 556;
+  const isRightSidebarVisible = !isCompactLayout;
 
   useEffect(() => {
     const element = layoutRef.current;
@@ -248,6 +274,30 @@ export default function ChatInterface({
     return () => observer.disconnect();
   }, []);
 
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("ffExpertStripCollapsed", expertsCollapsed ? "1" : "0");
+    } catch {
+      // Ignore unavailable storage.
+    }
+  }, [expertsCollapsed]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("ffRightSidebarWidth", String(rightSidebarWidth));
+    } catch {
+      // Ignore unavailable storage.
+    }
+  }, [rightSidebarWidth]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("ffRightSidebarCollapsed", isRightSidebarCollapsed ? "1" : "0");
+    } catch {
+      // Ignore unavailable storage.
+    }
+  }, [isRightSidebarCollapsed]);
+
   // Track whether the user is reading near the bottom so streaming tokens
   // don't yank the viewport down while they scroll back through history.
   useEffect(() => {
@@ -258,6 +308,7 @@ export default function ChatInterface({
     const handleScroll = () => {
       isNearBottomRef.current =
         viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 120;
+      setShowJumpToLatest(!isNearBottomRef.current);
     };
     handleScroll();
     viewport.addEventListener("scroll", handleScroll, { passive: true });
@@ -273,14 +324,22 @@ export default function ChatInterface({
       messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
     }
   }, [messages, streamingMessages, isLoading, isLoadingMessages]);
-  // G4: the latest message's mention list drives the Expert Panel pulse.
-  // Derived on render (no state) so it clears when a newer message arrives.
+  // G4: the latest message's mentions drive the expert strip highlight.
   const latestMessage = messages.length > 0 ? messages[messages.length - 1] : null;
   const latestMentionedRoles = new Set(
     (latestMessage?.mentions ?? []).map((role) => normalizeRoleText(role))
   );
-  // Keep each speaker's latest non-null persisted stance visible in the
-  // Expert Panel. Legacy messages without a stance do not erase a prior one.
+  useEffect(() => {
+    if (!latestMessage?.mentions?.length) {
+      setMentionPulseActive(false);
+      return;
+    }
+    setMentionPulseActive(true);
+    const timeout = window.setTimeout(() => setMentionPulseActive(false), 1200);
+    return () => window.clearTimeout(timeout);
+  }, [latestMessage?.id]);
+  // Keep each speaker's latest persisted stance visible in the expert strip.
+  // Legacy messages without a stance do not erase a prior one.
   const latestStanceByExpertId = useMemo(() => {
     const latest = new Map<number, NonNullable<Message["stance"]>>();
     for (const message of messages) {
@@ -381,6 +440,13 @@ export default function ChatInterface({
     }
   };
 
+  useEffect(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    textarea.style.height = "auto";
+    textarea.style.height = `${Math.max(60, Math.min(textarea.scrollHeight, 160))}px`;
+  }, [messageContent]);
+
   // Handle message input change
   const handleMessageChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setMessageContent(e.target.value);
@@ -464,17 +530,17 @@ export default function ChatInterface({
   };
 
   const getExpertBubbleColor = (expertId: number) => {
-    const colors = [
-      "bg-farm-powder/40 border-farm-blue/20",
-      "bg-farm-green/20 border-farm-green/30",
-      "bg-purple-100 border-purple-300/30",
-      "bg-pink-100 border-pink-300/30",
-      "bg-farm-yellow/20 border-farm-yellow/40",
-      "bg-cyan-100 border-cyan-300/30",
-      "bg-orange-100 border-orange-300/30",
-      "bg-farm-tan/30 border-farm-tan/50",
+    const borderColors = [
+      "border-l-farm-blue",
+      "border-l-emerald-700",
+      "border-l-purple-700",
+      "border-l-pink-700",
+      "border-l-amber-700",
+      "border-l-cyan-800",
+      "border-l-orange-700",
+      "border-l-farm-dark-green",
     ];
-    return colors[expertId % colors.length];
+    return `bg-neutral-50 border-neutral-200 border-l-4 ${borderColors[expertId % borderColors.length]}`;
   };
 
   // Handle file upload
@@ -554,8 +620,8 @@ export default function ChatInterface({
       return (
         <div className="flex items-start mb-6">
           <div className="flex-shrink-0 mr-3">
-            <div className="w-10 h-10 rounded-full bg-gradient-to-br from-farm-blue to-farm-green flex items-center justify-center text-white shadow-md">
-              <span className="material-icons text-lg">smart_toy</span>
+            <div className="w-10 h-10 rounded-full bg-gradient-to-br from-farm-blue to-farm-dark-green flex items-center justify-center text-white shadow-md">
+              <Bot className="h-5 w-5" aria-hidden="true" />
             </div>
           </div>
           <div className="bg-gradient-to-br from-farm-powder/30 to-farm-tan/20 border border-farm-tan/30 rounded-xl p-4 max-w-[min(85%,calc(100%_-_52px))] shadow-sm">
@@ -578,148 +644,31 @@ export default function ChatInterface({
 
   // Enhanced loading indicator component
   const renderLoadingIndicator = () => {
-    if (!isLoading || isLoadingMessages || messagesError || streamingMessages.size > 0) return null;
+    const nextExpert = experts.find((expert) => expert.id === upNextExpertId);
+    if (!isLoading || isLoadingMessages || messagesError || streamingMessages.size > 0 || !nextExpert) return null;
 
     return (
-      <div className="space-y-4">
-        {experts.map((expert, index) => (
-          <div key={expert.id} className="flex items-start mb-4 animate-pulse">
-            <div className="flex-shrink-0 mr-3">
-              <Avatar className="h-10 w-10 ring-2 ring-farm-green/20">
-                <AvatarImage src={expert.avatarUrl?.startsWith("http") ? catalogAvatar(expert.role) : (expert.avatarUrl || catalogAvatar(expert.role))} alt={expert.name} />
-                <AvatarFallback className="bg-farm-green text-white font-semibold">{expert.name.charAt(0)}</AvatarFallback>
-              </Avatar>
-            </div>
-            <div className="bg-farm-powder/20 border border-farm-tan/30 rounded-xl p-4 max-w-[min(85%,calc(100%_-_52px))] relative overflow-hidden shadow-sm">
-              <div className="flex items-center justify-between mb-2">
-                <p className="text-sm font-semibold text-farm-blue">{expert.name} <span className="text-neutral-600 font-normal">({expert.role})</span></p>
-                <ModelBadge modelId={expert.model} size="sm" />
-              </div>
-              <div className="h-4 bg-farm-tan/20 rounded-lg w-3/4 mb-2"></div>
-              <div className="h-4 bg-farm-tan/20 rounded-lg w-1/2"></div>
-              <div className="absolute bottom-0 left-0 w-full h-1">
-                <div
-                  className="h-full bg-gradient-to-r from-farm-blue to-farm-green opacity-40"
-                  style={{
-                    width: '100%',
-                    animation: 'loading 2s infinite ease-in-out',
-                  }}
-                ></div>
-              </div>
-            </div>
+      <div className="flex items-start mb-4 animate-pulse motion-reduce:animate-none">
+        <div className="flex-shrink-0 mr-3">
+          <Avatar className="h-10 w-10 ring-2 ring-farm-green/20">
+            <AvatarImage src={resolveExpertAvatar(nextExpert.role, nextExpert.avatarUrl)} alt={nextExpert.name} />
+            <AvatarFallback className="bg-farm-dark-green text-white font-semibold">{nextExpert.name.charAt(0)}</AvatarFallback>
+          </Avatar>
+        </div>
+        <div className={`${getExpertBubbleColor(nextExpert.id)} rounded-xl p-4 max-w-[min(85%,calc(100%_-_52px))] shadow-sm`}>
+          <div className="flex items-center justify-between mb-2">
+            <p className="text-sm font-semibold text-farm-blue">{nextExpert.name} <span className="text-neutral-600 font-normal">({nextExpert.role})</span></p>
+            <ModelBadge modelId={nextExpert.model} size="sm" />
           </div>
-        ))}
+          <div className="h-4 bg-neutral-200 rounded-lg w-3/4 mb-2"></div>
+          <div className="h-4 bg-neutral-200 rounded-lg w-1/2"></div>
+        </div>
       </div>
     );
   };
 
   return (
     <div ref={layoutRef} className="relative z-10 isolate w-full min-w-0 min-h-0 flex h-full overflow-hidden">
-      {/* Left Sidebar - Experts List */}
-      <div
-        id="expert-panel"
-        className={`${isCompactLayout ? `absolute inset-y-0 left-0 z-30 shadow-xl ${showMobileExpertPanel ? 'flex' : 'hidden'}` : 'flex-shrink-0 flex'} bg-gradient-to-b from-farm-powder/30 to-white border-r border-neutral-200 transition-all duration-300 ${expertsCollapsed ? 'w-12' : 'w-64'}`}
-        aria-hidden={isCompactLayout && !showMobileExpertPanel}
-      >
-        <div className="h-full w-full min-w-0 flex flex-col">
-          <div className="p-3 border-b border-neutral-200 flex items-center justify-between">
-            {!expertsCollapsed && <h3 className="font-semibold text-farm-blue text-sm">Expert Panel</h3>}
-            <button
-              type="button"
-              onClick={() => setExpertsCollapsed(!expertsCollapsed)}
-              className="p-1.5 hover:bg-farm-blue/10 rounded transition-colors"
-              title={expertsCollapsed ? "Expand expert list" : "Collapse expert list"}
-              aria-label={expertsCollapsed ? "Expand expert list" : "Collapse expert list"}
-              aria-expanded={!expertsCollapsed}
-            >
-              <svg className={`w-4 h-4 text-farm-blue transition-transform ${expertsCollapsed ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-              </svg>
-            </button>
-          </div>
-
-          {!expertsCollapsed && (
-            <ScrollArea className="flex-1 min-w-0 p-3">
-              <div className="space-y-2">
-                {experts.map((expert) => (
-                  <button
-                    key={expert.id}
-                    onClick={() => handleExpertClick(expert)}
-                    className={`w-full p-3 bg-white rounded-lg border border-farm-tan/30 shadow-sm hover:shadow-md hover:border-farm-blue/40 transition-all cursor-pointer text-left group ${isExpertMentioned(expert) ? `animate-pulse ring-2 ${getExpertRingColor(expert.id)}` : ""}`}
-                    title={`${isExpertMentioned(expert) ? `${expert.name} was mentioned in the latest message` : "Click to edit expert settings"}${stanceTitle(expert)}`}
-                  >
-                    <div className="flex items-start gap-2">
-                      <div className="relative">
-                        <Avatar className={`h-8 w-8 ring-2 flex-shrink-0 group-hover:ring-farm-blue/40 transition-all ${upNextExpertId === expert.id ? `animate-pulse ${getExpertRingColor(expert.id)}` : "ring-farm-green/20"}`}>
-                          <AvatarImage src={expert.avatarUrl?.startsWith("http") ? catalogAvatar(expert.role) : (expert.avatarUrl || catalogAvatar(expert.role))} alt={expert.name} />
-                          <AvatarFallback className="bg-farm-green text-white text-xs font-semibold">
-                            {expert.name.charAt(0)}
-                          </AvatarFallback>
-                        </Avatar>
-                        {typingExpertIds.has(expert.id) && (
-                          <span className="absolute -bottom-0.5 -right-0.5 flex h-3 w-3">
-                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-farm-green opacity-75"></span>
-                            <span className="relative inline-flex rounded-full h-3 w-3 bg-farm-green"></span>
-                          </span>
-                        )}
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm font-semibold text-farm-blue truncate group-hover:text-farm-dark-green transition-colors">
-                          {expert.name}
-                        </p>
-                        <p className="text-xs text-neutral-600 truncate">{expert.role}</p>
-                        {renderStanceChip(expert)}
-                        {/* G9: this expert was announced as the next turn — chip
-                            plus the avatar shimmer above, distinct from the
-                            mention pulse (row ring) and typing (green dot). */}
-                        {upNextExpertId === expert.id && (
-                          <span className="mt-1 inline-flex items-center rounded-full border border-farm-yellow/60 bg-farm-yellow/20 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide leading-none text-yellow-800">
-                            Up next
-                          </span>
-                        )}
-                      </div>
-                      <svg className="w-4 h-4 text-neutral-400 group-hover:text-farm-blue transition-colors flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                      </svg>
-                    </div>
-                  </button>
-                ))}
-              </div>
-            </ScrollArea>
-          )}
-
-          {expertsCollapsed && (
-            <div className="flex-1 p-2 space-y-3 overflow-y-auto">
-              {experts.map((expert) => (
-                  <button
-                    key={expert.id}
-                    onClick={() => handleExpertClick(expert)}
-                    className={`flex justify-center hover:bg-farm-powder/30 rounded-lg p-1 transition-colors w-full ${isExpertMentioned(expert) ? `animate-pulse ring-2 ${getExpertRingColor(expert.id)}` : ""}`}
-                    title={`${expert.name} - ${expert.role}\nClick to edit settings${stanceTitle(expert)}`}
-                >
-                  {/* G9: collapsed panel shows only the up-next avatar shimmer */}
-                  <Avatar className={`h-8 w-8 ring-2 hover:ring-farm-blue/40 transition-all ${upNextExpertId === expert.id ? `animate-pulse ${getExpertRingColor(expert.id)}` : "ring-farm-green/20"}`}>
-                    <AvatarImage src={expert.avatarUrl?.startsWith("http") ? catalogAvatar(expert.role) : (expert.avatarUrl || catalogAvatar(expert.role))} alt={expert.name} />
-                    <AvatarFallback className="bg-farm-green text-white text-xs font-semibold">
-                      {expert.name.charAt(0)}
-                    </AvatarFallback>
-                  </Avatar>
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-      </div>
-
-      {isCompactLayout && showMobileExpertPanel && (
-        <div
-          className="absolute inset-0 z-20 bg-black/40"
-          aria-hidden="true"
-          onClick={() => setShowMobileExpertPanel(false)}
-        />
-      )}
-
       {showOpenQuestions && (
         <aside
           role="complementary"
@@ -728,7 +677,7 @@ export default function ChatInterface({
         >
           <div className="flex items-center justify-between gap-3 border-b border-farm-tan/30 px-4 py-3">
             <div>
-              <h3 className="font-semibold text-farm-blue">Questions for you</h3>
+              <h3 className="text-sm font-semibold text-farm-blue">Questions for you</h3>
               <p className="text-xs text-neutral-500">Your council kept going while these were open.</p>
             </div>
             <button
@@ -737,14 +686,14 @@ export default function ChatInterface({
               aria-label="Close open questions"
               className="rounded p-1.5 text-neutral-500 hover:bg-farm-powder/30"
             >
-              ×
+              <X className="h-4 w-4" aria-hidden="true" />
             </button>
           </div>
           <ScrollArea className="flex-1 p-3">
             <div className="space-y-3">
               {openQuestions.map(question => (
                 <article key={question.id} className="rounded-lg border border-farm-tan/40 bg-farm-powder/10 p-3">
-                  <p className="text-xs font-semibold uppercase tracking-wide text-farm-green">{question.expertRole}</p>
+                  <p className="text-xs font-semibold uppercase tracking-wide text-farm-dark-green">{question.expertRole}</p>
                   <p className="mt-1 text-sm font-medium text-farm-blue">{question.question}</p>
                   <p className="mt-2 text-xs text-neutral-600">
                     <span className="font-semibold">Assumption:</span> {question.assumption || "The council is proceeding with an informed assumption."}
@@ -752,7 +701,7 @@ export default function ChatInterface({
                   <Button
                     type="button"
                     size="sm"
-                    className="mt-3 bg-farm-green text-white hover:bg-farm-dark-green"
+                    className="mt-3 bg-farm-dark-green text-white hover:bg-farm-blue"
                     onClick={() => {
                       setSelectedQuestionId(question.id);
                       setShowOpenQuestions(false);
@@ -772,18 +721,117 @@ export default function ChatInterface({
       )}
 
       {/* Main Chat Area */}
-      <div className="flex-1 flex flex-col h-full bg-white border-r border-neutral-200 min-w-0">
+      <div className="relative flex-1 flex flex-col h-full bg-white border-r border-neutral-200 min-w-0">
+        <div className="flex-shrink-0 border-b border-neutral-200 bg-neutral-50 px-3 py-2">
+          <div className="space-y-2">
+            <div className="flex min-w-0 items-center gap-2">
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8 shrink-0"
+                onClick={() => setExpertsCollapsed((collapsed) => !collapsed)}
+                aria-label={expertsCollapsed ? "Expand expert strip" : "Collapse expert strip"}
+                aria-expanded={!expertsCollapsed}
+              >
+                {expertsCollapsed ? <ChevronDown className="h-4 w-4" /> : <ChevronUp className="h-4 w-4" />}
+              </Button>
+              <span className="shrink-0 text-sm font-semibold text-farm-blue">
+                {"Experts" + (experts.length > 0 ? " (" + experts.length + ")" : "")}
+              </span>
+              <div className="min-w-0 flex-1" />
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="shrink-0 gap-1.5 px-2 sm:px-3"
+                onClick={onManageExperts}
+                aria-label={experts.length === 0 ? "Add experts" : "Add or manage experts"}
+              >
+                <Users className="h-4 w-4" />
+                <span className="hidden sm:inline">{experts.length === 0 ? "Add experts" : "Manage experts"}</span>
+                <span className="sm:hidden">{experts.length === 0 ? "Add" : "Manage"}</span>
+              </Button>
+              {isCompactLayout && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon"
+                  className="h-9 w-9 shrink-0"
+                  onClick={() => setShowMobileRightSidebar((open) => !open)}
+                  aria-controls="right-sidebar-panel"
+                  aria-expanded={showMobileRightSidebar}
+                  aria-label={showMobileRightSidebar ? "Close insights and artifacts" : "Open insights and artifacts"}
+                  title="Insights and artifacts"
+                >
+                  <ScrollText className="h-4 w-4" />
+                </Button>
+              )}
+            </div>
+            {!expertsCollapsed && experts.length > 0 && (
+              <div className="flex min-w-0 items-center gap-2 overflow-x-auto py-1" role="group" aria-label="Conversation experts">
+                {experts.map((expert) => (
+                  <button
+                    key={expert.id}
+                    type="button"
+                    onClick={() => handleExpertClick(expert)}
+                    className={[
+                      "relative flex shrink-0 items-center gap-2 rounded-lg border bg-white px-2 py-1 text-left transition-colors hover:bg-neutral-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-farm-blue",
+                      isExpertMentioned(expert) ? "ring-2 " + getExpertRingColor(expert.id) : "",
+                      isExpertMentioned(expert) && mentionPulseActive ? "animate-pulse motion-reduce:animate-none" : "",
+                    ].join(" ")}
+                    title={(isExpertMentioned(expert) ? expert.name + " was mentioned in the latest message" : "Click to edit expert settings") + stanceTitle(expert)}
+                  >
+                    <span className="relative">
+                      <Avatar className={["h-8 w-8 ring-2", upNextExpertId === expert.id ? "animate-pulse motion-reduce:animate-none " + getExpertRingColor(expert.id) : "ring-neutral-200"].join(" ")}>
+                        <AvatarImage src={resolveExpertAvatar(expert.role, expert.avatarUrl)} alt={expert.name} />
+                        <AvatarFallback className="bg-farm-dark-green text-white text-xs font-semibold">{expert.name.charAt(0)}</AvatarFallback>
+                      </Avatar>
+                      {typingExpertIds.has(expert.id) && (
+                        <span className="absolute -bottom-0.5 -right-0.5 flex h-3 w-3">
+                          <span className="absolute inline-flex h-full w-full animate-ping motion-reduce:animate-none rounded-full bg-farm-dark-green opacity-75" />
+                          <span className="relative inline-flex h-3 w-3 rounded-full bg-farm-dark-green" />
+                        </span>
+                      )}
+                    </span>
+                    <span className="min-w-0">
+                      <span className="block max-w-32 truncate text-xs font-semibold text-farm-blue">{expert.name}</span>
+                      <span className="block max-w-32 truncate text-[10px] text-neutral-600">{expert.role}</span>
+                      {renderStanceChip(expert)}
+                      {upNextExpertId === expert.id && (
+                        <span className="mt-1 inline-flex items-center rounded-full border border-farm-yellow/60 bg-farm-yellow/20 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide leading-none text-yellow-800">
+                          Up next
+                        </span>
+                      )}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
         {/* Chat Messages */}
-        <ScrollArea ref={scrollAreaRef} className="flex-1 min-w-0 min-h-0 p-4">
+        <div className="relative min-h-0 flex-1">
+        <ScrollArea ref={scrollAreaRef} className="h-full min-w-0 min-h-0 p-4">
           {isLoadingMessages && (
             <div role="status" className="flex items-center justify-center gap-2 py-8 text-sm text-neutral-500">
-              <Loader2 className="h-4 w-4 animate-spin" />
+            <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" />
               Loading conversation…
             </div>
           )}
           {messagesError && (
             <div role="alert" className="rounded-lg border border-red-200 bg-red-50 p-4 text-center text-sm text-red-700">
               We couldn’t load this conversation. Please select it again or refresh the page.
+            </div>
+          )}
+          {!isLoadingMessages && !messagesError && experts.length === 0 && (
+            <div className="mx-auto my-8 max-w-md rounded-xl border border-neutral-200 bg-neutral-50 p-6 text-center">
+              <Users className="mx-auto h-8 w-8 text-neutral-500" aria-hidden="true" />
+              <p className="mt-3 text-sm font-semibold text-farm-blue">No experts in this roundtable yet</p>
+              <p className="mt-1 text-sm text-neutral-600">Add experts to get advice for this conversation.</p>
+              <Button type="button" className="mt-4 bg-farm-dark-green text-white hover:bg-farm-blue" onClick={onManageExperts}>
+                Add experts
+              </Button>
             </div>
           )}
           {!isLoadingMessages && !messagesError && renderWelcomeMessage()}
@@ -797,10 +845,11 @@ export default function ChatInterface({
               
               {dateMessages.map((message) => {
                 // User message
-                if (message.userId && !message.expertId) {
+                if (message.role === "user") {
                   return (
                     <div key={message.id} className="flex items-start mb-4 justify-end">
                       <div className="bg-gradient-to-br from-farm-blue to-farm-dark-green text-white rounded-xl p-4 max-w-[min(85%,calc(100%_-_52px))] shadow-md">
+                        {message.timestamp && <time className="mb-2 block text-right text-xs text-white/80" dateTime={message.timestamp.toISOString()}>{format(message.timestamp, "h:mm a")}</time>}
                         <MentionChips mentions={message.mentions} experts={experts} className="mb-2" />
                         <div className="markdown-content [overflow-wrap:anywhere] prose-sm prose-invert leading-relaxed">
                           <UserMessageContent content={message.content} renderBody={renderMessageBody} />
@@ -808,37 +857,38 @@ export default function ChatInterface({
                       </div>
                       <div className="flex-shrink-0 ml-3">
                         <Avatar className="h-10 w-10 ring-2 ring-farm-blue/20">
-                          <AvatarImage src="https://images.unsplash.com/photo-1610216705422-caa3fcb6d158?ixlib=rb-1.2.1&auto=format&fit=crop&w=32&h=32&q=80" />
-                          <AvatarFallback className="bg-farm-blue text-white font-semibold">{user?.username.charAt(0).toUpperCase()}</AvatarFallback>
+                          <AvatarFallback className="bg-farm-blue text-white font-semibold">{user?.username?.charAt(0).toUpperCase() || "U"}</AvatarFallback>
                         </Avatar>
                       </div>
                     </div>
                   );
                 }
                 
-                // Expert message, including the synthetic Moderator's closing
-                // synthesis (which deliberately has no expert foreign key).
+                // Assistant messages stay visible after their expert is removed.
                 const isSystemModeratorSynthesis =
                   message.expertId === null && message.expertRole === "Moderator" && message.isSynthesis === true;
-                if (message.expertId !== null || isSystemModeratorSynthesis) {
+                if (message.role === "assistant") {
                   const expert = message.expertId !== null ? findExpert(message.expertId) : null;
-                  if (!expert && !isSystemModeratorSynthesis) return null;
-                  const speakerName = expert?.name ?? message.expertName ?? "Moderator";
-                  const speakerRole = expert?.role ?? message.expertRole ?? "Moderator";
+                  const speakerName = expert?.name ?? message.expertName ?? (isSystemModeratorSynthesis ? "Moderator" : "Expert");
+                  const speakerRole = expert?.role ?? message.expertRole ?? (isSystemModeratorSynthesis ? "Moderator" : "Expert");
+                  const speakerBubbleColor = expert
+                    ? getExpertBubbleColor(expert.id)
+                    : "bg-neutral-50 border-neutral-200 border-l-4 border-l-neutral-400";
 
                   return (
                     <div key={message.id} className="flex items-start mb-4">
                       <div className="flex-shrink-0 mr-3">
-                        <Avatar className="h-10 w-10 ring-2 ring-farm-green/20">
-                          <AvatarImage src={expert?.avatarUrl || ""} alt={speakerName} />
-                          <AvatarFallback className="bg-farm-green text-white font-semibold">{speakerName.charAt(0)}</AvatarFallback>
+                        <Avatar className={`h-10 w-10 ring-2 ${expert ? "ring-farm-green/20" : "ring-neutral-200"}`}>
+                          {expert && <AvatarImage src={resolveExpertAvatar(expert.role, expert.avatarUrl)} alt={speakerName} />}
+                          <AvatarFallback className={expert ? "bg-farm-dark-green text-white font-semibold" : "bg-neutral-200 text-neutral-700 font-semibold"}>{speakerName.charAt(0)}</AvatarFallback>
                         </Avatar>
                       </div>
                       <div className="max-w-[min(85%,calc(100%_-_52px))] space-y-2">
-                        <div className={`${getExpertBubbleColor(expert?.id ?? 0)} ${message.isSynthesis ? "border-amber-300/70 bg-amber-50/70 shadow-md" : ""} rounded-xl p-4 border shadow-sm`}>
+                        <div className={`${speakerBubbleColor} ${message.isSynthesis ? "border-amber-300/70 bg-amber-50/70 shadow-md" : ""} rounded-xl p-4 border shadow-sm`}>
                           <div className="flex flex-wrap items-start justify-between gap-2 mb-2">
                             <div className="flex min-w-0 flex-wrap items-center gap-2">
                               <p className="min-w-0 break-words text-sm font-semibold text-farm-blue">{speakerName} <span className="text-neutral-600 font-normal">({speakerRole})</span></p>
+                              {message.timestamp && <time className="text-xs text-neutral-600" dateTime={message.timestamp.toISOString()}>{format(message.timestamp, "h:mm a")}</time>}
                               {/* G5: the Moderator's closing synthesis of the roundtable */}
                               {message.isSynthesis && (
                                 <span className="inline-flex items-center gap-1 rounded-full border border-amber-300/60 bg-amber-100 px-2 py-0.5 text-xs font-medium leading-none text-amber-800 flex-shrink-0">
@@ -902,13 +952,13 @@ export default function ChatInterface({
               <div key={`stream-${expertId ?? "system-moderator"}`} className="flex items-start mb-4">
                 <div className="flex-shrink-0 mr-3">
                   <div className="relative">
-                    <Avatar className="h-10 w-10 ring-2 ring-farm-green/20">
-                      <AvatarImage src={expert?.avatarUrl || ""} alt={speakerName} />
-                      <AvatarFallback className="bg-farm-green text-white font-semibold">{speakerName.charAt(0)}</AvatarFallback>
+                    <Avatar className={`h-10 w-10 ring-2 ${expert ? "ring-farm-green/20" : "ring-neutral-200"}`}>
+                      {expert && <AvatarImage src={resolveExpertAvatar(expert.role, expert.avatarUrl)} alt={speakerName} />}
+                      <AvatarFallback className={expert ? "bg-farm-dark-green text-white font-semibold" : "bg-neutral-200 text-neutral-700 font-semibold"}>{speakerName.charAt(0)}</AvatarFallback>
                     </Avatar>
                     <span className="absolute -bottom-0.5 -right-0.5 flex h-3 w-3">
-                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-farm-green opacity-75"></span>
-                      <span className="relative inline-flex rounded-full h-3 w-3 bg-farm-green"></span>
+                      <span className="animate-ping motion-reduce:animate-none absolute inline-flex h-full w-full rounded-full bg-farm-dark-green opacity-75"></span>
+                      <span className="relative inline-flex rounded-full h-3 w-3 bg-farm-dark-green"></span>
                     </span>
                   </div>
                 </div>
@@ -925,13 +975,13 @@ export default function ChatInterface({
                         renderMessageBody(stream.content)
                       ) : (
                         <span className="inline-flex items-center gap-0.5">
-                          <span className="animate-bounce [animation-delay:-0.3s]">.</span>
-                          <span className="animate-bounce [animation-delay:-0.15s]">.</span>
-                          <span className="animate-bounce">.</span>
+                          <span className="animate-bounce motion-reduce:animate-none [animation-delay:-0.3s]">.</span>
+                          <span className="animate-bounce motion-reduce:animate-none [animation-delay:-0.15s]">.</span>
+                          <span className="animate-bounce motion-reduce:animate-none">.</span>
                         </span>
                       )}
                       {/* Blinking cursor */}
-                      <span className="inline-block w-0.5 h-4 bg-farm-blue ml-0.5 animate-pulse align-middle"></span>
+                      <span className="inline-block w-0.5 h-4 bg-farm-blue ml-0.5 animate-pulse motion-reduce:animate-none align-middle"></span>
                     </div>
                   </div>
                 </div>
@@ -944,6 +994,24 @@ export default function ChatInterface({
           
           <div ref={messagesEndRef} />
         </ScrollArea>
+
+        {showJumpToLatest && (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="absolute bottom-4 left-1/2 z-20 -translate-x-1/2 rounded-full bg-white shadow-md"
+            onClick={() => {
+              isNearBottomRef.current = true;
+              setShowJumpToLatest(false);
+              messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+            }}
+            aria-label="New messages, jump to latest"
+          >
+            New messages ↓
+          </Button>
+        )}
+        </div>
         
         {/* Input Area */}
         <div className="border-t border-farm-tan/30 bg-gradient-to-r from-white to-farm-powder/10 p-4">
@@ -984,13 +1052,13 @@ export default function ChatInterface({
             <Button
               variant="ghost"
               size="icon"
-              className="text-farm-blue hover:text-farm-green hover:bg-farm-powder/30 transition-all duration-200"
+              className="text-farm-blue hover:text-farm-dark-green hover:bg-farm-powder/30 transition-all duration-200"
               onClick={handleFileUpload}
               title="Upload File"
               aria-label={isUploading ? "Uploading file" : "Upload file"}
               disabled={isUploading}
             >
-              {isUploading ? <Loader2 className="h-5 w-5 animate-spin" /> : <Paperclip className="h-5 w-5" />}
+              {isUploading ? <Loader2 className="h-5 w-5 animate-spin motion-reduce:animate-none" /> : <Paperclip className="h-5 w-5" />}
             </Button>
             <div className="relative flex-1">
               {mentionOpen && (
@@ -998,10 +1066,11 @@ export default function ChatInterface({
                   <div className="px-3 py-1.5 text-[10px] font-medium uppercase tracking-wide text-neutral-400 border-b border-farm-tan/30">
                     Mention an expert
                   </div>
-                  <div className="max-h-48 overflow-y-auto" role="listbox" aria-label="Experts to mention">
+                  <div id="expert-mention-listbox" className="max-h-48 overflow-y-auto" role="listbox" aria-label="Experts to mention">
                     {mentionMatches.map((expert, index) => (
                       <button
                         key={expert.id}
+                        id={`expert-mention-option-${expert.id}`}
                         type="button"
                         role="option"
                         aria-selected={index === activeMentionIndex}
@@ -1010,8 +1079,8 @@ export default function ChatInterface({
                         onClick={() => applyMentionSelection(expert)}
                       >
                         <Avatar className="h-6 w-6 flex-shrink-0">
-                          <AvatarImage src={expert.avatarUrl?.startsWith("http") ? catalogAvatar(expert.role) : (expert.avatarUrl || catalogAvatar(expert.role))} alt={expert.name} />
-                          <AvatarFallback className="bg-farm-green text-white text-[10px] font-semibold">
+                          <AvatarImage src={resolveExpertAvatar(expert.role, expert.avatarUrl)} alt={expert.name} />
+                          <AvatarFallback className="bg-farm-dark-green text-white text-[10px] font-semibold">
                             {expert.name.charAt(0)}
                           </AvatarFallback>
                         </Avatar>
@@ -1027,7 +1096,7 @@ export default function ChatInterface({
               )}
               <Textarea
                 ref={textareaRef}
-                placeholder="Type your message here..."
+                placeholder={isLoading ? "Experts are discussing; your message will be queued…" : "Type your message here..."}
                 value={messageContent}
                 onChange={handleMessageChange}
                 onKeyDown={handleKeyDown}
@@ -1036,12 +1105,18 @@ export default function ChatInterface({
                   const el = e.currentTarget;
                   updateMentionToken(el.value, el.selectionStart ?? el.value.length);
                 }}
-                className="min-h-[60px] resize-none pr-10 border-farm-tan/40 focus:border-farm-blue focus:ring-farm-blue/20"
+                className="min-h-[60px] max-h-40 overflow-y-auto resize-none border-farm-tan/40 focus:border-farm-blue focus:ring-farm-blue/20"
                 aria-label="Message to the roundtable"
+                role="combobox"
+                aria-autocomplete="list"
+                aria-haspopup="listbox"
+                aria-expanded={mentionOpen}
+                aria-controls={mentionOpen ? "expert-mention-listbox" : undefined}
+                aria-activedescendant={mentionOpen ? `expert-mention-option-${mentionMatches[activeMentionIndex]?.id}` : undefined}
               />
             </div>
             <Button
-              className="bg-gradient-to-br from-farm-green to-farm-dark-green hover:from-farm-dark-green hover:to-farm-green text-white rounded-full p-2 ml-2 h-11 w-11 flex items-center justify-center shadow-md hover:shadow-lg transition-all duration-200 disabled:opacity-50"
+              className="bg-farm-dark-green hover:bg-farm-blue text-white rounded-full p-2 ml-2 h-11 w-11 flex items-center justify-center shadow-md hover:shadow-lg transition-all duration-200 disabled:opacity-50"
               onClick={handleSendMessage}
               disabled={messageContent.trim() === ""}
               aria-label={selectedQuestion ? "Send answer" : "Send message"}
@@ -1049,29 +1124,16 @@ export default function ChatInterface({
               <Send className="h-5 w-5" />
             </Button>
           </div>
+          <p className="mt-2 truncate text-[11px] text-neutral-600" title="Shift+Enter for a new line · @ to mention an expert · /new [topic] to restart the discussion">
+            Shift+Enter for a new line · @ mention · /new [topic] restart
+          </p>
         </div>
         
       </div>
 
-      {/* Floating button to toggle the compact expert panel */}
-      {isCompactLayout && (
-        <Button
-          className="fixed bottom-20 z-40 rounded-full w-12 h-12 shadow-lg bg-farm-blue hover:bg-farm-dark-green text-white"
-          size="icon"
-          onClick={() => setShowMobileExpertPanel(!showMobileExpertPanel)}
-          title={showMobileExpertPanel ? "Hide experts" : "Show experts"}
-          aria-label={showMobileExpertPanel ? "Hide experts" : "Show experts"}
-          aria-expanded={showMobileExpertPanel}
-          aria-controls="expert-panel"
-          style={{ right: `${isRightSidebarVisible ? (isRightSidebarCollapsed ? 40 : effectiveRightSidebarWidth) + 16 : 16}px` }}
-        >
-          <Users className="h-5 w-5" />
-        </Button>
-      )}
-
       {/* Right Sidebar - Resizable */}
       <div
-        id="right-sidebar-panel"
+        id={isRightSidebarVisible ? "right-sidebar-panel" : undefined}
         className={`flex-shrink-0 h-full overflow-hidden ${isRightSidebarVisible ? "block" : "hidden"} ${isRightSidebarCollapsed ? "border-l border-neutral-200 bg-white" : "bg-white"}`}
         style={{ width: `${isRightSidebarCollapsed ? 40 : effectiveRightSidebarWidth}px` }}
       >
@@ -1094,15 +1156,47 @@ export default function ChatInterface({
         ) : (
           <ConversationSidebar
             messages={messages}
-            experts={experts}
             insights={insights}
-            visualizations={visualizations}
             onWidthChange={setRightSidebarWidth}
             onCollapse={() => setIsRightSidebarCollapsed(true)}
             currentWidth={effectiveRightSidebarWidth}
+            minWidth={300}
+            maxWidth={maximumRightSidebarWidth}
+            onRefreshInsights={onRefreshInsights}
+            isRefreshingInsights={isRefreshingInsights}
           />
         )}
       </div>
+
+      {isCompactLayout && showMobileRightSidebar && (
+        <>
+          <button
+            type="button"
+            className="absolute inset-0 z-30 bg-black/40"
+            aria-label="Close insights and artifacts"
+            onClick={() => setShowMobileRightSidebar(false)}
+          />
+          <aside
+            id="right-sidebar-panel"
+            role="complementary"
+            aria-label="Insights and artifacts"
+            className="absolute inset-y-0 right-0 z-40 flex max-w-full flex-col bg-white shadow-2xl"
+            style={{ width: `${effectiveRightSidebarWidth}px` }}
+          >
+            <ConversationSidebar
+              messages={messages}
+              insights={insights}
+              onWidthChange={setRightSidebarWidth}
+              onCollapse={() => setShowMobileRightSidebar(false)}
+              currentWidth={effectiveRightSidebarWidth}
+              minWidth={300}
+              maxWidth={maximumRightSidebarWidth}
+              onRefreshInsights={onRefreshInsights}
+              isRefreshingInsights={isRefreshingInsights}
+            />
+          </aside>
+        </>
+      )}
 
       {/* Expert Settings Modal */}
       <ExpertSettingsModal
@@ -1113,6 +1207,7 @@ export default function ChatInterface({
           setSelectedExpert(null);
         }}
         onSave={handleExpertSave}
+        onRemoveExpert={onRemoveExpert}
       />
     </div>
   );
