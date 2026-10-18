@@ -99,7 +99,7 @@ export default function CharterDialog({
       <DialogContent className="sm:max-w-lg max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 text-farm-blue">
-            <ScrollText className="h-5 w-5 text-farm-green" />
+            <ScrollText className="h-5 w-5 text-farm-dark-green" />
             Council Charter
           </DialogTitle>
           <DialogDescription>
@@ -178,9 +178,9 @@ export default function CharterDialog({
           <Button
             onClick={handleSave}
             disabled={saveCharterMutation.isPending || overLimit || !budgetIsValid}
-            className="bg-farm-green text-white hover:bg-farm-dark-green"
+            className="bg-farm-dark-green text-white hover:bg-farm-blue"
           >
-            {saveCharterMutation.isPending && <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />}
+            {saveCharterMutation.isPending && <Loader2 className="h-4 w-4 mr-1.5 animate-spin motion-reduce:animate-none" />}
             Save
           </Button>
         </DialogFooter>
