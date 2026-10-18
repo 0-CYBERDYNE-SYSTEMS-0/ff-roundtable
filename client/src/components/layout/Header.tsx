@@ -34,7 +34,7 @@ export default function Header({ onOpenFarmProfile, onToggleSidebar, isSidebarOp
             variant="ghost"
             size="icon"
             ref={sidebarToggleRef}
-            className="shrink-0 text-white hover:bg-white/10 hover:text-white sm:hidden motion-reduce:transition-none"
+            className="shrink-0 text-white hover:bg-white/10 hover:text-white md:hidden motion-reduce:transition-none"
             onClick={onToggleSidebar}
             aria-label={isSidebarOpen ? "Close navigation menu" : "Open navigation menu"}
             aria-expanded={isSidebarOpen}
@@ -73,12 +73,10 @@ export default function Header({ onOpenFarmProfile, onToggleSidebar, isSidebarOp
             <DropdownMenuContent align="end" className="w-52">
               <DropdownMenuLabel>{user.username}</DropdownMenuLabel>
               <DropdownMenuSeparator />
-              {onOpenFarmProfile && (
-                <DropdownMenuItem onSelect={onOpenFarmProfile}>
-                  <Wheat className="h-4 w-4" />
-                  <span>Farm profile</span>
-                </DropdownMenuItem>
-              )}
+              <DropdownMenuItem onSelect={() => onOpenFarmProfile ? onOpenFarmProfile() : navigate("/?openFarmProfile=1")}>
+                <Wheat className="h-4 w-4" />
+                <span>Farm profile</span>
+              </DropdownMenuItem>
               <DropdownMenuItem onSelect={() => navigate("/subscribe")}>
                 <CreditCard className="h-4 w-4" />
                 <span>Plan &amp; billing</span>
