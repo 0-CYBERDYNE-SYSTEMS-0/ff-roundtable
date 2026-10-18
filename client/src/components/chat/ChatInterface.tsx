@@ -32,7 +32,6 @@ interface ChatInterfaceProps {
   messagesError?: boolean;
   user: User | null;
   insights: any[];
-  visualizations: any[];
   streamingMessages?: Map<number | null, { content: string; expertName: string; expertRole: string }>;
   typingExpertIds?: Set<number | null>;
   onManageExperts: () => void;

@@ -88,7 +88,7 @@ function PaymentForm() {
       >
         {isLoading ? (
           <>
-            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            <Loader2 className="mr-2 h-4 w-4 animate-spin motion-reduce:animate-none" />
             Processing...
           </>
         ) : (
@@ -164,7 +164,7 @@ export default function SubscribePage() {
         <Header />
         <div className="flex flex-grow items-center justify-center">
           <div className="text-center">
-            <Loader2 className="h-12 w-12 animate-spin text-primary mx-auto mb-4" />
+            <Loader2 className="h-12 w-12 animate-spin motion-reduce:animate-none text-primary mx-auto mb-4" />
             <p className="text-lg">Preparing subscription details...</p>
           </div>
         </div>

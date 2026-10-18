@@ -313,8 +313,6 @@ export default function HomePage() {
   // Fetch insights for active conversation
   const {
     data: insights,
-    isLoading: isLoadingInsights,
-    isError: insightsError,
   } = useQuery<Insight[]>({
     queryKey: [`/api/protected/conversations/${activeConversation}/insights`],
     enabled: !!activeConversation,
@@ -1350,7 +1348,6 @@ export default function HomePage() {
                         messagesError={messagesError}
                         user={user}
                         insights={insights || []}
-                        visualizations={[]}
                         streamingMessages={streamingMessages}
                         typingExpertIds={typingExpertIds}
                         upNextExpertId={upNextExpertId}

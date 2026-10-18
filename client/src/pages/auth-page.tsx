@@ -170,7 +170,7 @@ export default function AuthPage() {
                   >
                     {loginMutation.isPending ? (
                       <>
-                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin motion-reduce:animate-none" />
                         Logging in...
                       </>
                     ) : (
@@ -271,7 +271,7 @@ export default function AuthPage() {
                   >
                     {registerMutation.isPending ? (
                       <>
-                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin motion-reduce:animate-none" />
                         Creating account...
                       </>
                     ) : (
