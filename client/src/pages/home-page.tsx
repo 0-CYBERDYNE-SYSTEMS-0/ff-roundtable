@@ -17,7 +17,6 @@ import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { PauseIcon, PlayIcon, ScrollText, XIcon, ChevronLeft, ChevronRight } from "lucide-react";
 import { parseNewCommand } from "@/lib/new-command";
-import type { ComponentType } from "react";
 
 // G9 quiet console: per-event chatter is gated behind a debug flag so the
 // browser console stays readable in production. Force it per-tab with
@@ -67,15 +66,6 @@ function readLeftSidebarCollapsed() {
     return false;
   }
 }
-
-type ManagedChatInterfaceProps = React.ComponentProps<typeof ChatInterface> & {
-  onManageExperts: () => void;
-  onRemoveExpert: (expertId: number) => void;
-  onRefreshInsights: () => void;
-  isRefreshingInsights: boolean;
-};
-
-const ManagedChatInterface = ChatInterface as ComponentType<ManagedChatInterfaceProps>;
 
 export default function HomePage() {
   const { user } = useAuth();
@@ -1348,7 +1338,7 @@ export default function HomePage() {
             {/* === Chat Area (Takes remaining space) === */}
              <div className="flex-1 overflow-y-auto">
                  {activeConversation ? (
-                    <ManagedChatInterface
+                    <ChatInterface
                         messages={messages || []}
                         experts={experts || []}
                         openQuestions={openQuestions}

@@ -63,7 +63,6 @@ export default function CharterDialog({
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/protected/conversations"] });
-      toast({ title: "Charter saved" });
       onClose();
     },
     onError: (error: Error) => {
