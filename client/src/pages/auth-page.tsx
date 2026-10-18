@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
-import { Loader2 } from "lucide-react";
+import { FileText, Loader2, Search, Users } from "lucide-react";
 import { queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 
@@ -139,7 +139,7 @@ export default function AuthPage() {
                           <FormItem>
                             <FormLabel>Username</FormLabel>
                             <FormControl>
-                              <Input placeholder="username" {...field} />
+                              <Input autoComplete="username" placeholder="username" {...field} />
                             </FormControl>
                             <FormMessage />
                           </FormItem>
@@ -152,7 +152,7 @@ export default function AuthPage() {
                           <FormItem>
                             <FormLabel>Password</FormLabel>
                             <FormControl>
-                              <Input type="password" placeholder="••••••••" {...field} />
+                              <Input autoComplete="current-password" type="password" placeholder="••••••••" {...field} />
                             </FormControl>
                             <FormMessage />
                           </FormItem>
@@ -214,7 +214,7 @@ export default function AuthPage() {
                           <FormItem>
                             <FormLabel>Username</FormLabel>
                             <FormControl>
-                              <Input placeholder="username" {...field} />
+                              <Input autoComplete="username" placeholder="username" {...field} />
                             </FormControl>
                             <FormMessage />
                           </FormItem>
@@ -227,7 +227,7 @@ export default function AuthPage() {
                           <FormItem>
                             <FormLabel>Email</FormLabel>
                             <FormControl>
-                              <Input type="email" placeholder="email@example.com" {...field} />
+                              <Input autoComplete="email" type="email" placeholder="email@example.com" {...field} />
                             </FormControl>
                             <FormMessage />
                           </FormItem>
@@ -240,7 +240,7 @@ export default function AuthPage() {
                           <FormItem>
                             <FormLabel>Password</FormLabel>
                             <FormControl>
-                              <Input type="password" placeholder="••••••••" {...field} />
+                              <Input autoComplete="new-password" type="password" placeholder="••••••••" {...field} />
                             </FormControl>
                             <FormMessage />
                           </FormItem>
@@ -253,7 +253,7 @@ export default function AuthPage() {
                           <FormItem>
                             <FormLabel>Confirm Password</FormLabel>
                             <FormControl>
-                              <Input type="password" placeholder="••••••••" {...field} />
+                              <Input autoComplete="new-password" type="password" placeholder="••••••••" {...field} />
                             </FormControl>
                             <FormMessage />
                           </FormItem>
@@ -285,14 +285,14 @@ export default function AuthPage() {
         </div>
         
         {/* Right side - Hero section */}
-        <div className="w-full md:w-1/2 bg-gradient-to-br from-farm-blue to-farm-green text-white p-8 flex flex-col justify-center">
+        <div className="w-full md:w-1/2 bg-gradient-to-br from-farm-blue to-farm-dark-green text-white p-8 flex flex-col justify-center">
           <h2 className="text-3xl font-serif font-bold mb-4">Expert Agricultural Advice at Your Fingertips</h2>
           <p className="mb-6">Join Farm Friend Roundtable and connect with AI experts in soil science, crop management, irrigation, pest control, and more.</p>
           
           <div className="space-y-4">
             <div className="flex items-start">
               <div className="bg-white bg-opacity-20 p-2 rounded-full mr-4">
-                <span className="material-icons">groups</span>
+                <Users className="h-5 w-5" aria-hidden="true" />
               </div>
               <div>
                 <h3 className="font-medium text-lg">Interactive Roundtable</h3>
@@ -302,7 +302,7 @@ export default function AuthPage() {
             
             <div className="flex items-start">
               <div className="bg-white bg-opacity-20 p-2 rounded-full mr-4">
-                <span className="material-icons">search</span>
+                <Search className="h-5 w-5" aria-hidden="true" />
               </div>
               <div>
                 <h3 className="font-medium text-lg">Research & Insights</h3>
@@ -312,7 +312,7 @@ export default function AuthPage() {
             
             <div className="flex items-start">
               <div className="bg-white bg-opacity-20 p-2 rounded-full mr-4">
-                <span className="material-icons">file_present</span>
+                <FileText className="h-5 w-5" aria-hidden="true" />
               </div>
               <div>
                 <h3 className="font-medium text-lg">File Generation</h3>
