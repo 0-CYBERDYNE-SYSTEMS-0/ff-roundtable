@@ -5,12 +5,15 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { ChevronDown, CreditCard, LogOut, Menu, Wheat } from "lucide-react";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { useLocation } from "wouter";
+import { useTheme, type Theme } from "@/lib/theme";
 import type { RefObject } from "react";
 
 interface HeaderProps {
@@ -23,6 +26,7 @@ interface HeaderProps {
 export default function Header({ onOpenFarmProfile, onToggleSidebar, isSidebarOpen = false, sidebarToggleRef }: HeaderProps) {
   const { user, logoutMutation } = useAuth();
   const [, navigate] = useLocation();
+  const { theme, setTheme } = useTheme();
   const initials = user?.username.trim().split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase();
 
   return (
@@ -81,6 +85,13 @@ export default function Header({ onOpenFarmProfile, onToggleSidebar, isSidebarOp
                 <CreditCard className="h-4 w-4" />
                 <span>Plan &amp; billing</span>
               </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuLabel className="text-xs font-medium text-muted-foreground">Theme</DropdownMenuLabel>
+              <DropdownMenuRadioGroup value={theme} onValueChange={(value) => setTheme(value as Theme)}>
+                <DropdownMenuRadioItem value="light">Light</DropdownMenuRadioItem>
+                <DropdownMenuRadioItem value="dark">Dark</DropdownMenuRadioItem>
+                <DropdownMenuRadioItem value="system">System</DropdownMenuRadioItem>
+              </DropdownMenuRadioGroup>
               <DropdownMenuSeparator />
               <DropdownMenuItem
                 className="text-red-600 hover:bg-red-50"

@@ -83,7 +83,7 @@ export default function ArtifactDisplay({ artifact }: ArtifactDisplayProps) {
                 {data.map((row, i) => (
                   <tr key={i} className={cn(
                     "transition-colors hover:bg-primary/5",
-                    i % 2 === 0 ? "bg-white dark:bg-neutral-900" : "bg-neutral-50/50 dark:bg-neutral-800/50"
+                    i % 2 === 0 ? "bg-card" : "bg-neutral-50/50"
                   )}>
                     {keys.map((key, j) => {
                       const val = String(row[key] || "");
@@ -93,7 +93,7 @@ export default function ArtifactDisplay({ artifact }: ArtifactDisplayProps) {
                       
                       return (
                         <td key={j} className={cn(
-                          "p-3 border-b border-neutral-100 dark:border-neutral-800 font-medium",
+                          "p-3 border-b border-neutral-100 font-medium",
                           isStatus && "text-emerald-600 dark:text-emerald-400",
                           isWarning && "text-amber-600 dark:text-amber-400 font-bold",
                           isCritical && "text-red-600 dark:text-red-400 font-bold"

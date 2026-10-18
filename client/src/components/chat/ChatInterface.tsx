@@ -514,13 +514,13 @@ export default function ChatInterface({
     () => ({
       ...markdownComponents,
       h1: ({ children }: { children?: ReactNode }) => (
-        <h1 className="mb-2 border-b border-amber-200 pb-1 text-base font-bold text-amber-950">{children}</h1>
+        <h1 className="mb-2 border-b border-amber-200 pb-1 text-base font-bold text-amber-950 dark:border-amber-800 dark:text-amber-200">{children}</h1>
       ),
       h2: ({ children }: { children?: ReactNode }) => (
-        <h2 className="mt-4 mb-1 border-b border-amber-100 pb-1 text-sm font-semibold text-amber-900">{children}</h2>
+        <h2 className="mt-4 mb-1 border-b border-amber-100 pb-1 text-sm font-semibold text-amber-900 dark:border-amber-900 dark:text-amber-300">{children}</h2>
       ),
       h3: ({ children }: { children?: ReactNode }) => (
-        <h3 className="mt-3 mb-1 text-sm font-semibold text-amber-900">{children}</h3>
+        <h3 className="mt-3 mb-1 text-sm font-semibold text-amber-900 dark:text-amber-300">{children}</h3>
       ),
     }),
     [markdownComponents]
@@ -681,7 +681,7 @@ export default function ChatInterface({
         <aside
           role="complementary"
           aria-label="Open questions for you"
-          className="absolute right-0 top-0 bottom-0 z-40 w-full max-w-sm border-l border-farm-tan/40 bg-white shadow-2xl flex flex-col"
+          className="absolute right-0 top-0 bottom-0 z-40 w-full max-w-sm border-l border-farm-tan/40 bg-card shadow-2xl flex flex-col"
         >
           <div className="flex items-center justify-between gap-3 border-b border-farm-tan/30 px-4 py-3">
             <div>
@@ -729,7 +729,7 @@ export default function ChatInterface({
       )}
 
       {/* Main Chat Area */}
-      <div className="relative flex-1 flex flex-col h-full bg-white border-r border-neutral-200 min-w-0">
+      <div className="relative flex-1 flex flex-col h-full bg-card border-r border-neutral-200 min-w-0">
         <div className="flex-shrink-0 border-b border-neutral-200 bg-neutral-50 px-3 py-2">
           <div className="space-y-2">
             <div className="flex min-w-0 items-center gap-2">
@@ -784,7 +784,7 @@ export default function ChatInterface({
                     type="button"
                     onClick={() => handleExpertClick(expert)}
                     className={[
-                      "relative flex shrink-0 items-center gap-2 rounded-lg border bg-white px-2 py-1 text-left transition-colors hover:bg-neutral-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-farm-blue",
+                      "relative flex shrink-0 items-center gap-2 rounded-lg border bg-card px-2 py-1 text-left transition-colors hover:bg-neutral-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-farm-blue",
                       isExpertMentioned(expert) ? "ring-2 " + getExpertRingColor(expert.id) : "",
                       isExpertMentioned(expert) && mentionPulseActive ? "animate-pulse motion-reduce:animate-none" : "",
                     ].join(" ")}
@@ -807,7 +807,7 @@ export default function ChatInterface({
                       <span className="block max-w-32 truncate text-[10px] text-neutral-600">{expert.role}</span>
                       {renderStanceChip(expert)}
                       {upNextExpertId === expert.id && (
-                        <span className="mt-1 inline-flex items-center rounded-full border border-farm-yellow/60 bg-farm-yellow/20 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide leading-none text-yellow-800">
+                        <span className="mt-1 inline-flex items-center rounded-full border border-farm-yellow/60 bg-farm-yellow/20 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide leading-none text-yellow-800 dark:text-yellow-200">
                           Up next
                         </span>
                       )}
@@ -892,7 +892,7 @@ export default function ChatInterface({
                         </Avatar>
                       </div>
                       <div className="max-w-[min(85%,calc(100%_-_52px))] space-y-2">
-                        <div className={`${speakerBubbleColor} ${message.isSynthesis ? "border-amber-300/70 bg-amber-50/70 shadow-md" : ""} rounded-xl p-4 border shadow-sm`}>
+                        <div className={`${speakerBubbleColor} ${message.isSynthesis ? "border-amber-300/70 bg-amber-50/70 shadow-md dark:border-amber-700/60 dark:bg-amber-950/40" : ""} rounded-xl p-4 border shadow-sm`}>
                           <div className="flex flex-wrap items-start justify-between gap-2 mb-2">
                             <div className="flex min-w-0 flex-wrap items-center gap-2">
                               <p className="min-w-0 break-words text-sm font-semibold text-farm-blue">{speakerName} <span className="text-neutral-600 font-normal">({speakerRole})</span></p>
@@ -912,9 +912,9 @@ export default function ChatInterface({
                             <section
                               aria-label="Council verdict"
                               data-testid={`council-verdict-${message.id}`}
-                              className="rounded-lg border border-amber-300/60 bg-white/80 p-3 shadow-sm"
+                              className="rounded-lg border border-amber-300/60 bg-card/80 p-3 shadow-sm"
                             >
-                              <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-amber-900">
+                              <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-amber-900 dark:text-amber-300">
                                 Council verdict
                               </h3>
                               <div className="markdown-content [overflow-wrap:anywhere] text-sm leading-relaxed text-neutral-700">
@@ -1008,7 +1008,7 @@ export default function ChatInterface({
             type="button"
             variant="outline"
             size="sm"
-            className="absolute bottom-4 left-1/2 z-20 -translate-x-1/2 rounded-full bg-white shadow-md"
+            className="absolute bottom-4 left-1/2 z-20 -translate-x-1/2 rounded-full bg-card shadow-md"
             onClick={() => {
               isNearBottomRef.current = true;
               setShowJumpToLatest(false);
@@ -1022,7 +1022,7 @@ export default function ChatInterface({
         </div>
         
         {/* Input Area */}
-        <div className="border-t border-farm-tan/30 bg-gradient-to-r from-white to-farm-powder/10 p-4">
+        <div className="border-t border-farm-tan/30 bg-gradient-to-r from-card to-farm-powder/10 p-4">
           {(openQuestions.length > 0 || selectedQuestion) && (
             <div className="mb-3 flex items-center justify-between gap-2">
               {openQuestions.length > 0 ? (
@@ -1070,7 +1070,7 @@ export default function ChatInterface({
             </Button>
             <div className="relative flex-1">
               {mentionOpen && (
-                <div className="absolute bottom-full mb-2 left-0 z-20 w-72 max-w-full rounded-lg border border-farm-tan/40 bg-white shadow-lg overflow-hidden">
+                <div className="absolute bottom-full mb-2 left-0 z-20 w-72 max-w-full rounded-lg border border-farm-tan/40 bg-card shadow-lg overflow-hidden">
                   <div className="px-3 py-1.5 text-[10px] font-medium uppercase tracking-wide text-neutral-400 border-b border-farm-tan/30">
                     Mention an expert
                   </div>
@@ -1142,7 +1142,7 @@ export default function ChatInterface({
       {/* Right Sidebar - Resizable */}
       <div
         id={isRightSidebarVisible ? "right-sidebar-panel" : undefined}
-        className={`flex-shrink-0 h-full overflow-hidden ${isRightSidebarVisible ? "block" : "hidden"} ${isRightSidebarCollapsed ? "border-l border-neutral-200 bg-white" : "bg-white"}`}
+        className={`flex-shrink-0 h-full overflow-hidden ${isRightSidebarVisible ? "block" : "hidden"} ${isRightSidebarCollapsed ? "border-l border-neutral-200 bg-card" : "bg-card"}`}
         style={{ width: `${isRightSidebarCollapsed ? 40 : effectiveRightSidebarWidth}px` }}
       >
         {isRightSidebarCollapsed ? (
@@ -1188,7 +1188,7 @@ export default function ChatInterface({
             id="right-sidebar-panel"
             role="complementary"
             aria-label="Insights and artifacts"
-            className="absolute inset-y-0 right-0 z-40 flex max-w-full flex-col bg-white shadow-2xl"
+            className="absolute inset-y-0 right-0 z-40 flex max-w-full flex-col bg-card shadow-2xl"
             style={{ width: `${effectiveRightSidebarWidth}px` }}
           >
             <ConversationSidebar

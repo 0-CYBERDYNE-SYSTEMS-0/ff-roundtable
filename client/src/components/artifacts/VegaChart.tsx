@@ -51,7 +51,7 @@ export default function VegaChart({ content }: { content: string }) {
   return (
     <div className="space-y-4">
       {chart?.description && <p className="text-sm leading-relaxed text-neutral-600">{chart.description}</p>}
-      {error && <p role="alert" className="text-sm text-amber-800">{error}</p>}
+      {error && <p role="alert" className="text-sm text-amber-800 dark:text-amber-300">{error}</p>}
       <div ref={host} className="w-full overflow-x-auto rounded-lg bg-white p-1" aria-label={chart?.title || "Visualization"} />
       {chart && <>
         <p className="text-xs text-neutral-500">Sources: {chart.sources.map((source, index) => <span key={source}>{index > 0 && " · "}{/^https?:\/\//i.test(source) ? <a className="underline" href={source} target="_blank" rel="noopener noreferrer">{source}</a> : source}</span>)}</p>

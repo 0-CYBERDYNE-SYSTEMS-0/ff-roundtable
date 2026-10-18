@@ -19,7 +19,7 @@ export default function CalendarEventNotes({ value, eventNumber, readOnly, onCha
     <p className="text-xs text-neutral-500">Exports to the calendar event’s Notes / Description. Separate sections with blank lines.</p>
     {editing && !readOnly ? <>
       <textarea aria-label={`Event ${eventNumber} notes / task instructions`} value={value} maxLength={4000} rows={expanded ? 20 : 10}
-        className="block w-full rounded-md border border-neutral-300 bg-white px-4 py-3 text-sm leading-7 focus-visible:outline focus-visible:outline-2 focus-visible:outline-farm-blue"
+        className="block w-full rounded-md border border-neutral-300 bg-card px-4 py-3 text-sm leading-7 focus-visible:outline focus-visible:outline-2 focus-visible:outline-farm-blue"
         onChange={event => onChange(event.target.value)} />
       <div className="flex items-center justify-between gap-2 text-xs text-neutral-500">
         <Button size="sm" variant="ghost" onClick={() => setExpanded(!expanded)}>{expanded ? "Smaller editor" : "Expand editor"}</Button>

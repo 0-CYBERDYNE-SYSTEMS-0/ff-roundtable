@@ -1190,7 +1190,7 @@ export default function HomePage() {
           aria-hidden={isMobile && !sidebarOpen}
         >
           {!isMobile && isLeftSidebarCollapsed ? (
-            <div className="flex h-full justify-center border-r border-farm-tan/30 bg-white">
+            <div className="flex h-full justify-center border-r border-farm-tan/30 bg-card">
               <Button
                 type="button"
                 variant="ghost"
@@ -1258,7 +1258,7 @@ export default function HomePage() {
         {/* Main Content Area */}
         <div className="flex-1 flex flex-col overflow-hidden min-h-0">
             {(socketStatus !== "connected" || activeConversation) && (
-              <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border bg-white px-3 py-2 md:px-6">
+              <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border bg-card px-3 py-2 md:px-6">
                 <div className="flex min-w-0 basis-full flex-wrap items-center gap-2 text-sm md:flex-1 md:basis-0">
                   <span role="status" aria-live="polite" className="font-medium text-neutral-800">{statusMessage}</span>
                   {expertTurnCounts && (
@@ -1288,7 +1288,7 @@ export default function HomePage() {
                       size="sm"
                       onClick={() => setCharterDialogOpen(true)}
                       aria-label="Edit the council charter"
-                      className="border-farm-tan/60 text-yellow-900 hover:bg-farm-tan/40 hover:text-neutral-900 transition-all duration-200 font-medium"
+                      className="border-farm-tan/60 text-yellow-900 dark:text-yellow-200 hover:bg-farm-tan/40 hover:text-neutral-900 transition-all duration-200 font-medium"
                     >
                       <ScrollText className="mr-1.5 h-4 w-4" />
                       Charter
@@ -1300,7 +1300,7 @@ export default function HomePage() {
                         onClick={() => pauseMutation.mutate()}
                         disabled={pauseMutation.isPending}
                         aria-label="Pause the roundtable"
-                        className="border-farm-yellow text-yellow-800 hover:bg-farm-yellow hover:text-neutral-900 transition-all duration-200 font-medium"
+                        className="border-farm-yellow text-yellow-800 hover:bg-farm-yellow hover:text-neutral-900 dark:text-yellow-200 dark:hover:text-black transition-all duration-200 font-medium"
                       >
                         <PauseIcon className="mr-1.5 h-4 w-4" />
                         Pause
@@ -1357,7 +1357,7 @@ export default function HomePage() {
                         isRefreshingInsights={generateInsightsMutation.isPending}
                     />
                 ) : (
-                    <div className="flex-1 flex items-center justify-center bg-gradient-to-br from-farm-powder/10 via-white to-farm-tan/10">
+                    <div className="flex-1 flex items-center justify-center bg-gradient-to-br from-farm-powder/10 via-card to-farm-tan/10">
                         <div className="text-center max-w-2xl px-8">
                             <h2 className="text-3xl font-bold text-farm-blue mb-3 tracking-tight">Welcome to Farm Friend Roundtable</h2>
                             <p className="text-lg text-neutral-600 mb-8 leading-relaxed">Start a new conversation to begin chatting with agricultural experts who can help with your farming needs</p>

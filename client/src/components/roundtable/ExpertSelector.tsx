@@ -458,7 +458,7 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
               <Badge key={`existing-${expert.id}`} variant="secondary">{expert.role}</Badge>
             ))}
             {localSelectedExperts.map(({ expertIndex }) => (
-              <span key={expertIndex} className="inline-flex items-center gap-1 rounded-full border border-neutral-300 bg-white pl-2 text-xs text-neutral-700">
+              <span key={expertIndex} className="inline-flex items-center gap-1 rounded-full border border-neutral-300 bg-card pl-2 text-xs text-neutral-700">
                 {allExperts[expertIndex]?.role}
                 <Button
                   type="button"
@@ -477,7 +477,7 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
       )}
 
       {selectionNotice && (
-        <div role="status" className="mb-4 space-y-1 rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-neutral-800">
+        <div role="status" className="mb-4 space-y-1 rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-neutral-800 dark:border-amber-800 dark:bg-amber-950/40">
           {selectionNotice.unavailable.length > 0 && <p>Preset roles not available: {selectionNotice.unavailable.join(", ")}.</p>}
           {selectionNotice.alreadyAdded.length > 0 && <p>Already in this roundtable: {selectionNotice.alreadyAdded.join(", ")}.</p>}
           {selectionNotice.capped.length > 0 && (

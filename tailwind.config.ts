@@ -1,5 +1,15 @@
 import type { Config } from "tailwindcss";
 
+// Palettes backed by CSS variables in client/src/index.css so they follow the
+// light/dark theme. Light values match Tailwind's defaults.
+const themedScale = (name: string) =>
+  Object.fromEntries(
+    [50, 100, 200, 300, 400, 500, 600, 700, 800, 900, 950].map((step) => [
+      step,
+      `rgb(var(--${name}-${step}) / <alpha-value>)`,
+    ]),
+  );
+
 export default {
   darkMode: ["class"],
   content: ["./client/index.html", "./client/src/**/*.{js,jsx,ts,tsx}"],
@@ -18,10 +28,12 @@ export default {
         // Farm Friend Custom Colors
         'farm-blue': '#007A99',
         'farm-green': '#4CAF50',
-        'farm-powder': '#B0E0E6',
-        'farm-tan': '#D2B48C',
+        'farm-powder': 'rgb(var(--farm-powder) / <alpha-value>)',
+        'farm-tan': 'rgb(var(--farm-tan) / <alpha-value>)',
         'farm-dark-green': '#2E7D32',
         'farm-yellow': '#FFEB3B',
+        neutral: themedScale("neutral"),
+        gray: themedScale("gray"),
         background: "hsl(var(--background))",
         foreground: "hsl(var(--foreground))",
         card: {

@@ -186,7 +186,7 @@ export default function SidebarPanel({
   );
   
   return (
-    <aside className="w-full min-w-0 h-full min-h-0 overflow-hidden bg-white bg-gradient-to-b from-farm-powder/5 to-white border-r border-farm-tan/30 flex flex-col z-10 shadow-lg">
+    <aside className="w-full min-w-0 h-full min-h-0 overflow-hidden bg-card bg-gradient-to-b from-farm-powder/5 to-card border-r border-farm-tan/30 flex flex-col z-10 shadow-lg">
       <div className="flex flex-col h-full min-h-0">
         {/* Session Controls */}
         <div className="shrink-0 p-4 border-b border-farm-tan/30 [@media(max-height:500px)]:max-h-[45vh] [@media(max-height:500px)]:overflow-y-auto">
@@ -281,7 +281,7 @@ export default function SidebarPanel({
         </div>
 
         <Tabs defaultValue="conversations" className="flex min-h-0 flex-1 flex-col">
-          <TabsList className="h-auto w-full shrink-0 rounded-none border-b border-farm-tan/30 bg-white p-0">
+          <TabsList className="h-auto w-full shrink-0 rounded-none border-b border-farm-tan/30 bg-card p-0">
             <TabsTrigger value="conversations" className="flex-1 rounded-none py-3 font-semibold text-sm">Conversations</TabsTrigger>
             <TabsTrigger value="files" className="flex-1 rounded-none py-3 font-semibold text-sm">Files</TabsTrigger>
           </TabsList>
@@ -329,7 +329,7 @@ export default function SidebarPanel({
                     {displayedConversations.map((conversation) => {
                       const lastActivity = conversation.updatedAt ?? conversation.createdAt;
                       const title = conversation.title || "Untitled conversation";
-                      const rowClass = `flex items-center gap-1 rounded-lg border p-1 ${activeConversationId === conversation.id ? "border-farm-blue bg-farm-powder/30" : "border-border bg-white hover:bg-farm-powder/10"}`;
+                      const rowClass = `flex items-center gap-1 rounded-lg border p-1 ${activeConversationId === conversation.id ? "border-farm-blue bg-farm-powder/30" : "border-border bg-card hover:bg-farm-powder/10"}`;
 
                       return (
                         <div key={conversation.id} className={rowClass}>
@@ -449,7 +449,7 @@ export default function SidebarPanel({
                 ) : (
                   <div className="space-y-2">
                     {files.map((file) => (
-                      <div key={file.id} className="flex justify-between items-center p-3 hover:bg-farm-powder/20 rounded-lg border border-farm-tan/30 bg-white transition-all duration-200">
+                      <div key={file.id} className="flex justify-between items-center p-3 hover:bg-farm-powder/20 rounded-lg border border-farm-tan/30 bg-card transition-all duration-200">
                         <div className="flex items-center gap-2">
                           {file.fileType.includes("image") ? (
                             <Image className="text-farm-blue h-5 w-5" />

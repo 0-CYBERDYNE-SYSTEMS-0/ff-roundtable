@@ -103,7 +103,7 @@ export default function AuthPage() {
   
   return (
     <div className="min-h-screen flex items-center justify-center bg-neutral-100 p-4">
-      <div className="flex flex-col md:flex-row w-full max-w-6xl bg-white rounded-lg shadow-md overflow-hidden">
+      <div className="flex flex-col md:flex-row w-full max-w-6xl bg-card rounded-lg shadow-md overflow-hidden">
         {/* Left side - Forms */}
         <div className="w-full md:w-1/2 p-6">
           <div className="flex items-center mb-6">
@@ -183,7 +183,7 @@ export default function AuthPage() {
                     <Button 
                       type="button" 
                       variant="outline"
-                      className="w-full bg-green-50 hover:bg-green-100 border-green-200"
+                      className="w-full bg-green-50 hover:bg-green-100 border-green-200 dark:bg-green-950 dark:hover:bg-green-900 dark:border-green-800"
                       onClick={handleDevLogin}
                     >
                       Quick Development Login

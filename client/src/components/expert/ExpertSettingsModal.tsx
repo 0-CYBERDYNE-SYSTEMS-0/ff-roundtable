@@ -216,7 +216,7 @@ export default function ExpertSettingsModal({
               </div>
 
               {confirmRemoval ? (
-                <div className="rounded-lg border border-red-200 bg-red-50 p-3" role="alert">
+                <div className="rounded-lg border border-red-200 bg-red-50 p-3 dark:border-red-900 dark:bg-red-950/40" role="alert">
                   <p className="text-sm text-neutral-800">
                     Remove {expert.name} from this roundtable? Their past messages will remain.
                   </p>
