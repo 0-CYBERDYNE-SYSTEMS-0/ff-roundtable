@@ -1324,18 +1324,18 @@ describe("Orchestrator", () => {
       expect(getFarmerFileIntent('The old transcript said "@[File Creator] create a SOP"; explain that text.')).toBeNull();
     });
 
-    it("uses the 25-turn default and caps the let-it-run option at 100", async () => {
+    it("uses the 8-turn default and caps the let-it-run option at 20", async () => {
       const conversationId = nextConvId();
       const { waitForTurns, releaseNextTurn } = setupGatedConversation(conversationId);
       const userMessage = createMockMessage(1, "First question");
       await processMessageTurnBased(userId, conversationId, userMessage, broadcastFn);
 
-      expect(getConversationState(conversationId)!.maxAutonomousTurns).toBe(25);
+      expect(getConversationState(conversationId)!.maxAutonomousTurns).toBe(8);
       const orchestrator = new InteractionOrchestrator(conversationId);
       orchestrator.enableAutonomous(0);
-      expect(getConversationState(conversationId)!.maxAutonomousTurns).toBe(100);
+      expect(getConversationState(conversationId)!.maxAutonomousTurns).toBe(20);
       orchestrator.enableAutonomous(101);
-      expect(getConversationState(conversationId)!.maxAutonomousTurns).toBe(100);
+      expect(getConversationState(conversationId)!.maxAutonomousTurns).toBe(20);
       orchestrator.enableAutonomous(1);
       await waitForTurns(1);
       await releaseNextTurn();

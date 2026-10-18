@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Save, X } from "lucide-react";
-import { REQUESTED_OPENROUTER_MODELS } from "@/lib/openrouter-model-options";
+import { REQUESTED_OPENROUTER_MODELS, isModelAvailableForPlan } from "@/lib/openrouter-model-options";
 
 // Keep in sync with isPaidModel() in server/tiers.ts
 const isFreeModelId = (id: string) => id.endsWith(":free");
@@ -47,6 +47,7 @@ export default function ExpertSettingsModal({
   const [name, setName] = useState(expert?.name || "");
   const [model, setModel] = useState(expert?.model || "");
   const [userTier, setUserTier] = useState<string | null>(null);
+  const [hasOwnKey, setHasOwnKey] = useState(false);
 
   useEffect(() => {
     if (!expert) return;
@@ -64,6 +65,7 @@ export default function ExpertSettingsModal({
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
         if (!cancelled && data?.tier) setUserTier(data.tier);
+        if (!cancelled) setHasOwnKey(Boolean(data?.hasOwnKey));
       })
       .catch(() => {
         // Tier unknown — show the full list and let the server enforce limits.
@@ -75,10 +77,8 @@ export default function ExpertSettingsModal({
 
   if (!expert) return null;
 
-  const modelOptions =
-    userTier === "free"
-      ? MODEL_OPTIONS.filter((option) => isFreeModelId(option.id))
-      : MODEL_OPTIONS;
+  // Free: free models only. Pro on the house key: free + the 4 included models.
+  const modelOptions = MODEL_OPTIONS.filter((option) => isModelAvailableForPlan(option.id, userTier, hasOwnKey));
 
   // Always offer the expert's current model, even when it isn't in the
   // standard list (e.g. dev-config models), so it stays visible and selectable.
@@ -192,7 +192,12 @@ export default function ExpertSettingsModal({
                 </Select>
                 {userTier === "free" && (
                   <p className="text-xs text-neutral-500">
-                    Your free tier includes free models. Upgrade to Pro for Claude, GPT-4o and other premium models.
+                    Your free tier includes free models. Upgrade to Pro for faster included models.
+                  </p>
+                )}
+                {userTier === "pro" && !hasOwnKey && (
+                  <p className="text-xs text-neutral-500">
+                    Pro includes GLM 5.3 Flash, DeepSeek V4.1 Flash, MiMo V2.6 Flash, GPT-6 Luna and free models. Add your own OpenRouter key in Settings to use any other model.
                   </p>
                 )}
               </div>

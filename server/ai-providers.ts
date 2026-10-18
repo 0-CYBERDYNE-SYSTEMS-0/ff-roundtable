@@ -1,3 +1,4 @@
+import { checkHouseKeyCall, currentUsagePeriod, UsageCapError } from "./usage-caps";
 import type { AIMessage, AIModelResponse } from './ai';
 import { randomUUID } from 'crypto';
 
@@ -35,6 +36,8 @@ type OpenRouterAttempt = {
   startedAt: number;
   reservedUsd: number;
   maxTokens: number;
+  houseKeyUserId?: number;
+  usagePeriod?: string;
   providerPriceLimit?: { prompt: number; completion: number };
   settled: boolean;
 };
@@ -160,6 +163,12 @@ export class OpenRouterProvider implements AIProvider {
     if (attempt.settled) return;
     attempt.settled = true;
     const costUsd = numericCost(usage);
+    if (attempt.houseKeyUserId && attempt.usagePeriod && costUsd) {
+      const { houseKeyUserId, usagePeriod } = attempt;
+      void import("./storage")
+        .then(({ storage }) => storage.addMonthlyAiSpend(houseKeyUserId, usagePeriod, costUsd))
+        .catch(err => console.error("[CAPS] failed to record AI spend:", (err as Error).message));
+    }
     if (attempt.reservedUsd > 0) {
       this.reservedUsd = Math.max(0, this.reservedUsd - attempt.reservedUsd);
       // When the provider omits cost, conservatively consume the reservation
@@ -198,6 +207,29 @@ export class OpenRouterProvider implements AIProvider {
   }
 
   private async getApiKey(userId?: number): Promise<string> {
+    return (await this.resolveKey(userId)).key;
+  }
+
+  /**
+   * Resolve the key for a call and enforce pricing caps on house-key calls
+   * (server/usage-caps.ts): tier gate, Pro model allowlist, monthly budget.
+   * BYOK calls are never capped and never counted.
+   */
+  private async authorizeCall(attempt: OpenRouterAttempt, model: string, userId?: number): Promise<string> {
+    const { key, byok } = await this.resolveKey(userId);
+    if (byok || !userId) return key;
+    const { storage } = await import("./storage");
+    const user = await storage.getUser(userId);
+    const period = currentUsagePeriod();
+    const usage = await storage.getMonthlyUsage(userId, period);
+    const denial = checkHouseKeyCall(user?.tier, model, usage.aiSpendUsd);
+    if (denial) throw new UsageCapError(denial);
+    attempt.houseKeyUserId = userId;
+    attempt.usagePeriod = period;
+    return key;
+  }
+
+  private async resolveKey(userId?: number): Promise<{ key: string; byok: boolean }> {
     // If a userId is provided, try to use their stored BYOK key first
     if (userId) {
       try {
@@ -205,7 +237,7 @@ export class OpenRouterProvider implements AIProvider {
         const userKey = await storage.getUserApiKey(userId);
         if (userKey) {
           console.log(`[BYOK] Using user-provided API key for user ${userId}`);
-          return userKey;
+          return { key: userKey, byok: true };
         }
       } catch (err) {
         console.warn("[BYOK] Failed to retrieve user API key:", (err as Error).message);
@@ -217,7 +249,7 @@ export class OpenRouterProvider implements AIProvider {
     if (!platformKey) {
       throw new Error("OpenRouter API key not provided");
     }
-    return platformKey;
+    return { key: platformKey, byok: false };
   }
 
   async chat(messages: AIMessage[], model: string, userId?: number, webSearch = false): Promise<AIModelResponse> {
@@ -228,7 +260,7 @@ export class OpenRouterProvider implements AIProvider {
     let provider: string | undefined;
     let responseModel: string | undefined;
     try {
-      const openRouterKey = await this.getApiKey(userId);
+      const openRouterKey = await this.authorizeCall(attempt, model, userId);
 
       requestStarted = true;
       const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
@@ -314,7 +346,7 @@ export class OpenRouterProvider implements AIProvider {
     let provider: string | undefined;
     let responseModel: string | undefined;
     try {
-      const openRouterKey = await this.getApiKey(userId);
+      const openRouterKey = await this.authorizeCall(attempt, model, userId);
 
       requestStarted = true;
       const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {

@@ -15,7 +15,7 @@ import { Separator } from "@/components/ui/separator";
 import { EXPERT_CATALOG, avatarDataUri, CUSTOM_EXPERT_EMOJI } from "@shared/expert-catalog";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { withRequestedOpenRouterModels } from "@/lib/openrouter-model-options";
+import { withRequestedOpenRouterModels, HOUSE_KEY_MODEL_IDS, isModelAvailableForPlan } from "@/lib/openrouter-model-options";
 import {
   Dialog,
   DialogContent,
@@ -116,6 +116,7 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
   const [currentTab, setCurrentTab] = useState<string>(EXPERT_CATEGORIES.AGRICULTURE);
   const [selectedPreset, setSelectedPreset] = useState<string | null>(null);
   const [userTier, setUserTier] = useState<string>("free");
+  const [hasOwnKey, setHasOwnKey] = useState(false);
   const [maxExperts, setMaxExperts] = useState<number>(3);
   const [customExperts, setCustomExperts] = useState<SelectableExpert[]>([]);
   const [customName, setCustomName] = useState("");
@@ -176,6 +177,7 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
         if (res.ok) {
           const data = await res.json();
           setUserTier(data.tier || "free");
+          setHasOwnKey(Boolean(data.hasOwnKey));
           if (typeof data.limits?.maxExperts === "number") {
             setMaxExperts(data.limits.maxExperts);
           }
@@ -197,6 +199,7 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
   // preferences so free users don't get a paid model the server will reject.
   const resolveDefaultModel = (expertIndex: number): string => {
     const preferredPaid = [
+      ...HOUSE_KEY_MODEL_IDS,
       "anthropic/claude-3-sonnet",
       "openai/gpt-4",
       "anthropic/claude-3-haiku",
@@ -221,9 +224,7 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
       }
 
       if (!modelExists(defaultModelId)) {
-        const fallbackPool = userTier === "free"
-          ? openRouterModels.filter(isFreeModelId)
-          : openRouterModels;
+        const fallbackPool = openRouterModels.filter(m => isModelAvailableForPlan(m.id, userTier, hasOwnKey));
         defaultModelId = fallbackPool[0]?.id || openRouterModels[0]?.id || "openai/gpt-3.5-turbo";
       }
     }
@@ -367,10 +368,9 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
   // Filter experts by the current category tab
   const filteredExperts = allExperts.filter(expert => expert.category === currentTab);
 
-  // Filter models by tier — free users only see models the server will accept
-  const visibleModels = userTier === "free"
-    ? openRouterModels.filter(isFreeModelId)
-    : openRouterModels;
+  // Filter models by plan — users only see models the server will accept
+  // (Free: free models; Pro on the house key: free + the 4 included models).
+  const visibleModels = openRouterModels.filter(m => isModelAvailableForPlan(m.id, userTier, hasOwnKey));
 
   return (
     <Dialog open={true} onOpenChange={(open) => !open && onClose()}>

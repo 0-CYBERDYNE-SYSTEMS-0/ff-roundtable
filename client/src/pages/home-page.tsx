@@ -605,7 +605,7 @@ export default function HomePage() {
     setIsAutonomousEnabled(typeof snapshot?.isAutonomousEnabled === "boolean" ? snapshot.isAutonomousEnabled : true);
   }, [activeConversation, activeConversationData?.orchestratorState]);
   // G13: older conversation responses may omit turnBudget; the dialog applies
-  // the standard 25-turn default in that case. Null means "Let it run".
+  // the standard 8-turn default in that case. Null means "Let it run".
   const activeTurnBudget = (
     activeConversationData as (typeof activeConversationData & { turnBudget?: number | null }) | null
   )?.turnBudget;

@@ -34,3 +34,15 @@ export function withRequestedOpenRouterModels<T extends { id: string }>(models: 
     ...REQUESTED_OPENROUTER_MODELS.filter((model) => !existingIds.has(model.id)),
   ];
 }
+
+// Keep in sync with HOUSE_KEY_PAID_MODEL_ALLOWLIST in server/usage-caps.ts.
+// Pro without their own OpenRouter key may use only these paid models (plus
+// any ":free" model); a user's own key unlocks every model.
+export const HOUSE_KEY_MODEL_IDS: readonly string[] = REQUESTED_OPENROUTER_MODELS.map((model) => model.id);
+
+export function isModelAvailableForPlan(id: string, tier: string | null, hasOwnKey: boolean): boolean {
+  if (id.endsWith(":free")) return true;
+  if (tier === "free") return false;
+  if (tier === "pro" && !hasOwnKey) return HOUSE_KEY_MODEL_IDS.includes(id);
+  return true;
+}
