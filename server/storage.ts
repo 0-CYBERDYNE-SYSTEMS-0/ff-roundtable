@@ -44,12 +44,18 @@ export interface IStorage {
   // G7: `orchestratorState` joins the allowlist so the orchestrator can
   // persist its survivable snapshot at turn boundaries.
   updateConversation(id: number, updates: Partial<Pick<Conversation, "title" | "charter" | "orchestratorState" | "turnBudget">>): Promise<Conversation | undefined>;
+  // Removes the conversation and everything that belongs to it (experts,
+  // messages, open questions, files, insights).
+  deleteConversation(id: number): Promise<void>;
   
   // Expert operations
   createExpert(expert: InsertExpert): Promise<Expert>;
   getExpertById(expertId: number): Promise<Expert | undefined>;
   getConversationExperts(conversationId: number): Promise<Expert[]>;
   updateExpert(expertId: number, updates: Partial<Expert>): Promise<Expert>;
+  // Removes the expert from its conversation. Past messages keep their
+  // content and expertName/expertRole but lose the expertId link.
+  deleteExpert(expertId: number): Promise<void>;
   
   // Message operations
   createMessage(message: InsertMessage): Promise<Message>;
@@ -299,6 +305,20 @@ export class MemStorage implements IStorage {
     this.conversations.set(id, updated);
     return updated;
   }
+
+  async deleteConversation(id: number): Promise<void> {
+    const removeWhere = <T extends { conversationId: number }>(map: Map<number, T>) => {
+      map.forEach((value, key) => {
+        if (value.conversationId === id) map.delete(key);
+      });
+    };
+    removeWhere(this.experts);
+    removeWhere(this.messages);
+    removeWhere(this.openQuestions);
+    removeWhere(this.files);
+    removeWhere(this.insights);
+    this.conversations.delete(id);
+  }
   
   // Expert operations
   async createExpert(insertExpert: InsertExpert): Promise<Expert> {
@@ -335,6 +355,13 @@ export class MemStorage implements IStorage {
 
     this.experts.set(expertId, updatedExpert);
     return updatedExpert;
+  }
+
+  async deleteExpert(expertId: number): Promise<void> {
+    this.experts.delete(expertId);
+    this.messages.forEach((message, id) => {
+      if (message.expertId === expertId) this.messages.set(id, { ...message, expertId: null });
+    });
   }
   
   // Message operations
@@ -783,6 +810,21 @@ export class PostgresStorage implements IStorage {
     return result[0];
   }
 
+  async deleteConversation(id: number): Promise<void> {
+    // Messages, open questions and files reference each other, so break
+    // those links before deleting the rows.
+    await this.db.transaction(async (tx) => {
+      await tx.update(messages).set({ answersQuestionId: null }).where(eq(messages.conversationId, id));
+      await tx.update(files).set({ supersedesFileId: null }).where(eq(files.conversationId, id));
+      await tx.delete(openQuestions).where(eq(openQuestions.conversationId, id));
+      await tx.delete(messages).where(eq(messages.conversationId, id));
+      await tx.delete(files).where(eq(files.conversationId, id));
+      await tx.delete(insights).where(eq(insights.conversationId, id));
+      await tx.delete(experts).where(eq(experts.conversationId, id));
+      await tx.delete(conversations).where(eq(conversations.id, id));
+    });
+  }
+
   // ── Expert operations ──────────────────────────────────────────────────────
 
   async createExpert(insertExpert: InsertExpert): Promise<Expert> {
@@ -820,6 +862,13 @@ export class PostgresStorage implements IStorage {
 
     if (!result[0]) throw new Error(`Expert with ID ${expertId} not found`);
     return result[0];
+  }
+
+  async deleteExpert(expertId: number): Promise<void> {
+    await this.db.transaction(async (tx) => {
+      await tx.update(messages).set({ expertId: null }).where(eq(messages.expertId, expertId));
+      await tx.delete(experts).where(eq(experts.id, expertId));
+    });
   }
 
   // ── Message operations ─────────────────────────────────────────────────────
