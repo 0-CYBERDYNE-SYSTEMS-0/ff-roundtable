@@ -895,7 +895,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (interval !== "month" && interval !== "year") {
         return res.status(400).json({ message: 'interval must be "month" or "year"' });
       }
-      const priceId = interval === "year" ? process.env.STRIPE_PRICE_ID_PRO_ANNUAL : process.env.STRIPE_PRICE_ID_PRO;
+      const priceId = interval === "year" ? process.env.STRIPE_PRICE_ID_PRO_ANNUAL : (process.env.STRIPE_PRICE_ID_PRO || process.env.STRIPE_PRICE_ID);
       if (!priceId) {
         { const r = billingUnavailable(interval === "year" ? "Stripe annual Pro price ID not configured" : "Stripe Pro price ID not configured"); return res.status(r.status).json(r.body); }
       }
