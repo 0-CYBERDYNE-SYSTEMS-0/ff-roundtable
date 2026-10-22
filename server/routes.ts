@@ -886,7 +886,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
         customerId = customer.id;
         await storage.updateUserStripeInfo(user.id, {
           stripeCustomerId: customerId,
-          stripeSubscriptionId: user.stripeSubscriptionId || "",
         });
       }
 
@@ -902,6 +901,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       const session = await stripe.checkout.sessions.create({
         customer: customerId,
+        client_reference_id: String(user.id),
+        metadata: { userId: String(user.id) },
         mode: "subscription",
         line_items: [{ price: priceId, quantity: 1 }],
         success_url: `${req.headers.origin || process.env.ALLOWED_ORIGIN || "http://localhost:5173"}/dashboard?checkout=success`,
@@ -1032,6 +1033,40 @@ export async function registerRoutes(app: Express): Promise<Server> {
     
     // Handle subscription events
     switch (event.type) {
+      case "checkout.session.completed":
+        try {
+          const session = event.data.object as Stripe.Checkout.Session;
+          const customerId = typeof session.customer === "string" ? session.customer : session.customer?.id;
+          const subscriptionId = typeof session.subscription === "string" ? session.subscription : session.subscription?.id;
+          if (session.mode !== "subscription" || !customerId || !subscriptionId) break;
+
+          let user;
+          for (const reference of [session.client_reference_id, session.metadata?.userId]) {
+            const userId = Number(reference);
+            if (Number.isSafeInteger(userId) && userId > 0) {
+              user = await storage.getUser(userId);
+              if (user) break;
+            }
+          }
+          user ??= await storage.getUserByStripeCustomerId(customerId);
+          if (!user) {
+            return res.status(500).json({ message: "Checkout user not found" });
+          }
+          if (user.tier === "pro" && user.subscriptionStatus === "active" &&
+              user.stripeCustomerId === customerId && user.stripeSubscriptionId === subscriptionId) break;
+
+          await storage.updateUserStripeInfo(user.id, {
+            stripeCustomerId: customerId,
+            stripeSubscriptionId: subscriptionId,
+            tier: "pro",
+            subscriptionStatus: "active",
+          });
+        } catch (error) {
+          console.error("Error processing checkout.session.completed:", error);
+          return res.status(500).json({ message: "Checkout activation failed" });
+        }
+        break;
+
       case "invoice.payment_succeeded":
         try {
           const invoice = event.data.object as any; // Type assertion to avoid TS errors

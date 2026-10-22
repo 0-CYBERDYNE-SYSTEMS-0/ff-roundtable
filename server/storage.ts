@@ -24,14 +24,17 @@ export class DeliverableConflictError extends Error {}
 // modify the interface with any CRUD methods
 // you might need
 export type ConversationWithActivity = Conversation & { updatedAt: Date | null };
+type UserStripeInfo = Pick<User, "stripeCustomerId"> &
+  Partial<Pick<User, "stripeSubscriptionId" | "tier" | "subscriptionStatus">>;
 
 export interface IStorage {
   // User operations
   getUser(id: number): Promise<User | undefined>;
   getUserByUsername(username: string): Promise<User | undefined>;
   getUserByStripeSubscriptionId(subscriptionId: string): Promise<User | undefined>;
+  getUserByStripeCustomerId(customerId: string): Promise<User | undefined>;
   createUser(user: InsertUser): Promise<User>;
-  updateUserStripeInfo(userId: number, stripeInfo: { stripeCustomerId: string, stripeSubscriptionId: string }): Promise<User>;
+  updateUserStripeInfo(userId: number, stripeInfo: UserStripeInfo): Promise<User>;
   updateSubscriptionStatus(userId: number, status: string): Promise<User>;
   getUserApiKey(userId: number): Promise<string | null>;
   setUserApiKey(userId: number, key: string): Promise<void>;
@@ -186,6 +189,12 @@ export class MemStorage implements IStorage {
     );
   }
 
+  async getUserByStripeCustomerId(customerId: string): Promise<User | undefined> {
+    return Array.from(this.users.values()).find(
+      (user) => user.stripeCustomerId === customerId,
+    );
+  }
+
   async createUser(insertUser: InsertUser): Promise<User> {
     const id = this.userId++;
     const now = new Date();
@@ -203,14 +212,13 @@ export class MemStorage implements IStorage {
     return user;
   }
   
-  async updateUserStripeInfo(userId: number, stripeInfo: { stripeCustomerId: string, stripeSubscriptionId: string }): Promise<User> {
+  async updateUserStripeInfo(userId: number, stripeInfo: UserStripeInfo): Promise<User> {
     const user = await this.getUser(userId);
     if (!user) throw new Error(`User with ID ${userId} not found`);
     
     const updatedUser: User = {
       ...user,
-      stripeCustomerId: stripeInfo.stripeCustomerId,
-      stripeSubscriptionId: stripeInfo.stripeSubscriptionId
+      ...stripeInfo,
     };
 
     this.users.set(userId, updatedUser);
@@ -733,18 +741,20 @@ export class PostgresStorage implements IStorage {
     return result[0];
   }
 
+  async getUserByStripeCustomerId(customerId: string): Promise<User | undefined> {
+    const result = await this.db.select().from(users).where(eq(users.stripeCustomerId, customerId)).limit(1);
+    return result[0];
+  }
+
   async createUser(insertUser: InsertUser): Promise<User> {
     const result = await this.db.insert(users).values(insertUser).returning();
     return result[0];
   }
 
-  async updateUserStripeInfo(userId: number, stripeInfo: { stripeCustomerId: string; stripeSubscriptionId: string }): Promise<User> {
+  async updateUserStripeInfo(userId: number, stripeInfo: UserStripeInfo): Promise<User> {
     const result = await this.db
       .update(users)
-      .set({
-        stripeCustomerId: stripeInfo.stripeCustomerId,
-        stripeSubscriptionId: stripeInfo.stripeSubscriptionId,
-      })
+      .set(stripeInfo)
       .where(eq(users.id, userId))
       .returning();
 
