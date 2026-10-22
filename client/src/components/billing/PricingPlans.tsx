@@ -4,7 +4,6 @@ import { useAuth } from "@/hooks/use-auth";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { ArrowRight, CheckCircle2, Loader2 } from "lucide-react";
 
 type BillingInterval = "month" | "year";
@@ -44,7 +43,6 @@ export default function PricingPlans({ embedded = false }: { embedded?: boolean 
   const { toast } = useToast();
   const [interval, setInterval] = useState<BillingInterval>("month");
   const [isRedirecting, setIsRedirecting] = useState(false);
-  const [contactOpen, setContactOpen] = useState(false);
 
   const startCheckout = async () => {
     if (!user || isRedirecting) return;
@@ -66,7 +64,7 @@ export default function PricingPlans({ embedded = false }: { embedded?: boolean 
     : <Button className="ff-button ff-button-dark" asChild><Link href="/sign-up">Start with Pro <ArrowRight size={15} aria-hidden="true" /></Link></Button>;
   const contactAction = ENTERPRISE_CONTACT_URL
     ? <Button className="ff-button ff-button-dark" asChild><a href={ENTERPRISE_CONTACT_URL} target="_blank" rel="noreferrer">Contact us <ArrowRight size={15} aria-hidden="true" /></a></Button>
-    : <Button className="ff-button ff-button-dark" onClick={() => setContactOpen(true)}>Contact us</Button>;
+    : <Button className="ff-button ff-button-dark" asChild><a href="mailto:admin@farm-friend.com?subject=FarmFriend%20Roundtable%20Enterprise">Contact us</a></Button>;
 
   return (
     <>
@@ -108,19 +106,6 @@ export default function PricingPlans({ embedded = false }: { embedded?: boolean 
         </article>
       </section>
       <p className="ff-pricing-note">Pro includes a $4 monthly premium-AI budget; after it is used, conversations continue on free models within your Pro subscription.</p>
-      <Dialog open={contactOpen} onOpenChange={setContactOpen}>
-        <DialogContent className="ff-contact-dialog">
-          <DialogHeader>
-            <DialogTitle>Let’s talk about your operation.</DialogTitle>
-            <DialogDescription>Enterprise plans are tailored around your team, models and workflow. A contact destination has not been configured for this site yet.</DialogDescription>
-          </DialogHeader>
-          <p>In the meantime, start free or choose Pro to explore the roundtable with your farm questions.</p>
-          <DialogFooter className="ff-dialog-actions">
-            <Button variant="outline" onClick={() => setContactOpen(false)}>Close</Button>
-            {!user && <Button asChild className="ff-button ff-button-dark"><Link href="/sign-up">Start free</Link></Button>}
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </>
   );
 }
