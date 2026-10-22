@@ -1,6 +1,7 @@
 import { Link } from "wouter";
 import { ArrowDown, ArrowRight } from "lucide-react";
 import { useAuth } from "@/hooks/use-auth";
+import PricingPlans from "@/components/billing/PricingPlans";
 import "../styles/public-pages.css";
 
 const features = [
@@ -39,7 +40,7 @@ export default function LandingPage() {
           </Link>
           <div className="ff-nav-links">
             <a className="ff-nav-pricing" href="#how-it-helps">How it helps</a>
-            <Link className="ff-nav-pricing" href="/pricing">Plans</Link>
+            <a className="ff-nav-pricing" href="#pricing">Plans</a>
             <Link href="/sign-in">Sign in</Link>
             <Link className="ff-button ff-button-primary" href={registerHref}>Get started <ArrowRight size={15} aria-hidden="true" /></Link>
           </div>
@@ -50,10 +51,10 @@ export default function LandingPage() {
             <h1 id="landing-title">A little more wisdom at the <em>table.</em></h1>
             <p className="ff-hero-copy">Bring your farm question to a roundtable of AI experts. Hear different perspectives, find practical answers, and make your next decision with more confidence.</p>
             <div className="ff-hero-actions">
-              <Link className="ff-button ff-button-primary" href={registerHref}>Get started with Pro <ArrowRight size={16} aria-hidden="true" /></Link>
+              <Link className="ff-button ff-button-primary" href={registerHref}>Start free <ArrowRight size={16} aria-hidden="true" /></Link>
               <a className="ff-button ff-button-quiet" href="#how-it-helps">See how it works <ArrowDown size={15} aria-hidden="true" /></a>
             </div>
-            <div className="ff-proof"><span className="ff-proof-mark" aria-hidden="true">8</span><span>Up to eight farm experts with Pro</span></div>
+            <div className="ff-proof"><span className="ff-proof-mark" aria-hidden="true">3</span><span>Start with three experts, free</span></div>
           </div>
         </div>
         <div className="ff-scroll-note">Grounded in the work of the land</div>
@@ -73,11 +74,10 @@ export default function LandingPage() {
               </article>
             ))}
           </div>
-          <div className="ff-pricing-band">
-            <div><strong>Bring more expertise to your next farm decision.</strong><span>Explore Pro and Enterprise to find the right plan for your operation.</span></div>
-            <Link className="ff-button ff-button-dark" href="/pricing">Compare plans <ArrowRight size={15} aria-hidden="true" /></Link>
-          </div>
         </div>
+      </section>
+      <section id="pricing" className="ff-pricing-embed" aria-label="Farm Friend plans">
+        <PricingPlans embedded />
       </section>
       <footer className="ff-footer">
         <div className="ff-footer-inner">

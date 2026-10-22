@@ -97,6 +97,18 @@ describe("usage caps: OpenRouterProvider enforcement", () => {
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
+  it("pins Free house-key calls to a zero-price model, short low-reasoning replies and no paid web plugin", async () => {
+    store.getUser.mockResolvedValue({ id: 1, tier: "free" });
+    mockFetch.mockResolvedValue(okResponse(0));
+    await new OpenRouterProvider(null).chat(messages, "openai/o1-pro", 1, true);
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.model).toBe(BUDGET_FALLBACK_MODEL);
+    expect(body.max_tokens).toBeLessThanOrEqual(1200);
+    expect(body.provider.max_price).toEqual({ prompt: 0, completion: 0 });
+    expect(body.reasoning).toEqual({ effort: "low", exclude: true });
+    expect(body.plugins).toBeUndefined();
+  });
+
   it("falls back to a free model (not an error) once the Pro budget is spent", async () => {
     store.getUser.mockResolvedValue({ id: 1, tier: "pro" });
     store.getMonthlyUsage.mockResolvedValue({ messageCount: 3, aiSpendUsd: 4.01 });

@@ -7,6 +7,7 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { eq, desc, asc, and, isNull, isNotNull, max, sql } from "drizzle-orm";
 import ConnectPgSimple from "connect-pg-simple";
 import type { DeliverableGenerationRequest, SaveDeliverableVersionResult } from "@shared/schema";
+import { freeQuotaWindows, freeQuotaDenial, type CapDenial } from "./usage-caps";
 
 const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || "";
 
@@ -43,6 +44,7 @@ export interface IStorage {
   // Pricing caps (server/usage-caps.ts). period = "YYYY-MM" UTC.
   getMonthlyUsage(userId: number, period: string): Promise<{ messageCount: number; aiSpendUsd: number }>;
   incrementMonthlyMessages(userId: number, period: string): Promise<number>;
+  consumeFreeMessageAllowance(userId: number, now?: Date): Promise<CapDenial | null>;
   addMonthlyAiSpend(userId: number, period: string, usd: number): Promise<void>;
   
   // Conversation operations
@@ -61,6 +63,7 @@ export interface IStorage {
   
   // Expert operations
   createExpert(expert: InsertExpert): Promise<Expert>;
+  createExpertWithinLimit(expert: InsertExpert, limit: number): Promise<Expert | undefined>;
   getExpertById(expertId: number): Promise<Expert | undefined>;
   getConversationExperts(conversationId: number): Promise<Expert[]>;
   updateExpert(expertId: number, updates: Partial<Expert>): Promise<Expert>;
@@ -240,6 +243,23 @@ export class MemStorage implements IStorage {
 
   private usage = new Map<string, { messageCount: number; aiSpendUsd: number }>();
 
+  async consumeFreeMessageAllowance(userId: number, now = new Date()): Promise<CapDenial | null> {
+    const windows = freeQuotaWindows(now);
+    for (const window of windows) {
+      if ((this.usage.get(`${userId}:${window.period}`)?.messageCount ?? 0) >= window.limit) {
+        return freeQuotaDenial(window);
+      }
+    }
+    // No await between checking and incrementing: concurrent admissions cannot
+    // race in the in-memory backend.
+    for (const window of windows) {
+      const key = `${userId}:${window.period}`;
+      const row = this.usage.get(key) ?? { messageCount: 0, aiSpendUsd: 0 };
+      this.usage.set(key, { ...row, messageCount: row.messageCount + 1 });
+    }
+    return null;
+  }
+
   async getMonthlyUsage(userId: number, period: string) {
     return { ...(this.usage.get(`${userId}:${period}`) ?? { messageCount: 0, aiSpendUsd: 0 }) };
   }
@@ -364,6 +384,11 @@ export class MemStorage implements IStorage {
   }
   
   // Expert operations
+  async createExpertWithinLimit(expert: InsertExpert, limit: number): Promise<Expert | undefined> {
+    if (Array.from(this.experts.values()).filter(row => row.conversationId === expert.conversationId).length >= limit) return undefined;
+    return this.createExpert(expert);
+  }
+
   async createExpert(insertExpert: InsertExpert): Promise<Expert> {
     const id = this.expertId++;
     const expert: Expert = {
@@ -773,6 +798,32 @@ export class PostgresStorage implements IStorage {
     return result[0];
   }
 
+  async consumeFreeMessageAllowance(userId: number, now = new Date()): Promise<CapDenial | null> {
+    return this.db.transaction(async (tx) => {
+      const windows = freeQuotaWindows(now);
+      const monthly = { userId, period: windows[0].period, messageCount: 0, aiSpendUsd: 0 };
+      await tx.insert(usageMonthly).values(monthly).onConflictDoNothing();
+      // One durable lock per user/month serializes admissions across processes
+      // and conversations. Minute/day counters survive restarts and autoscale.
+      await tx.select().from(usageMonthly)
+        .where(and(eq(usageMonthly.userId, userId), eq(usageMonthly.period, monthly.period))).for("update");
+      for (const window of windows) {
+        const [row] = await tx.select().from(usageMonthly)
+          .where(and(eq(usageMonthly.userId, userId), eq(usageMonthly.period, window.period)));
+        if ((row?.messageCount ?? 0) >= window.limit) return freeQuotaDenial(window);
+      }
+      for (const window of windows) {
+        await tx.insert(usageMonthly)
+          .values({ userId, period: window.period, messageCount: 1, aiSpendUsd: 0 })
+          .onConflictDoUpdate({
+            target: [usageMonthly.userId, usageMonthly.period],
+            set: { messageCount: sql`${usageMonthly.messageCount} + 1` },
+          });
+      }
+      return null;
+    });
+  }
+
   async getMonthlyUsage(userId: number, period: string) {
     const rows = await this.db.select().from(usageMonthly)
       .where(and(eq(usageMonthly.userId, userId), eq(usageMonthly.period, period)));
@@ -907,6 +958,16 @@ export class PostgresStorage implements IStorage {
   }
 
   // ── Expert operations ──────────────────────────────────────────────────────
+
+  async createExpertWithinLimit(expert: InsertExpert, limit: number): Promise<Expert | undefined> {
+    return this.db.transaction(async (tx) => {
+      await tx.select().from(conversations).where(eq(conversations.id, expert.conversationId)).for("update");
+      const rows = await tx.select({ id: experts.id }).from(experts).where(eq(experts.conversationId, expert.conversationId));
+      if (rows.length >= limit) return undefined;
+      const [created] = await tx.insert(experts).values(expert).returning();
+      return created;
+    });
+  }
 
   async createExpert(insertExpert: InsertExpert): Promise<Expert> {
     const result = await this.db.insert(experts).values(insertExpert).returning();

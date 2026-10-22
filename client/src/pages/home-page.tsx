@@ -18,6 +18,8 @@ import { Switch } from "@/components/ui/switch";
 import { PauseIcon, PlayIcon, ScrollText, XIcon, ChevronLeft, ChevronRight } from "lucide-react";
 import { parseNewCommand } from "@/lib/new-command";
 import AiBudgetNotice from "@/components/billing/AiBudgetNotice";
+import UpgradeToProButton from "@/components/billing/UpgradeToProButton";
+import { friendlyLimitError } from "@/hooks/use-tier";
 
 // G9 quiet console: per-event chatter is gated behind a debug flag so the
 // browser console stays readable in production. Force it per-tab with
@@ -175,6 +177,7 @@ export default function HomePage() {
   const [isAutonomousEnabled, setIsAutonomousEnabled] = useState<boolean>(true); // Default to true initially
   const [isProcessing, setIsProcessing] = useState<boolean>(false); // Track if experts are currently responding
   const [expertTurnCounts, setExpertTurnCounts] = useState<{ consumed: number; remaining: number } | null>(null);
+  const [limitNotice, setLimitNotice] = useState<string | null>(null);
 
   // A busy discussion may queue farmer input for the next Moderator route.
   // Keep it visible until pickup; an idle state after exhausted recovery means
@@ -276,9 +279,11 @@ export default function HomePage() {
       queryClient.invalidateQueries({ queryKey: [`/api/protected/conversations/${activeConversation}/experts`] });
     },
     onError: (error: Error) => {
+      const friendly = friendlyLimitError(error);
+      if (friendly.isLimit) setLimitNotice(friendly.message);
       toast({
-        title: "Failed to add expert",
-        description: error.message,
+        title: friendly.isLimit ? "Plan limit reached" : "Failed to add expert",
+        description: friendly.message,
         variant: "destructive",
       });
     },
@@ -385,6 +390,7 @@ export default function HomePage() {
       return { previousMessages, tempId, conversationId };
     },
     onSuccess: (storedMessage, _content, context) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/user/tier"] });
       // Swap the optimistic temp message for the stored one. The WebSocket
       // copy may have landed first, so tolerate both orderings.
       if (!context?.conversationId || !context?.tempId) return;
@@ -397,20 +403,22 @@ export default function HomePage() {
       queryClient.invalidateQueries({ queryKey: [`/api/protected/conversations/${context.conversationId}/open-questions`] });
     },
     onError: (err, _newMessageContent, context) => {
-      if (!context?.conversationId) return;
-      const messagesQueryKey = [`/api/protected/conversations/${context.conversationId}/messages`];
-
-      if (context.previousMessages) {
-        queryClient.setQueryData(messagesQueryKey, context.previousMessages);
-      } else if (context.tempId) {
-        queryClient.setQueryData<Message[]>(messagesQueryKey, (old = []) =>
-          old.filter(m => m.id !== context.tempId)
-        );
+      if (context?.conversationId) {
+        const messagesQueryKey = [`/api/protected/conversations/${context.conversationId}/messages`];
+        if (context.previousMessages) {
+          queryClient.setQueryData(messagesQueryKey, context.previousMessages);
+        } else if (context.tempId) {
+          queryClient.setQueryData<Message[]>(messagesQueryKey, (old = []) =>
+            old.filter(m => m.id !== context.tempId)
+          );
+        }
+        queryClient.invalidateQueries({ queryKey: [`/api/protected/conversations/${context.conversationId}/open-questions`] });
       }
-      queryClient.invalidateQueries({ queryKey: [`/api/protected/conversations/${context.conversationId}/open-questions`] });
+      const friendly = friendlyLimitError(err);
+      if (friendly.isLimit) setLimitNotice(friendly.message);
       toast({
-        title: "Failed to send message",
-        description: err.message,
+        title: friendly.isLimit ? "Plan limit reached" : "Failed to send message",
+        description: friendly.message,
         variant: "destructive",
       });
     },
@@ -438,15 +446,18 @@ export default function HomePage() {
       return conversationId;
     },
     onSuccess: (conversationId) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/user/tier"] });
       setHasQueuedMessage(false);
       queryClient.invalidateQueries({ queryKey: [`/api/protected/conversations/${conversationId}/messages`] });
       queryClient.invalidateQueries({ queryKey: [`/api/protected/conversations/${conversationId}`] });
       queryClient.invalidateQueries({ queryKey: ["/api/protected/conversations"] });
     },
     onError: (error: Error) => {
+      const friendly = friendlyLimitError(error);
+      if (friendly.isLimit) setLimitNotice(friendly.message);
       toast({
-        title: "Failed to restart discussion",
-        description: error.message,
+        title: friendly.isLimit ? "Plan limit reached" : "Failed to restart discussion",
+        description: friendly.message,
         variant: "destructive",
       });
     },
@@ -456,6 +467,7 @@ export default function HomePage() {
   // input should wait for the next Moderator route. `/new` is the explicit
   // same-conversation restart command.
   const handleSendMessage = (content: string, answersQuestionId?: number) => {
+    setLimitNotice(null);
     const topic = parseNewCommand(content);
     if (topic !== null) {
       if (!activeConversation) return;
@@ -920,6 +932,9 @@ export default function HomePage() {
         switch (parsedData.type) {
           case "messages_updated":
           case "message_error":
+            if (parsedData.type === "messages_updated") {
+              queryClient.invalidateQueries({ queryKey: ["/api/user/tier"] });
+            }
             if (parsedData.type === "message_error") {
               setTypingExpertIds(prev => {
                 const next = new Set(prev);
@@ -1338,6 +1353,15 @@ export default function HomePage() {
 
             {/* === Chat Area (Takes remaining space) === */}
              <div className="flex-1 overflow-y-auto">
+                 {limitNotice && (
+                   <div role="alert" className="mx-3 mt-3 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-300/70 bg-amber-50 px-4 py-3 text-sm text-amber-950 shadow-sm md:mx-6">
+                     <span>{limitNotice}</span>
+                     <div className="flex items-center gap-3">
+                       <UpgradeToProButton className="bg-farm-dark-green text-white hover:bg-farm-blue" />
+                       <button type="button" onClick={() => setLimitNotice(null)} className="rounded px-2 py-1 text-xs font-semibold text-amber-900 underline underline-offset-2">Dismiss</button>
+                     </div>
+                   </div>
+                 )}
                  <AiBudgetNotice />
                  {activeConversation ? (
                     <ChatInterface

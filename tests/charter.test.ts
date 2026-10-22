@@ -47,6 +47,7 @@ vi.mock("../server/orchestrator", () => ({
     disableAutonomous() {}
   },
   getConversationState: vi.fn().mockReturnValue(null),
+  getFarmerFileIntent: vi.fn().mockReturnValue(null),
 }));
 
 // ── Mock the provider seam (real ai.ts stays live; calls are captured here) ──
@@ -916,12 +917,14 @@ describe("PUT /api/protected/conversations/:id (charter + title)", () => {
     expect(res.status).toBe(200);
     expect(res.body.title).toBe("After");
     expect(res.body.charter ?? null).toBeNull();
-    expect(res.body.turnBudget).toBe(25);
+    expect(res.body.turnBudget).toBe(3);
   });
 
   it("accepts turn budgets, normalizes zero to null, and preserves omitted values", async () => {
     const agent = request.agent(app);
     await registerAndLogin(agent, "charterTurnBudgetUser");
+    const proUser = await storage.getUserByUsername("charterTurnBudgetUser");
+    await storage.updateUserStripeInfo(proUser!.id, { stripeCustomerId: null, tier: "pro", subscriptionStatus: "active" });
     const convo = await createConversation(agent);
 
     const set = await agent
@@ -976,12 +979,14 @@ describe("PUT /api/protected/conversations/:id (charter + title)", () => {
     }
 
     const get = await agent.get(`/api/protected/conversations/${convo.id}`);
-    expect(get.body.turnBudget).toBe(25);
+    expect(get.body.turnBudget).toBe(3);
   });
 
   it("accepts both numeric turn-budget boundaries", async () => {
     const agent = request.agent(app);
     await registerAndLogin(agent, "charterTurnBudgetBoundsUser");
+    const proUser = await storage.getUserByUsername("charterTurnBudgetBoundsUser");
+    await storage.updateUserStripeInfo(proUser!.id, { stripeCustomerId: null, tier: "pro", subscriptionStatus: "active" });
     const convo = await createConversation(agent);
 
     const minimum = await agent
@@ -995,6 +1000,29 @@ describe("PUT /api/protected/conversations/:id (charter + title)", () => {
       .send({ turnBudget: 100 });
     expect(maximum.status).toBe(200);
     expect(maximum.body.turnBudget).toBe(100);
+  });
+
+  it("keeps Free runs short and denies over-quota messages before AI work", async () => {
+    mockProcessMessageTurnBased.mockResolvedValue(undefined);
+    const agent = request.agent(app);
+    await registerAndLogin(agent, "freeAdmissionUser");
+    const user = await storage.getUserByUsername("freeAdmissionUser");
+    const convo = await createConversation(agent);
+    expect(convo.turnBudget).toBe(3);
+    for (const turnBudget of [100, 0, null]) {
+      const updated = await agent.put(`/api/protected/conversations/${convo.id}`).send({ turnBudget });
+      expect(updated.status).toBe(200);
+      expect(updated.body.turnBudget).toBe(3);
+    }
+    for (let i = 0; i < 10; i++) {
+      const sent = await agent.post(`/api/protected/conversations/${convo.id}/messages`).send({ content: `Free farmer question ${i}` });
+      expect(sent.status).toBe(201);
+    }
+    const denied = await agent.post(`/api/protected/conversations/${convo.id}/messages`).send({ content: "The eleventh message" });
+    expect(denied.status).toBe(429);
+    expect(denied.body).toMatchObject({ code: "free_minute_limit", upgradeUrl: "/subscribe" });
+    expect((await storage.getMonthlyUsage(user!.id, new Date().toISOString().slice(0, 7))).messageCount).toBe(10);
+    expect((await agent.get("/api/user/tier")).body.usage.messages).toBe(10);
   });
 
   it("sets the charter and returns the updated conversation", async () => {

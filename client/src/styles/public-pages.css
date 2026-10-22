@@ -198,6 +198,27 @@
 .ff-check { flex:none; margin-top:1px; color:#58765a; }
 .ff-plan .ff-button { width:100%; margin-top:auto; }
 .ff-pricing-note { width:min(1120px, calc(100% - 64px)); margin:-44px auto 55px; text-align:center; color:#7b8379; font-size:11px; line-height:1.6; }
+.ff-plan-grid.ff-plan-grid-three { width:min(1120px, calc(100% - 64px)); grid-template-columns:repeat(3,minmax(0,1fr)); gap:18px; margin-bottom:0; }
+.ff-plan-free { background:#f0f1e8; }
+.ff-plan-enterprise { background:#f8f7f0; }
+.ff-plan-free .ff-button { border:1px solid #c9d1c4; background:transparent; color:#294a38 !important; }
+.ff-plan-free .ff-button:hover { background:#e4e9df; }
+.ff-pricing-embed { padding:clamp(66px,8vw,104px) 32px; background:#eeefe6; }
+.ff-pricing-embed .ff-pricing-intro { margin:0 auto 36px; }
+.ff-pricing-embed .ff-plan-grid { margin-bottom:0; }
+.ff-pricing-embed .ff-pricing-note { margin:22px auto 0; }
+.ff-pricing-intro .ff-pricing-free-note { margin:9px 0 0; color:#758075; font-size:12px; }
+.ff-plan-list { flex:1; }
+.ff-plan-grid-three .ff-plan { min-height:420px; }
+.ff-plan-grid-three .ff-plan-enterprise { background:#f8f7f0; }
+.ff-plan-free .ff-plan-price { font-size:34px; }
+.ff-plan .ff-plan-note { line-height:1.5; }
+.ff-plan-grid-three .ff-button:disabled { opacity:.65; cursor:wait; transform:none; }
+.ff-plan-grid-three .ff-popular { z-index:1; }
+.ff-plan-grid-three .ff-plan-pro { background:#fbfaf5; }
+.ff-plan-grid-three .ff-plan-pro .ff-button { background:#294a38; }
+.ff-plan-grid-three .ff-plan-pro .ff-button:hover { background:#173c2c; }
+.ff-contact-dialog a { display:inline-flex; align-items:center; gap:7px; }
 .ff-contact-dialog { width:min(450px, calc(100vw - 36px)); padding:28px; border:1px solid #dce1d8; border-radius:17px; background:#f8f8f1; color:#293b30; box-shadow:0 25px 80px rgba(16,30,20,.2); }
 .ff-contact-dialog h2 { margin:0 0 10px; font:500 27px Georgia,serif; }
 .ff-contact-dialog p { margin:0 0 18px; color:#647166; font-size:14px; line-height:1.65; }
@@ -240,8 +261,12 @@
   .ff-pricing-header { padding:18px 18px 0; }
   .ff-pricing-intro { width:calc(100% - 36px); margin:43px auto 29px; }
   .ff-plan-grid { width:calc(100% - 36px); grid-template-columns:1fr; gap:17px; }
+  .ff-plan-grid.ff-plan-grid-three { width:calc(100% - 36px); grid-template-columns:1fr; }
   .ff-plan { min-height:0; padding:24px; }
   .ff-plan-pro { order:-1; }
+  .ff-pricing-embed { padding:62px 18px; }
+  .ff-pricing-embed .ff-pricing-intro { width:100%; margin:0 auto 31px; }
+  .ff-pricing-embed .ff-plan-grid { width:100%; }
   .ff-pricing-note { width:calc(100% - 36px); margin:-42px auto 40px; }
 }
 @supports (background-image: image-set(url("/images/ffrt-bg-desktop-2560x1440.webp") type("image/webp"), url("/images/ffrt-bg-desktop-2560x1440.jpg") type("image/jpeg"))) {

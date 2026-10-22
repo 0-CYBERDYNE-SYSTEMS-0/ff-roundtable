@@ -1,1 +1,1 @@
-- [Paid-only product](paid-only-product.md) — no Free plan or free app routing; preserve the subscription paywall and Pro/Enterprise pricing.
+- [Free trial product](free-plan-product.md) — Free signup enters the app with existing tier limits and strict abuse controls; Pro checkout stays unchanged.

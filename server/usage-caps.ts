@@ -25,6 +25,28 @@ export const EXPERT_REPLY_MAX_TOKENS = 1200;
 
 /** Free model experts use once a Pro user's monthly AI budget is spent. */
 export const BUDGET_FALLBACK_MODEL = "dots-studio/dots-3-note-preview:free";
+export const FREE_MAX_TURNS = 3;
+export const FREE_MAX_MESSAGE_CHARS = 4000;
+export const FREE_MESSAGES_PER_MINUTE = 10;
+export const FREE_MESSAGES_PER_DAY = 25;
+
+/** Reuse the durable usage ledger for atomic, cross-instance Free quotas. */
+export function freeQuotaWindows(now = new Date()) {
+  return [
+    { period: currentUsagePeriod(now), limit: getTierLimits("free").maxMessages, code: "message_limit_reached", reset: "next month" },
+    { period: `free:day:${now.toISOString().slice(0, 10)}`, limit: FREE_MESSAGES_PER_DAY, code: "free_daily_limit", reset: "tomorrow (UTC)" },
+    { period: `free:minute:${now.toISOString().slice(0, 16)}`, limit: FREE_MESSAGES_PER_MINUTE, code: "free_minute_limit", reset: "the next minute" },
+  ];
+}
+
+export function freeQuotaDenial(window: ReturnType<typeof freeQuotaWindows>[number]): CapDenial {
+  return {
+    status: 429,
+    code: window.code,
+    message: `You've reached your Free plan limit of ${window.limit} messages ${window.code === "free_minute_limit" ? "per minute" : window.code === "free_daily_limit" ? "per day" : "per month"}. Try again ${window.reset}, or upgrade to Pro for higher limits.`,
+    upgradeUrl: "/subscribe",
+  };
+}
 
 export const BUDGET_EXHAUSTED_NOTICE = "You've used this month's included fast models; experts are on free models until the 1st.";
 

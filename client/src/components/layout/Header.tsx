@@ -15,6 +15,7 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { useLocation } from "wouter";
 import { useTheme, type Theme } from "@/lib/theme";
 import type { RefObject } from "react";
+import UsageMeter from "@/components/billing/UsageMeter";
 
 interface HeaderProps {
   onOpenFarmProfile?: () => void;
@@ -60,6 +61,7 @@ export default function Header({ onOpenFarmProfile, onToggleSidebar, isSidebarOp
 
       {user && (
         <div className="flex shrink-0 items-center space-x-1.5 sm:space-x-3">
+          <UsageMeter />
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button

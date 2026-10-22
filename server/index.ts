@@ -6,6 +6,7 @@ import { describeOwmKey } from "./weather";
 import helmet from "helmet";
 import cors from "cors";
 import rateLimit from "express-rate-limit";
+import { createApiIpLimiter, createSignupIpLimiter } from "./abuse-limits";
 
 // Startup sanity check for the OWM key — env-only, no boot-time network call.
 {
@@ -20,6 +21,9 @@ import rateLimit from "express-rate-limit";
 }
 
 const app = express();
+app.set("trust proxy", 1);
+app.use("/api", createApiIpLimiter());
+app.use("/api/register", createSignupIpLimiter());
 // Keep the raw body around so the Stripe webhook can verify signatures —
 // re-serializing a parsed object would produce different bytes.
 app.use(express.json({

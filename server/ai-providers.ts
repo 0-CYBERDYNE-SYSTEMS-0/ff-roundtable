@@ -39,6 +39,7 @@ type OpenRouterAttempt = {
   houseKeyUserId?: number;
   usagePeriod?: string;
   providerPriceLimit?: { prompt: number; completion: number };
+  freeHouseKey?: boolean;
   settled: boolean;
 };
 
@@ -225,6 +226,15 @@ export class OpenRouterProvider implements AIProvider {
     if (byok || !userId) return { key, model };
     const { storage } = await import("./storage");
     const user = await storage.getUser(userId);
+    if ((user?.tier || "free") === "free") {
+      // A pinned zero-price route protects the house key even for auxiliary
+      // prompts, old experts, forged model names, or provider fallback.
+      attempt.model = BUDGET_FALLBACK_MODEL;
+      attempt.maxTokens = Math.min(attempt.maxTokens, 1200);
+      attempt.providerPriceLimit = { prompt: 0, completion: 0 };
+      attempt.freeHouseKey = true;
+      return { key, model: BUDGET_FALLBACK_MODEL };
+    }
     const period = currentUsagePeriod();
     const usage = await storage.getMonthlyUsage(userId, period);
     const denial = checkHouseKeyCall(user?.tier, model, usage.aiSpendUsd);
@@ -291,10 +301,12 @@ export class OpenRouterProvider implements AIProvider {
           temperature: 0.7,
           ...this.requestBudget(attempt),
           usage: { include: true },
-          ...(process.env.OPENROUTER_REASONING_EFFORT
+          ...(attempt.freeHouseKey
+            ? { reasoning: { effort: "low", exclude: true } }
+            : process.env.OPENROUTER_REASONING_EFFORT
             ? { reasoning: { effort: process.env.OPENROUTER_REASONING_EFFORT } }
             : {}),
-          ...(webSearch ? { plugins: [{ id: "web", max_results: 3 }] } : {}),
+          ...(webSearch && !attempt.freeHouseKey ? { plugins: [{ id: "web", max_results: 3 }] } : {}),
         }),
         signal: AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS),
       });
@@ -380,10 +392,12 @@ export class OpenRouterProvider implements AIProvider {
           temperature: 0.7,
           ...this.requestBudget(attempt),
           usage: { include: true },
-          ...(process.env.OPENROUTER_REASONING_EFFORT
+          ...(attempt.freeHouseKey
+            ? { reasoning: { effort: "low", exclude: true } }
+            : process.env.OPENROUTER_REASONING_EFFORT
             ? { reasoning: { effort: process.env.OPENROUTER_REASONING_EFFORT } }
             : {}),
-          ...(webSearch ? { plugins: [{ id: "web", max_results: 3 }] } : {}),
+          ...(webSearch && !attempt.freeHouseKey ? { plugins: [{ id: "web", max_results: 3 }] } : {}),
           stream: true,
         }),
         signal: AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS),

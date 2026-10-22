@@ -7,6 +7,7 @@ import { commitPendingDeliverable, discardPendingDeliverable } from "./pending-d
 import type { InsertMessage, Expert, Message, File, MessageStance, OrchestratorSnapshot } from "@shared/schema";
 import { extractFarmerQuestions } from "@shared/mentions";
 import { createHash } from "crypto";
+import { FREE_MAX_TURNS } from "./usage-caps";
 
 // Verbose per-turn tracing is opt-in (ORCH_DEBUG=1). The default flood slows
 // test teardown and leaks conversation content into production logs.
@@ -1947,6 +1948,18 @@ export class InteractionOrchestrator {
                     : undefined;
                 const beforeDispatch = getConversationState(this.conversationId);
                 if (!beforeDispatch) return;
+                if (beforeDispatch.lastUserMessage?.userId && typeof storage.getUser === "function") {
+                    const owner = await storage.getUser(beforeDispatch.lastUserMessage.userId);
+                    if (owner && (owner.tier || "free") === "free") {
+                        const replies = history.filter(message =>
+                            message.id > beforeDispatch.lastUserMessage!.id &&
+                            message.role === "assistant" && message.expertId !== null);
+                        if (replies.length >= FREE_MAX_TURNS) {
+                            updateConversationState(this.conversationId, { mode: "idle" });
+                            return;
+                        }
+                    }
+                }
                 state = updateConversationState(this.conversationId, {
                     currentExpertIndex: nextExpertIndex,
                     ...(countedAsAutonomousTurn && beforeDispatch.totalAutonomousTurnsTaken < beforeDispatch.maxAutonomousTurns

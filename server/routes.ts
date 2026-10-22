@@ -26,7 +26,7 @@ import { getWeatherForFarm, formatWeatherContext } from './weather';
 import { isDuplicateUserSubmission } from './text-similarity';
 import { format } from 'date-fns';
 import { TIERS, getTierLimits, isPaidModel } from './tiers';
-import { checkMessageAllowance, currentUsagePeriod, isHouseKeyAllowedModel, HOUSE_KEY_PAID_MODEL_ALLOWLIST, UsageCapError, monthlyAiBudgetUsd, BUDGET_EXHAUSTED_NOTICE } from './usage-caps';
+import { checkMessageAllowance, currentUsagePeriod, isHouseKeyAllowedModel, HOUSE_KEY_PAID_MODEL_ALLOWLIST, UsageCapError, monthlyAiBudgetUsd, BUDGET_EXHAUSTED_NOTICE, BUDGET_FALLBACK_MODEL, FREE_MAX_TURNS, FREE_MAX_MESSAGE_CHARS, FREE_MESSAGES_PER_MINUTE, FREE_MESSAGES_PER_DAY } from './usage-caps';
 
 class OpenQuestionAnswerConflictError extends Error {}
 const rememberedAnswerTurnStarts = new Map<number, number>();
@@ -681,12 +681,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   async function assertMessageAllowance(userId: number): Promise<void> {
     const user = await storage.getUser(userId);
+    if ((user?.tier || "free") === "free") {
+      const denial = await storage.consumeFreeMessageAllowance(userId);
+      if (denial) throw new UsageCapError(denial);
+      return;
+    }
     const usage = await storage.getMonthlyUsage(userId, currentUsagePeriod());
     const denial = checkMessageAllowance(user?.tier, usage.messageCount);
     if (denial) throw new UsageCapError(denial);
   }
 
   async function recordUserMessage(userId: number): Promise<void> {
+    // Free allowance is reserved atomically before any work is dispatched.
+    if (((await storage.getUser(userId))?.tier || "free") === "free") return;
     try {
       await storage.incrementMonthlyMessages(userId, currentUsagePeriod());
     } catch (err) {
@@ -790,6 +797,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
 
     // Pricing caps: a "message" = one farmer message (see server/usage-caps.ts).
+    if (((await storage.getUser(userId))?.tier || "free") === "free" && content.length > FREE_MAX_MESSAGE_CHARS) {
+      throw new UsageCapError({ status: 429, code: "free_message_too_long", message: `Please keep Free questions under ${FREE_MAX_MESSAGE_CHARS} characters, or upgrade to Pro.`, upgradeUrl: "/subscribe" });
+    }
     await assertMessageAllowance(userId);
 
     const conversationExperts = await storage.getConversationExperts(conversationId);
@@ -1118,6 +1128,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         tier,
         limits,
         usage: { period: currentUsagePeriod(), messages: usage.messageCount },
+        freeLimits: { perMinute: FREE_MESSAGES_PER_MINUTE, perDay: FREE_MESSAGES_PER_DAY, maxTurns: FREE_MAX_TURNS },
         // True once house-key paid calls are falling back to free models.
         aiBudgetExhausted: tier === "pro" && !user?.openRouterKey && usage.aiSpendUsd >= monthlyAiBudgetUsd(tier),
         aiBudgetNotice: BUDGET_EXHAUSTED_NOTICE,
@@ -1136,7 +1147,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
       
       const conversation: InsertConversation = {
         userId,
-        title
+        title,
+        ...(((await storage.getUser(userId))?.tier || "free") === "free" ? { turnBudget: FREE_MAX_TURNS } : {}),
       };
       
       const createdConversation = await storage.createConversation(conversation);
@@ -1195,6 +1207,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const updates = parsed.data.turnBudget === 0
         ? { ...parsed.data, turnBudget: null }
         : parsed.data;
+      if (updates.turnBudget !== undefined && ((await storage.getUser(req.user!.id))?.tier || "free") === "free") {
+        updates.turnBudget = Math.min(updates.turnBudget ?? FREE_MAX_TURNS, FREE_MAX_TURNS);
+      }
       const updatedConversation = await storage.updateConversation(conversationId, updates);
       if (!updatedConversation) {
         return res.status(404).json({ message: "Conversation not found" });
@@ -1262,7 +1277,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
         });
       }
       
-      const { name, model } = req.body;
+      const { name } = req.body;
+      const model = tier === "free" && typeof req.body.model === "string" && !isPaidModel(req.body.model)
+        ? BUDGET_FALLBACK_MODEL : req.body.model;
       const role = typeof req.body.role === "string" ? req.body.role.trim().slice(0, 60) : "";
       if (!role || /^(user|farmer)$/i.test(role)) {
         return res.status(400).json({ message: "Choose a valid expert role." });
@@ -1300,7 +1317,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
         customInstructions,
       };
       
-      const createdExpert = await storage.createExpert(expert);
+      const createdExpert = tier === "free"
+        ? await storage.createExpertWithinLimit(expert, limits.maxExperts)
+        : await storage.createExpert(expert);
+      if (!createdExpert) {
+        return res.status(403).json({ code: "TIER_LIMIT_EXPERTS", message: "Free roundtables support up to 3 experts. Upgrade to Pro for up to 8.", upgradeUrl: "/subscribe" });
+      }
       res.status(201).json(createdExpert);
     } catch (error: any) {
       res.status(500).json({ message: error.message });
@@ -1561,6 +1583,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       let restartMessage: Message;
       if (requestedTopic) {
+        if (((await storage.getUser(req.user!.id))?.tier || "free") === "free" && requestedTopic.length > FREE_MAX_MESSAGE_CHARS) {
+          throw new UsageCapError({ status: 429, code: "free_message_too_long", message: `Please keep Free questions under ${FREE_MAX_MESSAGE_CHARS} characters, or upgrade to Pro.`, upgradeUrl: "/subscribe" });
+        }
         await assertMessageAllowance(req.user!.id);
         const conversationExperts = await storage.getConversationExperts(conversationId);
         restartMessage = await storage.createMessage({
@@ -1576,6 +1601,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
       } else {
         // Bare `/new` repeats the latest farmer topic as an explicit fresh
         // run without adding an empty/command-only message to the transcript.
+        if (((await storage.getUser(req.user!.id))?.tier || "free") === "free") {
+          await assertMessageAllowance(req.user!.id);
+        }
         restartMessage = previousUserMessage!;
       }
 
@@ -2059,10 +2087,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       const body = req.body && typeof req.body === "object" ? req.body : {};
       const hasMaxTurns = Object.prototype.hasOwnProperty.call(body, "maxTurns");
-      const maxTurns = body.maxTurns;
+      let maxTurns = body.maxTurns;
       if (hasMaxTurns && maxTurns !== null && maxTurns !== 0 &&
           (typeof maxTurns !== "number" || !Number.isInteger(maxTurns) || maxTurns < 1 || maxTurns > 100)) {
         return res.status(400).json({ message: "maxTurns must be null, 0, or an integer from 1 to 100." });
+      }
+
+      if (((await storage.getUser(req.user!.id))?.tier || "free") === "free") {
+        maxTurns = Math.min(maxTurns || FREE_MAX_TURNS, FREE_MAX_TURNS);
+        await storage.updateConversation(conversationId, { turnBudget: maxTurns });
+        await persistAutonomySettings(conversationId, { maxAutonomousTurns: maxTurns });
       }
 
       if (hasMaxTurns) {
