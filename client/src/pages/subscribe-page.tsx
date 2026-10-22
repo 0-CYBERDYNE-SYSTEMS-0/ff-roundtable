@@ -109,7 +109,7 @@ export default function SubscribePage() {
           <p className="ff-plan-price">$0 <span>/ forever</span></p>
           <p className="ff-plan-note">No card required.</p>
           <FeatureList features={FREE_FEATURES} />
-          <Button className="ff-button ff-button-dark" asChild><Link href={user ? "/" : "/sign-up"}>{user ? "Your current starting point" : "Get started free"}</Link></Button>
+          <Button className="ff-button ff-button-dark" asChild><Link href={user ? "/" : "/sign-up"}>Continue free</Link></Button>
         </article>
         <article className="ff-plan ff-plan-pro">
           <div className="ff-popular">Most popular</div>
