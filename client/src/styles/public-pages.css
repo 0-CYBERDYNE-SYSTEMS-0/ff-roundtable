@@ -184,7 +184,7 @@
 .ff-billing-toggle button { border:0; border-radius:7px; padding:10px 14px; background:transparent; color:#677268; font:600 12px "DM Sans",sans-serif; cursor:pointer; }
 .ff-billing-toggle button[aria-pressed="true"] { background:#fff; color:#294a38; box-shadow:0 1px 4px rgba(28,46,34,.1); }
 .ff-billing-savings { display:inline-block; padding:4px 7px; margin-left:5px; border-radius:5px; background:#e5ebdf; color:#385940; font-size:10px; }
-.ff-plan-grid { width:min(1120px, calc(100% - 64px)); margin:0 auto 70px; display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); align-items:stretch; gap:16px; }
+.ff-plan-grid { width:min(960px, calc(100% - 64px)); margin:0 auto 70px; display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); align-items:stretch; gap:16px; }
 .ff-plan { position:relative; min-height:390px; padding:29px; border:1px solid #dfe2d9; border-radius:15px; background:#fbfaf5; display:flex; flex-direction:column; }
 .ff-plan-pro { border-color:#6b886e; box-shadow:0 14px 45px rgba(38,67,47,.1); }
 .ff-popular { position:absolute; top:-12px; left:25px; padding:5px 10px; border-radius:99px; background:#294a38; color:#fff; text-transform:uppercase; letter-spacing:.12em; font-size:9px; font-weight:700; }

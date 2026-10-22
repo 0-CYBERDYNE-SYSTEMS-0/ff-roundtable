@@ -50,10 +50,10 @@ export default function LandingPage() {
             <h1 id="landing-title">A little more wisdom at the <em>table.</em></h1>
             <p className="ff-hero-copy">Bring your farm question to a roundtable of AI experts. Hear different perspectives, find practical answers, and make your next decision with more confidence.</p>
             <div className="ff-hero-actions">
-              <Link className="ff-button ff-button-primary" href={registerHref}>Start your free account <ArrowRight size={16} aria-hidden="true" /></Link>
+              <Link className="ff-button ff-button-primary" href={registerHref}>Get started with Pro <ArrowRight size={16} aria-hidden="true" /></Link>
               <a className="ff-button ff-button-quiet" href="#how-it-helps">See how it works <ArrowDown size={15} aria-hidden="true" /></a>
             </div>
-            <div className="ff-proof"><span className="ff-proof-mark" aria-hidden="true">3</span><span>Start with three farm experts, free</span></div>
+            <div className="ff-proof"><span className="ff-proof-mark" aria-hidden="true">8</span><span>Up to eight farm experts with Pro</span></div>
           </div>
         </div>
         <div className="ff-scroll-note">Grounded in the work of the land</div>
@@ -74,7 +74,7 @@ export default function LandingPage() {
             ))}
           </div>
           <div className="ff-pricing-band">
-            <div><strong>Start free. Bring more experts when you need them.</strong><span>Explore the plans and find the right amount of help for your season.</span></div>
+            <div><strong>Bring more expertise to your next farm decision.</strong><span>Explore Pro and Enterprise to find the right plan for your operation.</span></div>
             <Link className="ff-button ff-button-dark" href="/pricing">Compare plans <ArrowRight size={15} aria-hidden="true" /></Link>
           </div>
         </div>

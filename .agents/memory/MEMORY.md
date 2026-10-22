@@ -1,0 +1,1 @@
+- [Paid-only product](paid-only-product.md) — no Free plan or free app routing; preserve the subscription paywall and Pro/Enterprise pricing.

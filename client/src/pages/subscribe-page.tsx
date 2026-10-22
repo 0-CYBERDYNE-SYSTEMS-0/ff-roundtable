@@ -14,12 +14,6 @@ const PLAN_LABELS: Record<BillingInterval, { price: string; note: string }> = {
   year: { price: "$96/year", note: "Billed yearly." },
 };
 const ENTERPRISE_CONTACT_URL = import.meta.env.VITE_ENTERPRISE_CONTACT_URL as string | undefined;
-const FREE_FEATURES = [
-  "Up to 3 specialized farm experts",
-  "100 messages each month",
-  "Free AI models",
-  "Saved sessions and rich answers",
-];
 const PRO_FEATURES = [
   "Up to 8 specialized AI agricultural experts",
   "1,000 messages a month",
@@ -34,7 +28,7 @@ const ENTERPRISE_FEATURES = [
 ];
 
 function friendlyBillingMessage(err: unknown): string {
-  const fallback = "Subscriptions are temporarily unavailable. You can keep using the free plan; please try again later.";
+  const fallback = "Subscriptions are temporarily unavailable. Please try again later.";
   const text = err instanceof Error ? err.message : "";
   const json = text.slice(text.indexOf("{"));
   try {
@@ -96,21 +90,13 @@ export default function SubscribePage() {
       <section className="ff-pricing-intro">
         <div className="ff-section-kicker">Plans for every season</div>
         <h1>Good advice, on your terms.</h1>
-        <p>Start free and bring more expertise to the table when your work calls for it.</p>
+        <p>Bring more expertise to the table with Pro, or talk to us about your operation.</p>
         <div className="ff-billing-toggle" role="group" aria-label="Billing interval">
           <button type="button" aria-pressed={interval === "month"} onClick={() => setBillingInterval("month")}>Monthly</button>
           <button type="button" aria-pressed={interval === "year"} onClick={() => setBillingInterval("year")}>Annual <span className="ff-billing-savings">2 months free</span></button>
         </div>
       </section>
       <section className="ff-plan-grid" aria-label="Available plans">
-        <article className="ff-plan">
-          <h2>Free</h2>
-          <p className="ff-plan-description">A solid place to begin exploring farm questions.</p>
-          <p className="ff-plan-price">$0 <span>/ forever</span></p>
-          <p className="ff-plan-note">No card required.</p>
-          <FeatureList features={FREE_FEATURES} />
-          <Button className="ff-button ff-button-dark" asChild><Link href={user ? "/" : "/sign-up"}>Continue free</Link></Button>
-        </article>
         <article className="ff-plan ff-plan-pro">
           <div className="ff-popular">Most popular</div>
           <h2>Pro</h2>
@@ -131,7 +117,7 @@ export default function SubscribePage() {
             : <Button className="ff-button ff-button-dark" onClick={() => setContactOpen(true)}>Contact us</Button>}
         </article>
       </section>
-      <p className="ff-pricing-note">The Free plan remains available whether you choose Pro or not. Pro includes a $4 monthly premium-AI budget; after it is used, conversations continue on free models.</p>
+      <p className="ff-pricing-note">Pro includes a $4 monthly premium-AI budget; after it is used, conversations continue on free models within your Pro subscription.</p>
       <footer className="ff-footer">
         <div className="ff-footer-inner"><Link href="/">Back to Farm Friend</Link><span>Practical perspective for the work ahead.</span></div>
       </footer>
@@ -143,10 +129,10 @@ export default function SubscribePage() {
               Enterprise plans are tailored around your team, models and workflow. A contact destination has not been configured for this site yet, so we can’t open an email or booking request here.
             </DialogDescription>
           </DialogHeader>
-          <p>In the meantime, you can create a free account or choose Pro to explore the roundtable with your farm questions.</p>
+          <p>In the meantime, choose Pro to explore the roundtable with your farm questions.</p>
           <DialogFooter className="ff-dialog-actions">
             <Button variant="outline" onClick={() => setContactOpen(false)}>Close</Button>
-            {!user && <Button asChild className="ff-button ff-button-dark"><Link href="/sign-up"><Check size={15} aria-hidden="true" />Start free</Link></Button>}
+            {!user && <Button asChild className="ff-button ff-button-dark"><Link href="/sign-up"><Check size={15} aria-hidden="true" />Get started with Pro</Link></Button>}
           </DialogFooter>
         </DialogContent>
       </Dialog>
