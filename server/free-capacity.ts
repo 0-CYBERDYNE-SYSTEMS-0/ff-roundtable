@@ -4,6 +4,54 @@ import { UsageCapError } from "./usage-caps";
 
 // Short transactions on the shared pool; no lock held during a provider call.
 export const FREE_CALL_RESERVATION_USD = 0.1;
+
+/** Atomic and safe across workers: only genuinely unsettled reservations expire.
+ * Successful unknown-cost calls remain charged conservatively.
+ */
+export async function sweepStaleFreeReservations(): Promise<number> {
+  const { rows } = await getDatabasePool().query(`
+    WITH stale AS MATERIALIZED (
+      SELECT id, reserved_usd FROM free_ai_calls
+      WHERE created_at < NOW() - INTERVAL '10 minutes'
+        AND reserved_usd > 0
+        AND (result = 'pending' OR (result = 'failed' AND cost_usd IS NULL))
+      ORDER BY id FOR UPDATE
+    ), released AS (
+      UPDATE free_ai_calls AS calls
+      SET reserved_usd = 0,
+          result = CASE WHEN calls.result = 'pending' THEN 'expired' ELSE calls.result END
+      FROM stale WHERE calls.id = stale.id
+      RETURNING calls.day, stale.reserved_usd
+    ), totals AS (
+      SELECT day, SUM(reserved_usd) AS refund FROM released GROUP BY day
+    ), refunded AS (
+      UPDATE free_spend_days AS days
+      SET charged_usd = GREATEST(0, days.charged_usd - totals.refund)
+      FROM totals WHERE days.day = totals.day RETURNING days.day
+    )
+    SELECT COUNT(*)::int AS released_count FROM released
+  `);
+  return Number(rows[0]?.released_count ?? 0);
+}
+
+export function startFreeReservationSweep(): () => void {
+  let running = false;
+  const sweep = async () => {
+    if (running) return;
+    running = true;
+    try {
+      const count = await sweepStaleFreeReservations();
+      if (count) console.info(`[FREE_RESERVATIONS] Released ${count} stale reservations`);
+    } catch (error) {
+      console.error("[FREE_RESERVATIONS] Stale reservation sweep failed", error);
+    } finally { running = false; }
+  };
+  void sweep();
+  const timer = setInterval(() => void sweep(), 60_000);
+  timer.unref();
+  return () => clearInterval(timer);
+}
+
 export const freeCapacityDenial = () => new UsageCapError({
   status: 429, code: "free_capacity_used",
   message: "Free capacity is used up for today, try tomorrow or upgrade to Pro",
@@ -46,7 +94,7 @@ export async function settleFreeCall(id: string, result: string, usage: any, met
     const { rows } = await client.query(
       `UPDATE free_ai_calls SET result=$2, cost_usd=$3, actual_model=$4, generation_id=$5,
        prompt_tokens=$6, completion_tokens=$7, reasoning_tokens=$8
-       WHERE id=$1 AND result='pending' RETURNING day,reserved_usd`,
+       WHERE id=$1 AND result IN ('pending', 'expired') RETURNING day,reserved_usd`,
       [id, result, cost, metadata.responseModel ?? null, metadata.generationId ?? null,
         usage?.prompt_tokens ?? null, usage?.completion_tokens ?? null,
         usage?.completion_tokens_details?.reasoning_tokens ?? null],

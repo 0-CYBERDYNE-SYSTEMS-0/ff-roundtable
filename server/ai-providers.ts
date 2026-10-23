@@ -55,6 +55,7 @@ type OpenRouterAttempt = {
   usagePeriod?: string;
   providerPriceLimit?: { prompt: number; completion: number };
   freeHouseKey?: boolean;
+  freeReasoningEffort?: "low" | "medium";
   freeReservation?: boolean;
   estimatedInputTokens?: number;
   settled: boolean;
@@ -278,6 +279,7 @@ export class OpenRouterProvider implements AIProvider {
       }
       attempt.model = freeModel;
       attempt.maxTokens = options.purpose === "auxiliary" || options.capable ? 4000 : FREE_EXPERT_MAX_TOKENS;
+      attempt.freeReasoningEffort = options.purpose === "auxiliary" || options.capable ? "medium" : "low";
       // Reserve before dispatch, bounding both input and output price. Never
       // let a provider's route change bypass the daily USD ceiling.
       const ceiling = FREE_CALL_RESERVATION_USD * 0.45 * 1_000_000;
@@ -422,7 +424,7 @@ export class OpenRouterProvider implements AIProvider {
           ...this.requestBudget(attempt),
           usage: { include: true },
           ...(attempt.freeHouseKey
-            ? { reasoning: { effort: "medium", exclude: true } }
+            ? { reasoning: { effort: attempt.freeReasoningEffort, exclude: true } }
             : process.env.OPENROUTER_REASONING_EFFORT
             ? { reasoning: { effort: process.env.OPENROUTER_REASONING_EFFORT } }
             : {}),
@@ -519,7 +521,7 @@ export class OpenRouterProvider implements AIProvider {
           ...this.requestBudget(attempt),
           usage: { include: true },
           ...(attempt.freeHouseKey
-            ? { reasoning: { effort: "medium", exclude: true } }
+            ? { reasoning: { effort: attempt.freeReasoningEffort, exclude: true } }
             : process.env.OPENROUTER_REASONING_EFFORT
             ? { reasoning: { effort: process.env.OPENROUTER_REASONING_EFFORT } }
             : {}),

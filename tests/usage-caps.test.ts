@@ -124,16 +124,17 @@ describe("usage caps: OpenRouterProvider enforcement", () => {
       .rejects.toMatchObject({ statusCode: 402, message: expect.stringContaining("temporarily unavailable") });
   });
 
-  it("pins Free house-key calls to a zero-price model, short low-reasoning replies and no paid web plugin", async () => {
+  it("pins Free house-key calls to the allowlist, 3000 low-reasoning tokens and no paid web plugin", async () => {
     store.getUser.mockResolvedValue({ id: 1, tier: "free" });
     mockFetch.mockResolvedValue(okResponse(0));
     await new OpenRouterProvider(null).chat(messages, "openai/o1-pro", 1, true);
     const body = JSON.parse(mockFetch.mock.calls[0][1].body);
     expect(body.model).toBe(FREE_EXPERT_MODELS[0]);
     expect(body.max_tokens).toBe(FREE_EXPERT_MAX_TOKENS);
+    expect(body.max_tokens).toBe(3000);
     expect(body.provider.max_price.prompt).toBeGreaterThan(0);
     expect(body.provider.max_price.completion).toBeGreaterThan(0);
-    expect(body.reasoning).toEqual({ effort: "medium", exclude: true });
+    expect(body.reasoning).toEqual({ effort: "low", exclude: true });
     expect(body.plugins).toBeUndefined();
   });
 
@@ -151,12 +152,13 @@ describe("usage caps: OpenRouterProvider enforcement", () => {
     expect(store.addMonthlyAiSpend).not.toHaveBeenCalled();
   });
 
-  it("gives Free auxiliary calls 6000 tokens while preserving zero-price fallback routing", async () => {
+  it("keeps Free auxiliary calls at 4000 tokens and medium reasoning", async () => {
     store.getUser.mockResolvedValue({ id: 1, tier: "free" });
     mockFetch.mockResolvedValue(okResponse(0));
     await new OpenRouterProvider(null).chat(messages, "paid/model", 1, false, { purpose: "auxiliary" });
     const body = JSON.parse(mockFetch.mock.calls[0][1].body);
     expect(body.max_tokens).toBe(4000);
+    expect(body.reasoning).toEqual({ effort: "medium", exclude: true });
     expect(body.model).toBe(FREE_CAPABLE_MODEL);
     expect(body.models).toBeUndefined();
     expect(body.provider.max_price.completion).toBeGreaterThan(0);
@@ -233,6 +235,9 @@ describe("usage caps: OpenRouterProvider enforcement", () => {
     const result = await new OpenRouterProvider(null).chatStream(messages, BUDGET_FALLBACK_MODEL, onToken, 1);
     expect(result.message.content).toBe("Partial answer" + FREE_TRUNCATION_NOTE);
     expect(onToken).toHaveBeenLastCalledWith(FREE_TRUNCATION_NOTE);
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.max_tokens).toBe(3000);
+    expect(body.reasoning).toEqual({ effort: "low", exclude: true });
   });
 
   it("preserves paid Pro output-limit errors", async () => {

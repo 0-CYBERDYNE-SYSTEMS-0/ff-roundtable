@@ -3,7 +3,7 @@ const { query, release } = vi.hoisted(() => ({ query: vi.fn(), release: vi.fn() 
 vi.mock("../server/database-pool", () => ({
   getDatabasePool: () => ({ query, connect: async () => ({ query, release }) }),
 }));
-import { assertFreeCapacity, reserveFreeCall, settleFreeCall } from "../server/free-capacity";
+import { assertFreeCapacity, reserveFreeCall, settleFreeCall, sweepStaleFreeReservations, startFreeReservationSweep } from "../server/free-capacity";
 
 describe("durable global Free spend ledger", () => {
   beforeEach(() => {
@@ -39,7 +39,7 @@ describe("durable global Free spend ledger", () => {
       cost: 0.002, prompt_tokens: 100, completion_tokens: 200, completion_tokens_details: { reasoning_tokens: 50 },
     }, { generationId: "gen-1", responseModel: "actual/model" });
     const call = query.mock.calls.find(c => c[0].startsWith("UPDATE free_ai_calls"))!;
-    expect(call[0]).toContain("result='pending'");
+    expect(call[0]).toContain("result IN ('pending', 'expired')");
     expect(call[1]).toEqual(["attempt-3", "success", 0.002, "actual/model", "gen-1", 100, 200, 50]);
     const day = query.mock.calls.find(c => c[0].startsWith("UPDATE free_spend_days"))!;
     expect(day[1][1]).toBeCloseTo(-0.098);
@@ -75,5 +75,38 @@ describe("durable global Free spend ledger", () => {
     await expect(assertFreeCapacity()).rejects.toMatchObject({ denial: { code: "free_capacity_used" } });
     query.mockResolvedValue({ rows: [{ charged_usd: 4.8 }], rowCount: 1 });
     await expect(assertFreeCapacity()).resolves.toBeUndefined();
+  });
+  it("atomically expires only old pending or failed unknown-cost reservations across days", async () => {
+    query.mockResolvedValue({ rows: [{ released_count: 3 }] });
+    expect(await sweepStaleFreeReservations()).toBe(3);
+    const sql = query.mock.calls[0][0];
+    expect(sql).toContain("INTERVAL '10 minutes'");
+    expect(sql).toContain("FOR UPDATE");
+    expect(sql).toContain("result = 'pending' OR (result = 'failed' AND cost_usd IS NULL)");
+    expect(sql).toContain("reserved_usd = 0");
+    expect(sql).toContain("THEN 'expired'");
+    expect(sql).toContain("SUM(reserved_usd)");
+    expect(sql).toContain("days.charged_usd - totals.refund");
+    expect(query).toHaveBeenCalledOnce();
+  });
+  it("runs at startup and every minute, and stops on shutdown", async () => {
+    vi.useFakeTimers();
+    try {
+      const stop = startFreeReservationSweep();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(query).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(query).toHaveBeenCalledTimes(2);
+      stop();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(query).toHaveBeenCalledTimes(2);
+    } finally { vi.useRealTimers(); }
+  });
+  it("counts late real costs after expiry without refunding the reservation twice", async () => {
+    query.mockImplementation(async (sql: string) => ({
+      rows: sql.startsWith("UPDATE free_ai_calls") ? [{ day: "2026-10-23", reserved_usd: 0 }] : [],
+    }));
+    await settleFreeCall("expired-call", "success", { cost: 0.002 }, {});
+    expect(query.mock.calls.find(c => c[0].startsWith("UPDATE free_spend_days"))?.[1]).toEqual(["2026-10-23", 0.002]);
   });
 });

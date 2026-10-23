@@ -14,8 +14,20 @@ Reasoning models need enough room to return visible answers; verify both real ex
 
 **How to apply:** Test actual expert and Moderator answers, structured stances, and the Verdict table, not just accepted requests, truncation notices or mocked responses. Free reasoning effort must never default to max.
 
+Free expert replies use low reasoning with reasoning excluded from visible output and a 3,000-token allowance; auxiliary calls retain medium reasoning.
+
+**Why:** The user requested this after a live Haiku expert call used all 2,000 output tokens on reasoning with no visible answer.
+
+**How to apply:** Preserve the distinction between expert and auxiliary calls, including streaming and fallback attempts; do not change Pro reasoning or token allowances.
+
 Failed Free calls must release their spend-cap reservations, including 402, 429 and timeouts. Keep actual reported charges in the ledger. Successful calls with unknown cost retain a conservative reservation.
 
 **Why:** The user explicitly changed the policy so failed calls do not consume the shared daily capacity. Concurrent successful calls must still respect the spending ceiling.
 
 **How to apply:** Reserve atomically before dispatch; settle or release once. Release failed reservations without claiming the provider reported zero cost, retain unknown successful-call reservations across restarts, and fail closed if the ledger is unavailable.
+
+Unsettled reservations older than 10 minutes expire automatically. Late provider settlements must still record actual charges without refunding twice.
+
+**Why:** The user requested automatic stale-reservation cleanup so interrupted calls cannot permanently consume daily capacity.
+
+**How to apply:** Preserve successful unknown-cost reservations and real reported charges; cleanup must be idempotent across workers and refund the original Pacific spend day.

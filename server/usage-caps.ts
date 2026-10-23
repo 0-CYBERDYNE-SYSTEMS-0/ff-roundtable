@@ -26,7 +26,7 @@ export const HOUSE_KEY_PAID_MODEL_ALLOWLIST = [
 /** Output cap for ordinary expert replies (documents keep maxOutputTokens()). */
 export const EXPERT_REPLY_MAX_TOKENS = 1200;
 /** Free expert cap, including reasoning tokens. */
-export const FREE_EXPERT_MAX_TOKENS = 2000;
+export const FREE_EXPERT_MAX_TOKENS = 3000;
 /** Moderator synthesis, insights and other structured/auxiliary calls on Free. */
 export const FREE_CAPABLE_MODEL = FREE_MODERATOR_MODEL;
 /** Paid trial routes; distinct from Pro's unchanged zero-price budget fallback. */
