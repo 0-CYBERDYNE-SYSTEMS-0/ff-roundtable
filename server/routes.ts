@@ -1289,8 +1289,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
       
       const { name } = req.body;
-      const model = tier === "free" && typeof req.body.model === "string" && !isPaidModel(req.body.model)
-        ? BUDGET_FALLBACK_MODEL : req.body.model;
+      // Keep the expert's own pick. Free users with no model get the default
+      // free route; a paid pick is still rejected below (TIER_LIMIT_MODEL).
+      const requestedModel = typeof req.body.model === "string" ? req.body.model.trim() : "";
+      const model = tier === "free" && !requestedModel ? BUDGET_FALLBACK_MODEL : requestedModel || req.body.model;
       const role = typeof req.body.role === "string" ? req.body.role.trim().slice(0, 60) : "";
       if (!role || /^(user|farmer)$/i.test(role)) {
         return res.status(400).json({ message: "Choose a valid expert role." });

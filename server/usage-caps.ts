@@ -26,17 +26,25 @@ export const EXPERT_REPLY_MAX_TOKENS = 1200;
 export const FREE_EXPERT_MAX_TOKENS = 3000;
 /** Most capable zero-price model: Moderator synthesis, insights and other structured/auxiliary calls on Free. */
 export const FREE_CAPABLE_MODEL = "google/gemma-4-31b-it:free";
-/** Fallback order tried after the expert's own :free pick errors or returns no visible text. */
+/**
+ * Fallback order tried after the expert's own :free pick errors (429/5xx/timeout)
+ * or returns no visible text. Live dev run 2026-10-22: flint often spends its
+ * whole budget on hidden reasoning and liquid timed out, so they go last.
+ */
 export const FREE_RETRY_CHAIN = [
-  "recursive/flint-v1.0:free",
-  "liquid/lfm-2.5-2.6b:free",
   "google/gemma-4-31b-it:free",
+  "nvidia/nemotron-3-super-120b-a12b:free",
+  "google/gemma-4-26b-a4b-it:free",
+  "liquid/lfm-2.5-2.6b:free",
+  "recursive/flint-v1.0:free",
 ];
-/** Selected model first, then the retry chain (deduped). */
+/** Max models tried per Free call (selected + fallbacks). */
+export const FREE_MAX_ATTEMPTS = 4;
+/** Selected model first (capable calls lead with FREE_CAPABLE_MODEL), then the retry chain, deduped and capped. */
 export function freeModelChain(selected: string, capable = false): string[] {
-  const first = capable ? FREE_CAPABLE_MODEL : selected.endsWith(":free") ? selected : FREE_RETRY_CHAIN[0];
-  const rest = capable ? [selected.endsWith(":free") ? selected : "", ...FREE_RETRY_CHAIN].filter(Boolean) : FREE_RETRY_CHAIN;
-  return Array.from(new Set([first, ...rest]));
+  const pick = selected.endsWith(":free") ? selected : "";
+  const head = capable ? [FREE_CAPABLE_MODEL, pick] : [pick];
+  return Array.from(new Set([...head, ...FREE_RETRY_CHAIN].filter(Boolean))).slice(0, FREE_MAX_ATTEMPTS);
 }
 
 /** Catalog-verified zero-price ids; first two also answered live on 2026-10-23. */

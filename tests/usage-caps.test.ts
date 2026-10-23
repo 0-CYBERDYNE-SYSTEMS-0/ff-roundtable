@@ -105,7 +105,7 @@ describe("usage caps: OpenRouterProvider enforcement", () => {
     mockFetch.mockResolvedValue(okResponse(0));
     await new OpenRouterProvider(null).chat(messages, "openai/o1-pro", 1, true);
     const body = JSON.parse(mockFetch.mock.calls[0][1].body);
-    expect(body.model).toBe(BUDGET_FALLBACK_MODEL);
+    expect(body.model).toBe(FREE_RETRY_CHAIN[0]);
     expect(body.max_tokens).toBe(FREE_EXPERT_MAX_TOKENS);
     expect(body.provider.max_price).toEqual({ prompt: 0, completion: 0 });
     expect(body.reasoning).toEqual({ effort: "low", exclude: true });
@@ -189,7 +189,7 @@ describe("usage caps: OpenRouterProvider enforcement", () => {
       .mockResolvedValueOnce(okResponse(0));
     const result = await new OpenRouterProvider(null).chat(messages, BUDGET_FALLBACK_MODEL, 1);
     expect(result.message.content).toBe("hi");
-    expect(mockFetch.mock.calls.map(c => JSON.parse(c[1].body).model)).toEqual(FREE_RETRY_CHAIN);
+    expect(mockFetch.mock.calls.map(c => JSON.parse(c[1].body).model)).toEqual([BUDGET_FALLBACK_MODEL, ...FREE_RETRY_CHAIN.filter(m => m !== BUDGET_FALLBACK_MODEL)].slice(0, 3));
   });
 
   it("gives a friendly error when every free model comes back empty", async () => {
