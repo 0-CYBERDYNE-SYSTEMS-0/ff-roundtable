@@ -3,6 +3,8 @@ import type { AIMessage, AIModelResponse } from './ai';
 import { randomUUID } from 'crypto';
 
 const AI_REQUEST_TIMEOUT_MS = 120_000;
+/** Free calls fail over to the next $0 model instead of waiting two minutes. */
+const FREE_REQUEST_TIMEOUT_MS = 60_000;
 const OUTPUT_LIMIT_ERROR = "Response reached the output limit. Please ask for a shorter response or split the request into smaller parts.";
 export const FREE_TRUNCATION_NOTE = "\n\n[Response shortened at the Free output limit. Ask a shorter follow-up to continue.]";
 // Output ceiling per call. 1024 truncated File Creator SOPs mid-document;
@@ -326,6 +328,8 @@ export class OpenRouterProvider implements AIProvider {
         if (!canRetry()) throw error;
         lastError = error;
         console.warn(`[FREE_RETRY] ${freeModel} failed (${(error as Error)?.message ?? error}); trying next free model`);
+        // Shared free pools rate-limit in bursts; a short pause helps the next pick.
+        if ((error as any)?.statusCode === 429 && process.env.NODE_ENV !== "test") await new Promise(r => setTimeout(r, 1500));
       }
     }
     console.error("[FREE_RETRY] all free models failed", (lastError as Error)?.message);
@@ -390,7 +394,7 @@ export class OpenRouterProvider implements AIProvider {
             : {}),
           ...(webSearch && !attempt.freeHouseKey ? { plugins: [{ id: "web", max_results: 3 }] } : {}),
         }),
-        signal: AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS),
+        signal: AbortSignal.timeout(attempt.freeHouseKey ? FREE_REQUEST_TIMEOUT_MS : AI_REQUEST_TIMEOUT_MS),
       });
 
       if (!response.ok) {
@@ -488,7 +492,7 @@ export class OpenRouterProvider implements AIProvider {
           ...(webSearch && !attempt.freeHouseKey ? { plugins: [{ id: "web", max_results: 3 }] } : {}),
           stream: true,
         }),
-        signal: AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS),
+        signal: AbortSignal.timeout(attempt.freeHouseKey ? FREE_REQUEST_TIMEOUT_MS : AI_REQUEST_TIMEOUT_MS),
       });
 
       if (!response.ok) {
