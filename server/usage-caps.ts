@@ -33,13 +33,12 @@ export const FREE_CAPABLE_MODEL = "google/gemma-4-31b-it:free";
  */
 export const FREE_RETRY_CHAIN = [
   "google/gemma-4-31b-it:free",
-  "nvidia/nemotron-3-super-120b-a12b:free",
   "google/gemma-4-26b-a4b-it:free",
-  "liquid/lfm-2.5-2.6b:free",
   "recursive/flint-v1.0:free",
+  "liquid/lfm-2.5-2.6b:free",
 ];
-/** Max models tried per Free call (selected + fallbacks). */
-export const FREE_MAX_ATTEMPTS = 4;
+/** Max models tried per Free call (selected + fallbacks); always reaches flint/liquid. */
+export const FREE_MAX_ATTEMPTS = 5;
 /** Selected model first (capable calls lead with FREE_CAPABLE_MODEL), then the retry chain, deduped and capped. */
 export function freeModelChain(selected: string, capable = false): string[] {
   const pick = selected.endsWith(":free") ? selected : "";

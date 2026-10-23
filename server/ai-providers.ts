@@ -4,7 +4,7 @@ import { randomUUID } from 'crypto';
 
 const AI_REQUEST_TIMEOUT_MS = 120_000;
 /** Free calls fail over to the next $0 model instead of waiting two minutes. */
-const FREE_REQUEST_TIMEOUT_MS = 60_000;
+const FREE_REQUEST_TIMEOUT_MS = 45_000;
 const OUTPUT_LIMIT_ERROR = "Response reached the output limit. Please ask for a shorter response or split the request into smaller parts.";
 export const FREE_TRUNCATION_NOTE = "\n\n[Response shortened at the Free output limit. Ask a shorter follow-up to continue.]";
 // Output ceiling per call. 1024 truncated File Creator SOPs mid-document;
