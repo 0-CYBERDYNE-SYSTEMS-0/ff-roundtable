@@ -86,6 +86,7 @@ import {
   nextExpertNeedingMinimumTurns,
 } from "../server/orchestrator";
 import type { Expert, Message, MessageStance } from "../shared/schema";
+import { UsageCapError } from "../server/usage-caps";
 
 type ModeratorIdentity = Omit<Expert, "id"> & { id: number | null };
 
@@ -758,6 +759,27 @@ describe("Orchestrator", () => {
       expect(turnNames()).toEqual(["Alice", "Bob"]);
       expect(getConversationState(conversationId)!.failedExpertIds).toContain(1);
       expect(mockGenerateClosingSynthesis.mock.calls.filter(([cid]) => cid === conversationId)).toHaveLength(1);
+    });
+
+    it("pauses immediately at the Free global capacity cap without retrying or closing", async () => {
+      const conversationId = nextConvId();
+      const { waitForTurns, rejectNextTurn, addUserMessageToHistory } = setupGatedConversation(conversationId);
+      mockGetConversation.mockResolvedValue({ turnBudget: 3 });
+      mockGetModeratorNextSpeakerSuggestion.mockResolvedValue("RoundRobin");
+      const firstMessage = createMockMessage(1, "capacity-bound topic");
+      addUserMessageToHistory(firstMessage);
+      await processMessageTurnBased(userId, conversationId, firstMessage, broadcastFn);
+      await waitForTurns(1);
+      await rejectNextTurn(new UsageCapError({
+        status: 429, code: "free_capacity_used",
+        message: "Free capacity is used up for today, try tomorrow or upgrade to Pro",
+        upgradeUrl: "/subscribe",
+      }));
+      await waitForMode(conversationId, "paused");
+      expect(broadcastFn).toHaveBeenCalledWith(conversationId, expect.objectContaining({
+        type: "error", code: "free_capacity_used", interactionMode: "paused", upgradeUrl: "/subscribe",
+      }));
+      expect(mockGenerateClosingSynthesis.mock.calls.filter(([cid]) => cid === conversationId)).toHaveLength(0);
     });
 
     it("pauses after a provider failure without closing until the chain resumes", async () => {

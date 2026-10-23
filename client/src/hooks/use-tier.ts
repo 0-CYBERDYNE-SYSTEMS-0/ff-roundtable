@@ -46,7 +46,9 @@ export function friendlyLimitError(error: unknown): { message: string; isLimit: 
   const messages: Record<string, string> = {
     free_minute_limit: "You’ve reached the Free plan’s 10 messages per minute. Take a short pause, then try again.",
     free_daily_limit: "You’ve used today’s 25 Free messages. Your daily allowance resets at midnight UTC.",
-    message_limit_reached: "You’ve used the 100 messages included each month on Free. Upgrade to Pro to keep the roundtable going.",
+    roundtable_limit_reached: "You’ve used the 30 roundtables included each month on Free. Upgrade to Pro to keep the roundtable going.",
+    free_capacity_used: "Free capacity is used up for today, try tomorrow or upgrade to Pro",
+    message_limit_reached: "You’ve reached your monthly plan limit.",
     TIER_LIMIT_EXPERTS: "The Free plan includes up to 3 experts in a roundtable. Upgrade to Pro for up to 8.",
     TIER_LIMIT_MODEL: "That model is available on Pro. Choose a free model or upgrade your plan.",
   };

@@ -1,4 +1,5 @@
 import { storage } from "./storage";
+import { UsageCapError } from "./usage-caps";
 import { getExpertResponse, getExpertResponseStream, generateInsights, getModeratorNextSpeakerSuggestion, generateClosingSynthesis, resolveAuxModel, isRetryableExpertProviderFailure } from "./ai";
 import type { DeliverableGenerationRequest, ModeratorContext } from "./ai";
 import { isNearDuplicate, shouldStopForRedundancy, REDUNDANCY_STOP_SIMILARITY_THRESHOLD } from "./text-similarity";
@@ -1234,11 +1235,17 @@ export class InteractionOrchestrator {
         });
         broadcast(this.conversationId, { type: "concluding", conversationId: this.conversationId });
 
+        let capacityPaused = false;
         try {
             const pendingWrites = Array.from(openQuestionWritePromises.get(this.conversationId) ?? []);
             if (pendingWrites.length > 0) await Promise.allSettled(pendingWrites);
             await generateClosingSynthesis(this.conversationId, moderator, broadcast, stanceLedger);
         } catch (error) {
+            if (error instanceof UsageCapError && error.denial.code === "free_capacity_used") {
+                capacityPaused = true;
+                this.handleScheduledFailure(error);
+                return;
+            }
             console.error(`Orchestrator: Could not generate closing handoff for ${this.conversationId}:`, error);
             broadcast(this.conversationId, {
                 type: "notice",
@@ -1247,7 +1254,7 @@ export class InteractionOrchestrator {
             });
         } finally {
             updateConversationState(this.conversationId, {
-                handoffStatus: "delivered",
+                handoffStatus: capacityPaused ? "not_started" : "delivered",
                 turnInFlight: false,
             });
         }
@@ -1338,6 +1345,16 @@ export class InteractionOrchestrator {
 
     /** Recover queued farmer input after a turn chain or scheduled callback fails. */
     handleScheduledFailure(error: unknown): void {
+        if (error instanceof UsageCapError && error.denial.code === "free_capacity_used") {
+            this.pause();
+            const state = updateConversationState(this.conversationId, {
+                turnInFlight: false, turnChainScheduled: false,
+            });
+            state?.broadcastFn(this.conversationId, {
+                type: "error", ...error.denial, interactionMode: "paused",
+            });
+            return;
+        }
         console.error(`Orchestrator: Turn chain failed for ${this.conversationId}:`, error);
         const existingState = getConversationState(this.conversationId);
         if (!existingState) return;
@@ -2190,6 +2207,10 @@ export class InteractionOrchestrator {
                     postTurnState.sequenceExpertContents.push(storedExpertMessage.content);
                 }
             } catch (error) {
+                if (error instanceof UsageCapError && error.denial.code === "free_capacity_used") {
+                    this.handleScheduledFailure(error);
+                    return;
+                }
                 if (providerCallStarted && !providerCallResolved) {
                     expertResponseFailed = true;
                     await this.recordExpertFailure(currentExpert);

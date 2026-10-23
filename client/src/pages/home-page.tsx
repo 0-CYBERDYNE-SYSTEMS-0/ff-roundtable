@@ -1090,6 +1090,7 @@ export default function HomePage() {
             // Pipeline-level failure: tell the user and unstick the UI,
             // otherwise isProcessing stays true and skeletons never clear.
             console.error("WebSocket: Pipeline error:", parsedData.message);
+            if (parsedData.code === "free_capacity_used") setLimitNotice(parsedData.message);
             toast({
               title: "Something went wrong",
               description: parsedData.message || "The experts couldn't process that. Please try again.",
@@ -1099,7 +1100,7 @@ export default function HomePage() {
             setTypingExpertIds(new Set());
             setUpNextExpertId(null);
             setIsProcessing(false);
-            setInteractionMode("idle");
+            setInteractionMode(parsedData.code === "free_capacity_used" ? "paused" : "idle");
             setIsConcluding(false);
             break;
 

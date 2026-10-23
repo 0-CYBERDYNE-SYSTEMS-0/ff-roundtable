@@ -2,14 +2,20 @@
 name: Free trial product
 description: Final user decision on Free access and cost controls, overriding earlier paid-only instructions.
 ---
-People can sign up and try the app without paying. New accounts enter on Free, using the existing limits of 3 experts, 100 messages per month, and free models. Public pricing offers Free, Pro ($10/month or $96/year), and Enterprise.
+People can sign up and try the app without paying. The user's later decision replaces the old 100-message/$0-model trial: Free includes 3 experts and 30 roundtables per month using the approved low-cost paid lineup. Public pricing offers Free, Pro ($10/month or $96/year), and Enterprise.
 
-**Why:** The user explicitly called this the FINAL DECISION, overriding the earlier paid-only correction.
+**Why:** The user explicitly approved the low-cost paid Free lineup, 30 roundtables/month, and a shared $5/day cap on 2026-10-23, overriding the earlier $0-model limits.
 
-**How to apply:** Preserve the visual redesign and existing Pro checkout, Stripe webhook, login/session, and billing behavior. Protect house-key costs and abuse boundaries for Free users rather than reinstating a paid paywall. An existing complimentary internal Pro account should remain unchanged.
+**How to apply:** Preserve existing Pro, checkout, Stripe webhook, login/session, and billing behavior. Keep per-day, per-minute and per-IP abuse limits. Free experts use Claude Haiku 5.5, MiniMax M3.1 Flash and GLM 5.3 Flash; moderator/synthesis/insights use MiMo V2.6 Pro with Haiku fallback. Other paid models are blocked. The global Free USD budget resets at midnight America/Los_Angeles, not UTC. An existing complimentary internal Pro account should remain unchanged.
 
-Free reasoning models need enough room to return visible answers; do not reduce their output budget purely as a cost safeguard when provider pricing is already constrained to zero.
+Reasoning models need enough room to return visible answers; verify both real expert output and a substantive closing Moderator answer.
 
-**Why:** Live tests exhausted output budgets during hidden reasoning, sometimes returning no visible content even with low reasoning effort and a higher Moderator allowance. Other catalog-listed Free models returned upstream rate-limit/provider errors. Catalog presence and a successful short expert answer do not prove the Moderator will work.
+**Why:** Live tests exhausted output budgets during hidden reasoning, sometimes returning no visible content. Catalog presence and a successful short expert answer do not prove the Moderator will work.
 
-**How to apply:** When tuning Free routing or output limits, verify both an actual expert answer and a substantive closing Moderator answer at zero reported cost, not just catalog presence, accepted messages, truncation notices, or mocked provider responses.
+**How to apply:** Test actual expert and Moderator answers, structured stances, and the Verdict table, not just accepted requests, truncation notices or mocked responses. Free reasoning effort must never default to max.
+
+Unknown provider costs must retain a conservative durable reservation, rather than refunding capacity on an unverified assumption.
+
+**Why:** Concurrent Free calls and timeouts can otherwise bypass the shared spending ceiling; missing telemetry is not proof of zero cost.
+
+**How to apply:** Reserve atomically before dispatch, settle reported actual costs once, retain unknown charges across restarts, and fail closed if the cost ledger is unavailable.

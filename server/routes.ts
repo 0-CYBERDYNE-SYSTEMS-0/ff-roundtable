@@ -28,6 +28,9 @@ import { format } from 'date-fns';
 import { TIERS, getTierLimits, isPaidModel } from './tiers';
 import { getModelCatalog } from "./model-catalog";
 import { checkMessageAllowance, currentUsagePeriod, isHouseKeyAllowedModel, HOUSE_KEY_PAID_MODEL_ALLOWLIST, UsageCapError, monthlyAiBudgetUsd, BUDGET_EXHAUSTED_NOTICE, BUDGET_FALLBACK_MODEL, FREE_MAX_TURNS, FREE_MAX_MESSAGE_CHARS, FREE_MESSAGES_PER_MINUTE, FREE_MESSAGES_PER_DAY } from './usage-caps';
+import { FREE_EXPERT_MODELS, isFreeExpertModel } from "@shared/free-plan";
+import { assertFreeCapacity } from "./free-capacity";
+import { randomUUID } from "crypto";
 
 class OpenQuestionAnswerConflictError extends Error {}
 const rememberedAnswerTurnStarts = new Map<number, number>();
@@ -690,10 +693,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
     return { questionId: question.id };
   }
 
-  async function assertMessageAllowance(userId: number): Promise<void> {
+  async function assertMessageAllowance(userId: number, roundtableKey?: string): Promise<void> {
     const user = await storage.getUser(userId);
     if ((user?.tier || "free") === "free") {
-      const denial = await storage.consumeFreeMessageAllowance(userId);
+      await assertFreeCapacity();
+      const denial = await storage.consumeFreeMessageAllowance(userId, new Date(), roundtableKey);
       if (denial) throw new UsageCapError(denial);
       return;
     }
@@ -811,7 +815,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     if (((await storage.getUser(userId))?.tier || "free") === "free" && content.length > FREE_MAX_MESSAGE_CHARS) {
       throw new UsageCapError({ status: 429, code: "free_message_too_long", message: `Please keep Free questions under ${FREE_MAX_MESSAGE_CHARS} characters, or upgrade to Pro.`, upgradeUrl: "/subscribe" });
     }
-    await assertMessageAllowance(userId);
+    await assertMessageAllowance(userId, `conversation:${conversationId}`);
 
     const conversationExperts = await storage.getConversationExperts(conversationId);
     const userMessage: InsertMessage = {
@@ -1134,11 +1138,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const user = await storage.getUser(req.user!.id);
       const tier = user?.tier || "free";
       const limits = getTierLimits(tier);
-      const usage = await storage.getMonthlyUsage(req.user!.id, currentUsagePeriod());
+      const usage = await storage.getMonthlyUsage(req.user!.id, tier === "free" ? `free:roundtables:${currentUsagePeriod()}` : currentUsagePeriod());
       res.json({
         tier,
         limits,
-        usage: { period: currentUsagePeriod(), messages: usage.messageCount },
+        usage: { period: currentUsagePeriod(), messages: usage.messageCount, unit: tier === "free" ? "roundtables" : "messages" },
         freeLimits: { perMinute: FREE_MESSAGES_PER_MINUTE, perDay: FREE_MESSAGES_PER_DAY, maxTurns: FREE_MAX_TURNS },
         // True once house-key paid calls are falling back to free models.
         aiBudgetExhausted: tier === "pro" && !user?.openRouterKey && usage.aiSpendUsd >= monthlyAiBudgetUsd(tier),
@@ -1289,10 +1293,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
       
       const { name } = req.body;
-      // Keep the expert's own pick. Free users with no model get the default
-      // free route; a paid pick is still rejected below (TIER_LIMIT_MODEL).
+      // Keep allowlisted Free picks; distribute missing picks across the lineup.
       const requestedModel = typeof req.body.model === "string" ? req.body.model.trim() : "";
-      const model = tier === "free" && !requestedModel ? BUDGET_FALLBACK_MODEL : requestedModel || req.body.model;
+      const model = tier === "free" && !requestedModel ? FREE_EXPERT_MODELS[existingExperts.filter(e => e.role !== "Moderator").length % 3] : requestedModel || req.body.model;
       const role = typeof req.body.role === "string" ? req.body.role.trim().slice(0, 60) : "";
       if (!role || /^(user|farmer)$/i.test(role)) {
         return res.status(400).json({ message: "Choose a valid expert role." });
@@ -1306,11 +1309,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // Built-in roles always get the bundled avatar; custom roles get the custom badge.
       const avatarUrl = catalogAvatar(role);
 
-      // Check paid model restriction for free tier
-      if (tier === "free" && isPaidModel(model)) {
+      // Only the three included expert models may be selected on Free.
+      if (tier === "free" && !isFreeExpertModel(model)) {
         return res.status(403).json({
           code: "TIER_LIMIT_MODEL",
-          message: "Upgrade to Pro for paid models",
+          message: "Choose Claude Haiku 5.5, MiniMax M3.1 Flash or GLM 5.3 Flash on Free, or upgrade to Pro.",
         });
       }
       if (await houseKeyModelDenied(req.user!.id, tier, model)) {
@@ -1415,16 +1418,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (model !== undefined) updates.model = model;
       if (customInstructions !== undefined) updates.customInstructions = customInstructions;
 
-      // Enforce the same paid-model restriction as expert creation — without
-      // this, free-tier users can upgrade any expert's model via the settings
-      // modal and bypass the gate entirely.
+      // Enforce the same exact Free allowlist on settings updates.
       if (model !== undefined) {
         const user = await storage.getUser(req.user!.id);
         const tier = user?.tier || "free";
-        if (tier === "free" && isPaidModel(model)) {
+        if (tier === "free" && !isFreeExpertModel(model)) {
           return res.status(403).json({
             code: "TIER_LIMIT_MODEL",
-            message: "Upgrade to Pro for paid models",
+            message: "Choose an included Free expert model or upgrade to Pro.",
           });
         }
         if (await houseKeyModelDenied(req.user!.id, tier, model)) {
@@ -1599,7 +1600,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         if (((await storage.getUser(req.user!.id))?.tier || "free") === "free" && requestedTopic.length > FREE_MAX_MESSAGE_CHARS) {
           throw new UsageCapError({ status: 429, code: "free_message_too_long", message: `Please keep Free questions under ${FREE_MAX_MESSAGE_CHARS} characters, or upgrade to Pro.`, upgradeUrl: "/subscribe" });
         }
-        await assertMessageAllowance(req.user!.id);
+        await assertMessageAllowance(req.user!.id, `restart:${conversationId}:${randomUUID()}`);
         const conversationExperts = await storage.getConversationExperts(conversationId);
         restartMessage = await storage.createMessage({
           conversationId,
@@ -1615,7 +1616,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         // Bare `/new` repeats the latest farmer topic as an explicit fresh
         // run without adding an empty/command-only message to the transcript.
         if (((await storage.getUser(req.user!.id))?.tier || "free") === "free") {
-          await assertMessageAllowance(req.user!.id);
+          await assertMessageAllowance(req.user!.id, `restart:${conversationId}:${randomUUID()}`);
         }
         restartMessage = previousUserMessage!;
       }

@@ -27,6 +27,7 @@ vi.mock("../server/storage", () => ({
     getConversation: mockGetConversation,
     getConversationExperts: mockGetConversationExperts,
     getUserApiKey: mockGetUserApiKey,
+    getUser: vi.fn().mockResolvedValue({ id: 42, tier: "pro" }),
   },
 }));
 

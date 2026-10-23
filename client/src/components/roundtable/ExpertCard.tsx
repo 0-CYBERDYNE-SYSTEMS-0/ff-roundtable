@@ -175,6 +175,7 @@ export default function ExpertCard({
             >
               <PopoverTrigger asChild>
                 <Button 
+                  type="button"
                   variant="outline" 
                   size="sm" 
                   className="h-8 px-3 w-[220px] justify-between"

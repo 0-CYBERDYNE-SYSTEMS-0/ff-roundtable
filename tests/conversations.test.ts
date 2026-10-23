@@ -18,6 +18,12 @@
  */
 
 import { describe, it, expect, beforeAll, beforeEach, vi } from "vitest";
+vi.mock("../server/free-capacity", () => ({
+  assertFreeCapacity: vi.fn().mockResolvedValue(undefined),
+  reserveFreeCall: vi.fn().mockResolvedValue(undefined),
+  settleFreeCall: vi.fn().mockResolvedValue(undefined),
+  FREE_CALL_RESERVATION_USD: 0.1,
+}));
 import request from "supertest";
 import express from "express";
 import type { Express } from "express";
@@ -155,7 +161,7 @@ async function addExpert(
 ) {
   const res = await agent
     .post(`/api/protected/conversations/${conversationId}/experts`)
-    .send(expert);
+    .send({ ...expert, model: expert.model.endsWith(":free") ? "anthropic/claude-haiku-5.5" : expert.model });
   expect(res.status).toBe(201);
   return res.body;
 }

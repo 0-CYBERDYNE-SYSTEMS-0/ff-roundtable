@@ -20,8 +20,8 @@ export default function UsageMeter() {
   }
   const percentage = Math.min(100, Math.round((used / limit) * 100));
   return (
-    <div className="flex items-center gap-2.5 rounded-full border border-white/20 bg-black/10 px-2.5 py-1.5 text-white sm:px-3" aria-label={`${used} of ${limit} monthly messages used`}>
-      <span className="whitespace-nowrap text-[11px] font-medium sm:text-xs">{used} / {limit}<span className="hidden sm:inline"> messages</span></span>
+    <div className="flex items-center gap-2.5 rounded-full border border-white/20 bg-black/10 px-2.5 py-1.5 text-white sm:px-3" aria-label={`${used} of ${limit} monthly ${isFree ? "roundtables" : "messages"} used`}>
+      <span className="whitespace-nowrap text-[11px] font-medium sm:text-xs">{used} / {limit}<span className="hidden sm:inline"> {isFree ? "roundtables" : "messages"}</span></span>
       <span className="hidden h-1.5 w-12 overflow-hidden rounded-full bg-white/25 sm:block" aria-hidden="true">
         <span className="block h-full rounded-full bg-[#e7c17d] transition-[width] duration-300" style={{ width: `${percentage}%` }} />
       </span>

@@ -16,6 +16,7 @@ import { EXPERT_CATALOG, avatarDataUri, CUSTOM_EXPERT_EMOJI } from "@shared/expe
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { withRequestedOpenRouterModels, HOUSE_KEY_MODEL_IDS, isModelAvailableForPlan } from "@/lib/openrouter-model-options";
+import { FREE_EXPERT_MODELS } from "@shared/free-plan";
 import {
   Dialog,
   DialogContent,
@@ -200,7 +201,8 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
 
   // Resolve the model for a newly added expert. Falls back to tier-appropriate
   // preferences so free users don't get a paid model the server will reject.
-  const resolveDefaultModel = (expertIndex: number): string => {
+  const resolveDefaultModel = (expertIndex: number, selectionIndex = localSelectedExperts.length): string => {
+    if (userTier === "free") return FREE_EXPERT_MODELS[(selectedExperts.filter(e => e.role !== "Moderator").length + selectionIndex) % 3];
     const preferredPaid = [
       ...HOUSE_KEY_MODEL_IDS,
       "anthropic/claude-3-sonnet",
@@ -296,7 +298,7 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
 
       newSelectedExperts.push({
         expertIndex,
-        model: resolveDefaultModel(expertIndex)
+        model: resolveDefaultModel(expertIndex, newSelectedExperts.length)
       });
     });
 

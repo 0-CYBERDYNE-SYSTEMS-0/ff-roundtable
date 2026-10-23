@@ -8,6 +8,7 @@ import { eq, desc, asc, and, isNull, isNotNull, max, sql } from "drizzle-orm";
 import ConnectPgSimple from "connect-pg-simple";
 import type { DeliverableGenerationRequest, SaveDeliverableVersionResult } from "@shared/schema";
 import { freeQuotaWindows, freeQuotaDenial, type CapDenial } from "./usage-caps";
+import { freeRoundtableStarts } from "@shared/schema";
 
 const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || "";
 
@@ -44,7 +45,7 @@ export interface IStorage {
   // Pricing caps (server/usage-caps.ts). period = "YYYY-MM" UTC.
   getMonthlyUsage(userId: number, period: string): Promise<{ messageCount: number; aiSpendUsd: number }>;
   incrementMonthlyMessages(userId: number, period: string): Promise<number>;
-  consumeFreeMessageAllowance(userId: number, now?: Date): Promise<CapDenial | null>;
+  consumeFreeMessageAllowance(userId: number, now?: Date, roundtableKey?: string): Promise<CapDenial | null>;
   addMonthlyAiSpend(userId: number, period: string, usd: number): Promise<void>;
   
   // Conversation operations
@@ -242,9 +243,11 @@ export class MemStorage implements IStorage {
   }
 
   private usage = new Map<string, { messageCount: number; aiSpendUsd: number }>();
+  private freeStarts = new Set<string>();
 
-  async consumeFreeMessageAllowance(userId: number, now = new Date()): Promise<CapDenial | null> {
-    const windows = freeQuotaWindows(now);
+  async consumeFreeMessageAllowance(userId: number, now = new Date(), roundtableKey?: string): Promise<CapDenial | null> {
+    const key = roundtableKey ? `${userId}:${freeQuotaWindows(now)[0].period}:${roundtableKey}` : undefined;
+    const windows = freeQuotaWindows(now).filter((_, i) => i !== 0 || !key || !this.freeStarts.has(key));
     for (const window of windows) {
       if ((this.usage.get(`${userId}:${window.period}`)?.messageCount ?? 0) >= window.limit) {
         return freeQuotaDenial(window);
@@ -257,6 +260,7 @@ export class MemStorage implements IStorage {
       const row = this.usage.get(key) ?? { messageCount: 0, aiSpendUsd: 0 };
       this.usage.set(key, { ...row, messageCount: row.messageCount + 1 });
     }
+    if (key) this.freeStarts.add(key);
     return null;
   }
 
@@ -798,15 +802,20 @@ export class PostgresStorage implements IStorage {
     return result[0];
   }
 
-  async consumeFreeMessageAllowance(userId: number, now = new Date()): Promise<CapDenial | null> {
+  async consumeFreeMessageAllowance(userId: number, now = new Date(), roundtableKey?: string): Promise<CapDenial | null> {
     return this.db.transaction(async (tx) => {
-      const windows = freeQuotaWindows(now);
+      let windows = freeQuotaWindows(now);
       const monthly = { userId, period: windows[0].period, messageCount: 0, aiSpendUsd: 0 };
       await tx.insert(usageMonthly).values(monthly).onConflictDoNothing();
       // One durable lock per user/month serializes admissions across processes
       // and conversations. Minute/day counters survive restarts and autoscale.
       await tx.select().from(usageMonthly)
         .where(and(eq(usageMonthly.userId, userId), eq(usageMonthly.period, monthly.period))).for("update");
+      const key = roundtableKey ? `${userId}:${monthly.period}:${roundtableKey}` : undefined;
+      if (key) {
+        const [existing] = await tx.select().from(freeRoundtableStarts).where(eq(freeRoundtableStarts.key, key));
+        if (existing) windows = windows.slice(1);
+      }
       for (const window of windows) {
         const [row] = await tx.select().from(usageMonthly)
           .where(and(eq(usageMonthly.userId, userId), eq(usageMonthly.period, window.period)));
@@ -820,6 +829,7 @@ export class PostgresStorage implements IStorage {
             set: { messageCount: sql`${usageMonthly.messageCount} + 1` },
           });
       }
+      if (key) await tx.insert(freeRoundtableStarts).values({ key, userId, period: monthly.period }).onConflictDoNothing();
       return null;
     });
   }

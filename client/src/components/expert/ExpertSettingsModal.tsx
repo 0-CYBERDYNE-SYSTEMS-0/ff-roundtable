@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Save, X } from "lucide-react";
-import { REQUESTED_OPENROUTER_MODELS, isModelAvailableForPlan } from "@/lib/openrouter-model-options";
+import { REQUESTED_OPENROUTER_MODELS, FREE_MODEL_OPTIONS, isModelAvailableForPlan } from "@/lib/openrouter-model-options";
 
 // Keep in sync with isPaidModel() in server/tiers.ts
 const isFreeModelId = (id: string) => id.endsWith(":free");
@@ -27,6 +27,7 @@ const MODEL_OPTIONS = [
   { id: "deepseek/deepseek-v3.2:free", label: "DeepSeek V3.2 (Free)" },
   { id: "meta-llama/llama-3.1-70b-instruct:free", label: "Llama 3.1 70B (Free)" },
   ...REQUESTED_OPENROUTER_MODELS.map(({ id, name }) => ({ id, label: name })),
+  ...FREE_MODEL_OPTIONS.filter(m => !REQUESTED_OPENROUTER_MODELS.some(p => p.id === m.id)).map(({ id, name }) => ({ id, label: name })),
 ];
 
 interface ExpertSettingsModalProps {

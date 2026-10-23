@@ -12,7 +12,7 @@ describe("durable Free message admission", () => {
     const results = await Promise.all(Array.from({ length: 20 }, () => store.consumeFreeMessageAllowance(10, now)));
     expect(results.filter(result => result === null)).toHaveLength(10);
     expect(results.filter(result => result?.code === "free_minute_limit")).toHaveLength(10);
-    expect((await store.getMonthlyUsage(10, "2026-10")).messageCount).toBe(10);
+    expect((await store.getMonthlyUsage(10, "free:roundtables:2026-10")).messageCount).toBe(10);
   });
 
   it("enforces 25 daily messages across minute windows and resets at UTC midnight", async () => {
@@ -24,16 +24,16 @@ describe("durable Free message admission", () => {
       status: 429, code: "free_daily_limit", upgradeUrl: "/subscribe",
     });
     expect(await store.consumeFreeMessageAllowance(10, new Date("2026-10-23T00:00:00Z"))).toBeNull();
-    expect((await store.getMonthlyUsage(10, "2026-10")).messageCount).toBe(26);
+    expect((await store.getMonthlyUsage(10, "free:roundtables:2026-10")).messageCount).toBe(26);
   });
 
-  it("enforces 100 across days and resets each month", async () => {
+  it("enforces 30 roundtables across days and resets each month", async () => {
     const store = new MemStorage();
-    for (let i = 0; i < 100; i++) {
+    for (let i = 0; i < 30; i++) {
       const now = new Date(Date.UTC(2026, 9, 1 + Math.floor(i / 25), 10, i % 25));
       expect(await store.consumeFreeMessageAllowance(10, now)).toBeNull();
     }
-    expect(await store.consumeFreeMessageAllowance(10, new Date("2026-10-10T10:00:00Z"))).toMatchObject({ code: "message_limit_reached" });
+    expect(await store.consumeFreeMessageAllowance(10, new Date("2026-10-10T10:00:00Z"))).toMatchObject({ code: "roundtable_limit_reached" });
     expect(await store.consumeFreeMessageAllowance(10, new Date("2026-11-01T00:00:00Z"))).toBeNull();
     expect(await store.consumeFreeMessageAllowance(11, new Date("2026-10-10T10:00:00Z"))).toBeNull();
   });
@@ -48,7 +48,7 @@ describe("durable Free message admission", () => {
 
   it("uses distinct UTC month/day/minute keys", () => {
     expect(freeQuotaWindows(new Date("2026-11-01T00:00:00Z")).map(window => window.period)).toEqual([
-      "2026-11", "free:day:2026-11-01", "free:minute:2026-11-01T00:00",
+      "free:roundtables:2026-11", "free:day:2026-11-01", "free:minute:2026-11-01T00:00",
     ]);
   });
 });

@@ -1,7 +1,9 @@
+import { FREE_ROUNDTABLES_PER_MONTH } from "@shared/free-plan";
+
 export const TIERS = {
   free: {
     maxExperts: 3,
-    maxMessages: 100,
+    maxMessages: FREE_ROUNDTABLES_PER_MONTH,
     allowPaidModels: false,
     name: "Free",
   },

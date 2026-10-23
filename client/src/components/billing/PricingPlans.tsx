@@ -9,7 +9,7 @@ import { ArrowRight, CheckCircle2, Loader2 } from "lucide-react";
 type BillingInterval = "month" | "year";
 const ENTERPRISE_CONTACT_URL = import.meta.env.VITE_ENTERPRISE_CONTACT_URL as string | undefined;
 const PLAN_FEATURES = {
-  free: ["Up to 3 farm experts in a roundtable", "100 messages each month", "25 messages per day · 10 per minute", "Free AI models"],
+  free: ["Up to 3 farm experts in a roundtable", "30 roundtables each month", "25 messages per day · 10 per minute", "Included Claude Haiku, MiniMax and GLM models", "Shared daily capacity; resets at midnight Pacific"],
   pro: [
     "Up to 8 specialized AI agricultural experts",
     "1,000 messages a month",

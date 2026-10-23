@@ -16,6 +16,12 @@ const { store } = vi.hoisted(() => ({
   },
 }));
 vi.mock("../server/storage", () => ({ storage: store }));
+vi.mock("../server/free-capacity", () => ({
+  reserveFreeCall: vi.fn().mockResolvedValue(undefined),
+  settleFreeCall: vi.fn().mockResolvedValue(undefined),
+  FREE_CALL_RESERVATION_USD: 0.1,
+}));
+import { FREE_EXPERT_MODELS } from "../shared/free-plan";
 
 import {
   checkMessageAllowance,
@@ -29,7 +35,6 @@ import {
   EXPERT_REPLY_MAX_TOKENS,
   FREE_EXPERT_MAX_TOKENS,
   FREE_CAPABLE_MODEL,
-  FREE_RETRY_CHAIN,
 } from "../server/usage-caps";
 import { OpenRouterProvider, FREE_MODEL_FALLBACKS, FREE_TRUNCATION_NOTE } from "../server/ai-providers";
 import { REQUESTED_OPENROUTER_MODELS } from "../client/src/lib/openrouter-model-options";
@@ -47,10 +52,10 @@ describe("usage caps: pure rules", () => {
     expect(currentUsagePeriod(new Date("2026-11-01T00:00:00Z"))).toBe("2026-11");
   });
 
-  it("allows Free 100 and Pro 1000 messages a month, then denies with upgrade hints", () => {
-    expect(checkMessageAllowance("free", 99)).toBeNull();
-    expect(checkMessageAllowance("free", 100)).toMatchObject({ status: 402, code: "message_limit_reached", upgradeUrl: "/subscribe" });
-    expect(checkMessageAllowance(null, 100)?.status).toBe(402);
+  it("allows Free 30 roundtables and Pro 1000 messages a month", () => {
+    expect(checkMessageAllowance("free", 29)).toBeNull();
+    expect(checkMessageAllowance("free", 30)).toMatchObject({ status: 402, code: "roundtable_limit_reached", upgradeUrl: "/subscribe" });
+    expect(checkMessageAllowance(null, 30)?.status).toBe(402);
     expect(checkMessageAllowance("pro", 999)).toBeNull();
     expect(checkMessageAllowance("pro", 1000)).toMatchObject({ status: 429, code: "message_limit_reached" });
   });
@@ -74,8 +79,8 @@ describe("usage caps: pure rules", () => {
   });
 
   it("gates house-key calls by tier, allowlist and budget", () => {
-    expect(checkHouseKeyCall("free", "nvidia/nemotron-3-super-120b-a12b:free", 0)).toBeNull();
-    expect(checkHouseKeyCall("free", "z-ai/glm-5.3-flash", 0)?.code).toBe("paid_model_requires_pro");
+    expect(checkHouseKeyCall("free", "nvidia/nemotron-3-super-120b-a12b:free", 0)?.code).toBe("model_not_in_free_allowlist");
+    expect(checkHouseKeyCall("free", "z-ai/glm-5.3-flash", 0)).toBeNull();
     expect(checkHouseKeyCall("pro", "z-ai/glm-5.3-flash", 3.99)).toBeNull();
     expect(checkHouseKeyCall("pro", "openai/o1-pro", 0)?.code).toBe("model_requires_own_key");
     expect(checkHouseKeyCall("pro", "z-ai/glm-5.3-flash", 4)?.code).toBe("ai_budget_exhausted");
@@ -88,6 +93,7 @@ describe("usage caps: OpenRouterProvider enforcement", () => {
   const messages = [{ role: "user" as const, content: "hello" }];
   beforeEach(() => {
     vi.clearAllMocks();
+    mockFetch.mockReset();
     process.env.OPENROUTER_API_KEY = "sk-or-house";
     store.getUserApiKey.mockResolvedValue(null);
     store.getMonthlyUsage.mockResolvedValue({ messageCount: 0, aiSpendUsd: 0 });
@@ -105,10 +111,11 @@ describe("usage caps: OpenRouterProvider enforcement", () => {
     mockFetch.mockResolvedValue(okResponse(0));
     await new OpenRouterProvider(null).chat(messages, "openai/o1-pro", 1, true);
     const body = JSON.parse(mockFetch.mock.calls[0][1].body);
-    expect(body.model).toBe(FREE_RETRY_CHAIN[0]);
+    expect(body.model).toBe(FREE_EXPERT_MODELS[0]);
     expect(body.max_tokens).toBe(FREE_EXPERT_MAX_TOKENS);
-    expect(body.provider.max_price).toEqual({ prompt: 0, completion: 0 });
-    expect(body.reasoning).toEqual({ effort: "low", exclude: true });
+    expect(body.provider.max_price.prompt).toBeGreaterThan(0);
+    expect(body.provider.max_price.completion).toBeGreaterThan(0);
+    expect(body.reasoning).toEqual({ effort: "medium", exclude: true });
     expect(body.plugins).toBeUndefined();
   });
 
@@ -131,20 +138,20 @@ describe("usage caps: OpenRouterProvider enforcement", () => {
     mockFetch.mockResolvedValue(okResponse(0));
     await new OpenRouterProvider(null).chat(messages, "paid/model", 1, false, { purpose: "auxiliary" });
     const body = JSON.parse(mockFetch.mock.calls[0][1].body);
-    expect(body.max_tokens).toBe(6000);
+    expect(body.max_tokens).toBe(4000);
     expect(body.model).toBe(FREE_CAPABLE_MODEL);
     expect(body.models).toBeUndefined();
-    expect(body.provider.max_price).toEqual({ prompt: 0, completion: 0 });
+    expect(body.provider.max_price.completion).toBeGreaterThan(0);
   });
 
   it("honors the expert's own :free pick on Free", async () => {
     store.getUser.mockResolvedValue({ id: 1, tier: "free" });
     mockFetch.mockResolvedValue(okResponse(0));
-    await new OpenRouterProvider(null).chat(messages, "nvidia/nemotron-3-super-120b-a12b:free", 1, false, { maxTokens: EXPERT_REPLY_MAX_TOKENS });
+    await new OpenRouterProvider(null).chat(messages, FREE_EXPERT_MODELS[1], 1, false, { maxTokens: EXPERT_REPLY_MAX_TOKENS });
     const body = JSON.parse(mockFetch.mock.calls[0][1].body);
-    expect(body.model).toBe("nvidia/nemotron-3-super-120b-a12b:free");
+    expect(body.model).toBe(FREE_EXPERT_MODELS[1]);
     expect(body.max_tokens).toBe(FREE_EXPERT_MAX_TOKENS);
-    expect(body.provider.max_price).toEqual({ prompt: 0, completion: 0 });
+    expect(body.provider.max_price.completion).toBeGreaterThan(0);
   });
 
   it("routes the Moderator (capable) to the strongest free model", async () => {
@@ -159,10 +166,10 @@ describe("usage caps: OpenRouterProvider enforcement", () => {
     mockFetch
       .mockResolvedValueOnce(new Response("busy", { status: 503 }))
       .mockResolvedValueOnce(okResponse(0));
-    const res = await new OpenRouterProvider(null).chat(messages, "google/gemma-4-26b-a4b-it:free", 1);
+    const res = await new OpenRouterProvider(null).chat(messages, FREE_EXPERT_MODELS[1], 1);
     expect(res.message.content).toBe("hi");
-    expect(JSON.parse(mockFetch.mock.calls[0][1].body).model).toBe("google/gemma-4-26b-a4b-it:free");
-    expect(JSON.parse(mockFetch.mock.calls[1][1].body).model).toBe(FREE_RETRY_CHAIN[0]);
+    expect(JSON.parse(mockFetch.mock.calls[0][1].body).model).toBe(FREE_EXPERT_MODELS[1]);
+    expect(JSON.parse(mockFetch.mock.calls[1][1].body).model).toBe(FREE_EXPERT_MODELS[2]);
   });
 
   it("returns Free partial text with a truncation note instead of throwing", async () => {
@@ -182,14 +189,10 @@ describe("usage caps: OpenRouterProvider enforcement", () => {
         choices: [{ finish_reason: "length", message: { role: "assistant", content: null } }],
         usage: { cost: 0 },
       })))
-      .mockResolvedValueOnce(new Response(JSON.stringify({
-        choices: [{ finish_reason: "stop", message: { role: "assistant", content: "   " } }],
-        usage: { cost: 0 },
-      })))
       .mockResolvedValueOnce(okResponse(0));
     const result = await new OpenRouterProvider(null).chat(messages, BUDGET_FALLBACK_MODEL, 1);
     expect(result.message.content).toBe("hi");
-    expect(mockFetch.mock.calls.map(c => JSON.parse(c[1].body).model)).toEqual([BUDGET_FALLBACK_MODEL, ...FREE_RETRY_CHAIN.filter(m => m !== BUDGET_FALLBACK_MODEL)].slice(0, 3));
+    expect(mockFetch.mock.calls.map(c => JSON.parse(c[1].body).model)).toEqual([FREE_EXPERT_MODELS[0], FREE_EXPERT_MODELS[2]]);
   });
 
   it("gives a friendly error when every free model comes back empty", async () => {
@@ -244,7 +247,7 @@ describe("usage caps: OpenRouterProvider enforcement", () => {
     store.getUserApiKey.mockResolvedValue("sk-or-user");
     mockFetch.mockResolvedValue(okResponse(5));
     await new OpenRouterProvider(null).chat(messages, "openai/o1-pro", 1);
-    expect(store.getUser).not.toHaveBeenCalled();
+    expect(store.getUser).toHaveBeenCalledWith(1);
     await new Promise(r => setTimeout(r, 10));
     expect(store.addMonthlyAiSpend).not.toHaveBeenCalled();
   });

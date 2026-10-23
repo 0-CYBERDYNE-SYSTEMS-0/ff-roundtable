@@ -1,10 +1,12 @@
 import { checkHouseKeyCall, currentUsagePeriod, UsageCapError, BUDGET_FALLBACK_MODEL, FREE_MODEL_FALLBACKS, FREE_EXPERT_MAX_TOKENS, freeModelChain } from "./usage-caps";
 import type { AIMessage, AIModelResponse } from './ai';
 import { randomUUID } from 'crypto';
+import { reserveFreeCall, settleFreeCall, FREE_CALL_RESERVATION_USD } from "./free-capacity";
+import { FREE_ALLOWED_MODELS } from "@shared/free-plan";
 
 const AI_REQUEST_TIMEOUT_MS = 120_000;
-/** Free calls fail over to the next $0 model instead of waiting two minutes. */
-const FREE_REQUEST_TIMEOUT_MS = 45_000;
+/** Reasoning models need room to finish before trying the included fallback. */
+const FREE_REQUEST_TIMEOUT_MS = 120_000;
 const OUTPUT_LIMIT_ERROR = "Response reached the output limit. Please ask for a shorter response or split the request into smaller parts.";
 export const FREE_TRUNCATION_NOTE = "\n\n[Response shortened at the Free output limit. Ask a shorter follow-up to continue.]";
 // Output ceiling per call. 1024 truncated File Creator SOPs mid-document;
@@ -53,6 +55,8 @@ type OpenRouterAttempt = {
   usagePeriod?: string;
   providerPriceLimit?: { prompt: number; completion: number };
   freeHouseKey?: boolean;
+  freeReservation?: boolean;
+  estimatedInputTokens?: number;
   settled: boolean;
 };
 
@@ -69,6 +73,9 @@ export type OpenRouterUsageSnapshot = {
     elapsedMs: number;
     result: "success" | "failed";
     costUsd: number | null;
+    promptTokens?: number;
+    completionTokens?: number;
+    reasoningTokens?: number;
     errorCode?: number;
   }>;
 };
@@ -163,6 +170,7 @@ export class OpenRouterProvider implements AIProvider {
       reservedUsd: 0,
       maxTokens,
       settled: false,
+      estimatedInputTokens: Math.max(1, Buffer.byteLength(JSON.stringify(messages), "utf8") * 2 + 1024),
     };
     if (this.spendCapUsd === null) return attempt;
 
@@ -180,15 +188,18 @@ export class OpenRouterProvider implements AIProvider {
     return attempt;
   }
 
-  private settleAttempt(
+  private async settleAttempt(
     attempt: OpenRouterAttempt,
     result: "success" | "failed",
     usage?: unknown,
     metadata: { generationId?: string; responseModel?: string; provider?: string; errorCode?: number } = {},
-  ): void {
+  ): Promise<void> {
     if (attempt.settled) return;
     attempt.settled = true;
     const costUsd = numericCost(usage);
+    if (attempt.freeReservation) {
+      await settleFreeCall(attempt.id, result, usage, metadata);
+    }
     if (attempt.houseKeyUserId && attempt.usagePeriod && costUsd) {
       const { houseKeyUserId, usagePeriod } = attempt;
       void import("./storage")
@@ -212,6 +223,9 @@ export class OpenRouterProvider implements AIProvider {
       elapsedMs: Date.now() - attempt.startedAt,
       result,
       costUsd: costUsd ?? null,
+      promptTokens: (usage as any)?.prompt_tokens,
+      completionTokens: (usage as any)?.completion_tokens,
+      reasoningTokens: (usage as any)?.completion_tokens_details?.reasoning_tokens,
       ...(metadata.errorCode === undefined ? {} : { errorCode: metadata.errorCode }),
     };
     this.attempts.push(record);
@@ -239,26 +253,36 @@ export class OpenRouterProvider implements AIProvider {
   /**
    * Resolve the key for a call and enforce pricing caps on house-key calls
    * (server/usage-caps.ts): tier gate, Pro model allowlist, monthly budget.
-   * BYOK calls are never capped and never counted.
+   * Paid-plan BYOK calls are never capped or counted; Free uses house models.
    */
   private async authorizeCall(attempt: OpenRouterAttempt, model: string, userId?: number, options: ChatOptions = {}): Promise<{ key: string; model: string }> {
     const { key, byok } = await this.resolveKey(userId);
-    if (byok || !userId) return { key, model };
+    if (!userId) return { key, model };
     const { storage } = await import("./storage");
     const user = await storage.getUser(userId);
     if ((user?.tier || "free") === "free") {
-      // A zero-price fallback route protects the house key even for auxiliary
-      // prompts, old experts, forged model names, or provider fallback.
-      // Honor the expert's own :free pick; anything else (paid, forged, empty)
-      // is replaced. The zero max_price below enforces $0 either way.
+      const freeKey = process.env.OPENROUTER_API_KEY;
+      if (!freeKey) throw new Error("OpenRouter API key not provided");
       const freeModel = options.freeModelOverride
         ?? freeModelChain(model, options.capable || options.purpose === "auxiliary")[0];
+      if (!FREE_ALLOWED_MODELS.includes(freeModel)) {
+        throw new UsageCapError({ status: 402, code: "model_not_in_free_allowlist", message: "Choose an included Free model.", upgradeUrl: "/subscribe" });
+      }
       attempt.model = freeModel;
-      attempt.maxTokens = options.purpose === "auxiliary" || options.capable ? 6000 : FREE_EXPERT_MAX_TOKENS;
-      attempt.providerPriceLimit = { prompt: 0, completion: 0 };
+      attempt.maxTokens = options.purpose === "auxiliary" || options.capable ? 4000 : FREE_EXPERT_MAX_TOKENS;
+      // Reserve before dispatch, bounding both input and output price. Never
+      // let a provider's route change bypass the daily USD ceiling.
+      const ceiling = FREE_CALL_RESERVATION_USD * 0.45 * 1_000_000;
+      attempt.providerPriceLimit = {
+        prompt: ceiling / attempt.estimatedInputTokens!,
+        completion: ceiling / attempt.maxTokens,
+      };
+      await reserveFreeCall(attempt.id, userId, freeModel);
+      attempt.freeReservation = true;
       attempt.freeHouseKey = true;
-      return { key, model: freeModel };
+      return { key: freeKey, model: freeModel };
     }
+    if (byok) return { key, model };
     const period = currentUsagePeriod();
     const usage = await storage.getMonthlyUsage(userId, period);
     const denial = checkHouseKeyCall(user?.tier, model, usage.aiSpendUsd);
@@ -301,8 +325,6 @@ export class OpenRouterProvider implements AIProvider {
   /** True when this call will run on the house key as a Free user (so the Free retry loop applies). */
   private async isFreeHouseCall(userId?: number): Promise<boolean> {
     if (!userId) return false;
-    const { byok } = await this.resolveKey(userId);
-    if (byok) return false;
     const { storage } = await import("./storage");
     const user = await storage.getUser(userId);
     return (user?.tier || "free") === "free";
@@ -388,7 +410,7 @@ export class OpenRouterProvider implements AIProvider {
           ...this.requestBudget(attempt),
           usage: { include: true },
           ...(attempt.freeHouseKey
-            ? { reasoning: { effort: "low", exclude: true } }
+            ? { reasoning: { effort: "medium", exclude: true } }
             : process.env.OPENROUTER_REASONING_EFFORT
             ? { reasoning: { effort: process.env.OPENROUTER_REASONING_EFFORT } }
             : {}),
@@ -425,7 +447,7 @@ export class OpenRouterProvider implements AIProvider {
         data.choices[0].message.content = (typeof partial === "string" ? partial : "").trimEnd() + FREE_TRUNCATION_NOTE;
       }
 
-      this.settleAttempt(attempt, "success", usage, { generationId, responseModel, provider });
+      await this.settleAttempt(attempt, "success", usage, { generationId, responseModel, provider });
       return {
         message: data.choices[0].message,
         ...(Array.isArray(data.citations) ? { citations: data.citations.filter((value: unknown): value is string => typeof value === "string") } : {}),
@@ -436,7 +458,7 @@ export class OpenRouterProvider implements AIProvider {
       };
     } catch (error: unknown) {
       const status = typeof (error as any)?.statusCode === "number" ? (error as any).statusCode : undefined;
-      this.settleAttempt(attempt, "failed", requestStarted ? usage : { cost: 0 }, {
+      await this.settleAttempt(attempt, "failed", requestStarted ? usage : { cost: 0 }, {
         generationId,
         responseModel,
         provider,
@@ -485,7 +507,7 @@ export class OpenRouterProvider implements AIProvider {
           ...this.requestBudget(attempt),
           usage: { include: true },
           ...(attempt.freeHouseKey
-            ? { reasoning: { effort: "low", exclude: true } }
+            ? { reasoning: { effort: "medium", exclude: true } }
             : process.env.OPENROUTER_REASONING_EFFORT
             ? { reasoning: { effort: process.env.OPENROUTER_REASONING_EFFORT } }
             : {}),
@@ -566,7 +588,7 @@ export class OpenRouterProvider implements AIProvider {
         onToken(FREE_TRUNCATION_NOTE);
       }
 
-      this.settleAttempt(attempt, "success", usage, { generationId, responseModel, provider });
+      await this.settleAttempt(attempt, "success", usage, { generationId, responseModel, provider });
 
       return {
         message: { role: "assistant", content: fullContent },
@@ -577,7 +599,7 @@ export class OpenRouterProvider implements AIProvider {
       };
     } catch (error: unknown) {
       const status = typeof (error as any)?.statusCode === "number" ? (error as any).statusCode : undefined;
-      this.settleAttempt(attempt, "failed", requestStarted ? usage : { cost: 0 }, {
+      await this.settleAttempt(attempt, "failed", requestStarted ? usage : { cost: 0 }, {
         generationId,
         responseModel,
         provider,

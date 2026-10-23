@@ -24,6 +24,12 @@ import { afterEach, describe, it, expect, beforeAll, beforeEach, vi } from "vite
 import request from "supertest";
 import express from "express";
 import type { Express } from "express";
+vi.mock("../server/free-capacity", () => ({
+  assertFreeCapacity: vi.fn().mockResolvedValue(undefined),
+  reserveFreeCall: vi.fn().mockResolvedValue(undefined),
+  settleFreeCall: vi.fn().mockResolvedValue(undefined),
+  FREE_CALL_RESERVATION_USD: 0.1,
+}));
 
 // ── Force MemStorage BEFORE any server imports ──
 process.env.DATABASE_URL = "";
@@ -1021,8 +1027,8 @@ describe("PUT /api/protected/conversations/:id (charter + title)", () => {
     const denied = await agent.post(`/api/protected/conversations/${convo.id}/messages`).send({ content: "The eleventh message" });
     expect(denied.status).toBe(429);
     expect(denied.body).toMatchObject({ code: "free_minute_limit", upgradeUrl: "/subscribe" });
-    expect((await storage.getMonthlyUsage(user!.id, new Date().toISOString().slice(0, 7))).messageCount).toBe(10);
-    expect((await agent.get("/api/user/tier")).body.usage.messages).toBe(10);
+    expect((await storage.getMonthlyUsage(user!.id, `free:roundtables:${new Date().toISOString().slice(0, 7)}`)).messageCount).toBe(1);
+    expect((await agent.get("/api/user/tier")).body.usage.messages).toBe(1);
   });
 
   it("sets the charter and returns the updated conversation", async () => {

@@ -12,7 +12,8 @@ import fs from "fs";
 import axios from "axios";
 import { randomBytes } from "crypto";
 import { getProvider, type ChatOptions } from "./ai-providers";
-import { BUDGET_FALLBACK_MODEL, EXPERT_REPLY_MAX_TOKENS } from "./usage-caps";
+import { BUDGET_FALLBACK_MODEL, EXPERT_REPLY_MAX_TOKENS, UsageCapError } from "./usage-caps";
+import { ensureFreeVerdictTable } from "./free-synthesis";
 import { findCatalogExpert } from "@shared/expert-catalog";
 import { DELIVERABLE_PLACEHOLDER, pendingDeliverableFor, pendingDeliverableByMessage } from "./pending-deliverables";
 export { commitPendingDeliverable, discardPendingDeliverable } from "./pending-deliverables";
@@ -1334,6 +1335,7 @@ export async function getExpertResponseStream(
   } catch (error) {
     console.error(`[STREAM] Response generation failed for expert ${expert.name}`);
     streamFilter?.finish();
+    if (error instanceof UsageCapError && error.denial.code === "free_capacity_used") throw error;
     const errorMsg = expertResponseErrorMessage(error, expert.name, imageParts);
     onToken(errorMsg); // Show error inline
     const failedResponse: InsertMessage = {
@@ -1469,6 +1471,7 @@ export async function getExpertResponse(
 
   } catch (error) {
     console.error(`Response generation failed for expert ${expert.name}`);
+    if (error instanceof UsageCapError && error.denial.code === "free_capacity_used") throw error;
     const errorMsg = expertResponseErrorMessage(error, expert.name, imageParts);
     const failedResponse: InsertMessage = {
       conversationId: expert.conversationId,
@@ -1755,6 +1758,7 @@ export async function getModeratorNextSpeakerSuggestion(
         console.warn(`Moderator suggested an invalid role: '${rawSuggestion}'. Falling back.`);
         return null;
     } catch (error) {
+        if (error instanceof UsageCapError && error.denial.code === "free_capacity_used") throw error;
         console.error("Error preparing or querying Moderator for next speaker:", error);
         return null;
     }
@@ -1822,7 +1826,14 @@ export async function generateClosingSynthesis(
         token,
       });
     }, conversation?.userId, false, { purpose: "auxiliary" });
-    const content = response.message.content;
+    let content = response.message.content;
+    if (((await storage.getUser(conversation!.userId))?.tier || "free") === "free") {
+      const completed = ensureFreeVerdictTable(content, stanceLedger);
+      if (completed !== content) {
+        broadcastFn(conversationId, { type: "expert_stream_token", expertId: moderatorExpert.id, token: completed.slice(content.length) });
+        content = completed;
+      }
+    }
 
     const storedMessage = await storage.createMessage({
       conversationId,
@@ -1843,6 +1854,7 @@ export async function generateClosingSynthesis(
     console.log(`[SYNTHESIS] Closing synthesis stored and broadcast for conversation ${conversationId}`);
   } catch (error) {
     console.error(`[SYNTHESIS] Error generating closing synthesis for conversation ${conversationId}:`, error);
+    if (error instanceof UsageCapError && error.denial.code === "free_capacity_used") throw error;
     // Honest-error convention: persist the failure (survives refetches), keep
     // the synthesis flag, and still close the stream so the client is never
     // left with a spinner. Re-throw nothing — the orchestrator chain continues

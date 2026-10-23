@@ -60,7 +60,7 @@ describe("Tier System", () => {
     it("returns correct limits for free tier", () => {
       const limits = getTierLimits("free");
       expect(limits.maxExperts).toBe(3);
-      expect(limits.maxMessages).toBe(100);
+      expect(limits.maxMessages).toBe(30);
       expect(limits.allowPaidModels).toBe(false);
       expect(limits.name).toBe("Free");
     });
