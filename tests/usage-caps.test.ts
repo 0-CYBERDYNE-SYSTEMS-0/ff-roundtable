@@ -27,6 +27,9 @@ import {
   UsageCapError,
   BUDGET_FALLBACK_MODEL,
   EXPERT_REPLY_MAX_TOKENS,
+  FREE_EXPERT_MAX_TOKENS,
+  FREE_CAPABLE_MODEL,
+  FREE_RETRY_CHAIN,
 } from "../server/usage-caps";
 import { OpenRouterProvider, FREE_MODEL_FALLBACKS, FREE_TRUNCATION_NOTE } from "../server/ai-providers";
 import { REQUESTED_OPENROUTER_MODELS } from "../client/src/lib/openrouter-model-options";
@@ -103,7 +106,7 @@ describe("usage caps: OpenRouterProvider enforcement", () => {
     await new OpenRouterProvider(null).chat(messages, "openai/o1-pro", 1, true);
     const body = JSON.parse(mockFetch.mock.calls[0][1].body);
     expect(body.model).toBe(BUDGET_FALLBACK_MODEL);
-    expect(body.max_tokens).toBeLessThanOrEqual(1200);
+    expect(body.max_tokens).toBe(FREE_EXPERT_MAX_TOKENS);
     expect(body.provider.max_price).toEqual({ prompt: 0, completion: 0 });
     expect(body.reasoning).toEqual({ effort: "low", exclude: true });
     expect(body.plugins).toBeUndefined();
@@ -129,9 +132,37 @@ describe("usage caps: OpenRouterProvider enforcement", () => {
     await new OpenRouterProvider(null).chat(messages, "paid/model", 1, false, { purpose: "auxiliary" });
     const body = JSON.parse(mockFetch.mock.calls[0][1].body);
     expect(body.max_tokens).toBe(6000);
-    expect(body.models).toEqual(FREE_MODEL_FALLBACKS.slice(0, 3));
-    expect(body.models.every((model: string) => model.endsWith(":free"))).toBe(true);
+    expect(body.model).toBe(FREE_CAPABLE_MODEL);
+    expect(body.models).toBeUndefined();
     expect(body.provider.max_price).toEqual({ prompt: 0, completion: 0 });
+  });
+
+  it("honors the expert's own :free pick on Free", async () => {
+    store.getUser.mockResolvedValue({ id: 1, tier: "free" });
+    mockFetch.mockResolvedValue(okResponse(0));
+    await new OpenRouterProvider(null).chat(messages, "nvidia/nemotron-3-super-120b-a12b:free", 1, false, { maxTokens: EXPERT_REPLY_MAX_TOKENS });
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.model).toBe("nvidia/nemotron-3-super-120b-a12b:free");
+    expect(body.max_tokens).toBe(FREE_EXPERT_MAX_TOKENS);
+    expect(body.provider.max_price).toEqual({ prompt: 0, completion: 0 });
+  });
+
+  it("routes the Moderator (capable) to the strongest free model", async () => {
+    store.getUser.mockResolvedValue({ id: 1, tier: "free" });
+    mockFetch.mockResolvedValue(okResponse(0));
+    await new OpenRouterProvider(null).chat(messages, "recursive/flint-v1.0:free", 1, false, { capable: true });
+    expect(JSON.parse(mockFetch.mock.calls[0][1].body).model).toBe(FREE_CAPABLE_MODEL);
+  });
+
+  it("falls back to the next free model when the pick errors", async () => {
+    store.getUser.mockResolvedValue({ id: 1, tier: "free" });
+    mockFetch
+      .mockResolvedValueOnce(new Response("busy", { status: 503 }))
+      .mockResolvedValueOnce(okResponse(0));
+    const res = await new OpenRouterProvider(null).chat(messages, "google/gemma-4-26b-a4b-it:free", 1);
+    expect(res.message.content).toBe("hi");
+    expect(JSON.parse(mockFetch.mock.calls[0][1].body).model).toBe("google/gemma-4-26b-a4b-it:free");
+    expect(JSON.parse(mockFetch.mock.calls[1][1].body).model).toBe(FREE_RETRY_CHAIN[0]);
   });
 
   it("returns Free partial text with a truncation note instead of throwing", async () => {
@@ -144,14 +175,30 @@ describe("usage caps: OpenRouterProvider enforcement", () => {
     expect(result.message.content).toBe("Partial answer" + FREE_TRUNCATION_NOTE);
   });
 
-  it("keeps null-content Free truncations explicit without returning an empty message", async () => {
+  it("retries an empty / reasoning-only Free reply on the next model instead of showing a bare note", async () => {
     store.getUser.mockResolvedValue({ id: 1, tier: "free" });
-    mockFetch.mockResolvedValue(new Response(JSON.stringify({
+    mockFetch
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        choices: [{ finish_reason: "length", message: { role: "assistant", content: null } }],
+        usage: { cost: 0 },
+      })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        choices: [{ finish_reason: "stop", message: { role: "assistant", content: "   " } }],
+        usage: { cost: 0 },
+      })))
+      .mockResolvedValueOnce(okResponse(0));
+    const result = await new OpenRouterProvider(null).chat(messages, BUDGET_FALLBACK_MODEL, 1);
+    expect(result.message.content).toBe("hi");
+    expect(mockFetch.mock.calls.map(c => JSON.parse(c[1].body).model)).toEqual(FREE_RETRY_CHAIN);
+  });
+
+  it("gives a friendly error when every free model comes back empty", async () => {
+    store.getUser.mockResolvedValue({ id: 1, tier: "free" });
+    mockFetch.mockImplementation(async () => new Response(JSON.stringify({
       choices: [{ finish_reason: "length", message: { role: "assistant", content: null } }],
       usage: { cost: 0 },
     })));
-    const result = await new OpenRouterProvider(null).chat(messages, BUDGET_FALLBACK_MODEL, 1);
-    expect(result.message.content).toBe(FREE_TRUNCATION_NOTE);
+    await expect(new OpenRouterProvider(null).chat(messages, BUDGET_FALLBACK_MODEL, 1)).rejects.toThrow("free models are busy");
   });
 
   it("streams Free partial text and the same truncation note", async () => {

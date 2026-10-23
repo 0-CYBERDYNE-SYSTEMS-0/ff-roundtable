@@ -22,6 +22,22 @@ export const HOUSE_KEY_PAID_MODEL_ALLOWLIST = [
 
 /** Output cap for ordinary expert replies (documents keep maxOutputTokens()). */
 export const EXPERT_REPLY_MAX_TOKENS = 1200;
+/** Free expert replies run on $0 models, so a roomier cap costs nothing; rate limits are the abuse control. */
+export const FREE_EXPERT_MAX_TOKENS = 3000;
+/** Most capable zero-price model: Moderator synthesis, insights and other structured/auxiliary calls on Free. */
+export const FREE_CAPABLE_MODEL = "google/gemma-4-31b-it:free";
+/** Fallback order tried after the expert's own :free pick errors or returns no visible text. */
+export const FREE_RETRY_CHAIN = [
+  "recursive/flint-v1.0:free",
+  "liquid/lfm-2.5-2.6b:free",
+  "google/gemma-4-31b-it:free",
+];
+/** Selected model first, then the retry chain (deduped). */
+export function freeModelChain(selected: string, capable = false): string[] {
+  const first = capable ? FREE_CAPABLE_MODEL : selected.endsWith(":free") ? selected : FREE_RETRY_CHAIN[0];
+  const rest = capable ? [selected.endsWith(":free") ? selected : "", ...FREE_RETRY_CHAIN].filter(Boolean) : FREE_RETRY_CHAIN;
+  return Array.from(new Set([first, ...rest]));
+}
 
 /** Catalog-verified zero-price ids; first two also answered live on 2026-10-23. */
 export const FREE_MODEL_FALLBACKS = [
