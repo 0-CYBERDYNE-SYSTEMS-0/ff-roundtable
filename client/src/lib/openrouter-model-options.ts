@@ -54,3 +54,7 @@ export function isModelAvailableForPlan(id: string, tier: string | null, hasOwnK
   if (tier === "pro" && !hasOwnKey) return HOUSE_KEY_MODEL_IDS.includes(id);
   return true;
 }
+
+export function requiresUpgradeBadge(id: string): boolean {
+  return !isFreeExpertModel(id) && !id.endsWith(":free") && !id.startsWith("local/");
+}

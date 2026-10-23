@@ -14,8 +14,8 @@ Reasoning models need enough room to return visible answers; verify both real ex
 
 **How to apply:** Test actual expert and Moderator answers, structured stances, and the Verdict table, not just accepted requests, truncation notices or mocked responses. Free reasoning effort must never default to max.
 
-Unknown provider costs must retain a conservative durable reservation, rather than refunding capacity on an unverified assumption.
+Failed Free calls must release their spend-cap reservations, including 402, 429 and timeouts. Keep actual reported charges in the ledger. Successful calls with unknown cost retain a conservative reservation.
 
-**Why:** Concurrent Free calls and timeouts can otherwise bypass the shared spending ceiling; missing telemetry is not proof of zero cost.
+**Why:** The user explicitly changed the policy so failed calls do not consume the shared daily capacity. Concurrent successful calls must still respect the spending ceiling.
 
-**How to apply:** Reserve atomically before dispatch, settle reported actual costs once, retain unknown charges across restarts, and fail closed if the cost ledger is unavailable.
+**How to apply:** Reserve atomically before dispatch; settle or release once. Release failed reservations without claiming the provider reported zero cost, retain unknown successful-call reservations across restarts, and fail closed if the ledger is unavailable.

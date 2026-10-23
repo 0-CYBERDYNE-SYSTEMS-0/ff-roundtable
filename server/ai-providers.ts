@@ -96,6 +96,7 @@ function numericCost(usage: any): number | undefined {
 const UNSUPPORTED_IMAGE_ERROR = /(?:image|vision|modalit|multimodal)[\s\S]{0,100}(?:not\s+support|unsupport\w*|reject\w*|invalid|disabled|not\s+allowed|can(?:not|'t)|unable)|(?:not\s+support|unsupport\w*|reject\w*|invalid|disabled|not\s+allowed|can(?:not|'t)|unable)[\s\S]{0,100}(?:image|vision|modalit|multimodal)|support\s+(?:[\w-]+\s+){0,2}(?:image|vision|multimodal|modalit)/i;
 
 function safeOpenRouterError(status: number | undefined, providerDetail?: unknown): Error {
+  if (status === 402) console.error("[OPENROUTER_CREDITS_UNAVAILABLE] HTTP 402: provider account has insufficient credits.");
   let detail = "";
   try {
     detail = typeof providerDetail === "string" ? providerDetail : JSON.stringify(providerDetail ?? "");
@@ -109,7 +110,7 @@ function safeOpenRouterError(status: number | undefined, providerDetail?: unknow
     : status === 401
     ? "OpenRouter authentication failed. Contact the account operator."
     : status === 402
-      ? "The OpenRouter account needs credits. Contact the account operator."
+      ? "AI is temporarily unavailable because the provider account has insufficient credits. Please try again later."
       : status === 429
         ? "OpenRouter is temporarily rate-limited. Try again later."
         : `OpenRouter could not complete this request${status === undefined ? "" : ` (${status})`}. Retry or continue with available work.`;
@@ -127,6 +128,12 @@ export type ChatOptions = {
   /** Internal: exact free model for this attempt (set by the Free retry loop). */
   freeModelOverride?: string;
 };
+
+function requireAIUser(userId?: number): asserts userId is number {
+  if (!Number.isInteger(userId) || !userId || userId < 1) {
+    throw new UsageCapError({ status: 401, code: "ai_user_required", message: "Sign in before using AI." });
+  }
+}
 
 export interface AIProvider {
   chat(messages: AIMessage[], model: string, userId?: number, webSearch?: boolean, options?: ChatOptions): Promise<AIModelResponse>;
@@ -210,7 +217,7 @@ export class OpenRouterProvider implements AIProvider {
       this.reservedUsd = Math.max(0, this.reservedUsd - attempt.reservedUsd);
       // When the provider omits cost, conservatively consume the reservation
       // so later calls cannot turn missing telemetry into unbounded spend.
-      this.spentUsd += costUsd ?? attempt.reservedUsd;
+      this.spentUsd += costUsd ?? (attempt.freeReservation && result === "failed" ? 0 : attempt.reservedUsd);
     } else if (costUsd !== undefined) {
       this.spentUsd += costUsd;
     }
@@ -256,10 +263,11 @@ export class OpenRouterProvider implements AIProvider {
    * Paid-plan BYOK calls are never capped or counted; Free uses house models.
    */
   private async authorizeCall(attempt: OpenRouterAttempt, model: string, userId?: number, options: ChatOptions = {}): Promise<{ key: string; model: string }> {
+    requireAIUser(userId);
     const { key, byok } = await this.resolveKey(userId);
-    if (!userId) return { key, model };
     const { storage } = await import("./storage");
     const user = await storage.getUser(userId);
+    if (!user) throw new UsageCapError({ status: 401, code: "ai_user_required", message: "Sign in before using AI." });
     if ((user?.tier || "free") === "free") {
       const freeKey = process.env.OPENROUTER_API_KEY;
       if (!freeKey) throw new Error("OpenRouter API key not provided");
@@ -338,9 +346,11 @@ export class OpenRouterProvider implements AIProvider {
     run: (opts: ChatOptions) => Promise<AIModelResponse>,
     canRetry: () => boolean = () => true,
   ): Promise<AIModelResponse> {
+    requireAIUser(userId);
     if (options.freeModelOverride || !(await this.isFreeHouseCall(userId))) return run(options);
     const chain = freeModelChain(model, options.capable || options.purpose === "auxiliary");
     let lastError: unknown;
+    let creditError: unknown;
     for (const freeModel of chain) {
       try {
         return await run({ ...options, freeModelOverride: freeModel });
@@ -349,12 +359,14 @@ export class OpenRouterProvider implements AIProvider {
         // Once visible tokens reached the farmer, a retry would duplicate text.
         if (!canRetry()) throw error;
         lastError = error;
+        if ((error as any)?.statusCode === 402) creditError = error;
         console.warn(`[FREE_RETRY] ${freeModel} failed (${(error as Error)?.message ?? error}); trying next free model`);
         // Shared free pools rate-limit in bursts; a short pause helps the next pick.
         if ((error as any)?.statusCode === 429 && process.env.NODE_ENV !== "test") await new Promise(r => setTimeout(r, 1500));
       }
     }
     console.error("[FREE_RETRY] all free models failed", (lastError as Error)?.message);
+    if (creditError) throw creditError;
     throw new Error(FREE_ALL_FAILED);
   }
 
@@ -638,6 +650,7 @@ export class LocalOpenAIProvider implements AIProvider {
   }
 
   async chat(messages: AIMessage[], model: string, _userId?: number): Promise<AIModelResponse> {
+    requireAIUser(_userId);
     const baseUrl = this.getBaseUrl();
     const actualModel = this.getActualModel(model);
 
@@ -699,6 +712,7 @@ export class LocalOpenAIProvider implements AIProvider {
     onToken: (token: string) => void,
     _userId?: number
   ): Promise<AIModelResponse> {
+    requireAIUser(_userId);
     const baseUrl = this.getBaseUrl();
     const actualModel = this.getActualModel(model);
 

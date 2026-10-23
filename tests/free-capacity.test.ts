@@ -1,10 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 const { query, release } = vi.hoisted(() => ({ query: vi.fn(), release: vi.fn() }));
-vi.mock("pg", () => ({
-  Pool: class {
-    query = query;
-    async connect() { return { query, release }; }
-  },
+vi.mock("../server/database-pool", () => ({
+  getDatabasePool: () => ({ query, connect: async () => ({ query, release }) }),
 }));
 import { assertFreeCapacity, reserveFreeCall, settleFreeCall } from "../server/free-capacity";
 
@@ -51,12 +48,27 @@ describe("durable global Free spend ledger", () => {
     query.mockImplementation(async (sql: string) => ({
       rows: sql.startsWith("UPDATE free_ai_calls") ? [{ day: "2026-10-23", reserved_usd: 0.1 }] : [], rowCount: 1,
     }));
-    await settleFreeCall("attempt-4", "failed", undefined, {});
+    await settleFreeCall("attempt-4", "success", undefined, {});
     expect(query.mock.calls.some(c => c[0].startsWith("UPDATE free_spend_days"))).toBe(false);
   });
   it("does not settle twice when the call is already finalized", async () => {
     await settleFreeCall("attempt-5", "success", { cost: 0.001 }, {});
     expect(query.mock.calls.some(c => c[0].startsWith("UPDATE free_spend_days"))).toBe(false);
+  });
+  it.each(["402", "429", "timeout", "other error"])("releases unknown-cost failures (%s) and marks the reservation released", async () => {
+    query.mockImplementation(async (sql: string) => ({
+      rows: sql.startsWith("UPDATE free_ai_calls") ? [{ day: "2026-10-23", reserved_usd: 0.1 }] : [], rowCount: 1,
+    }));
+    await settleFreeCall("failed-attempt", "failed", undefined, {});
+    expect(query.mock.calls.find(c => c[0].startsWith("UPDATE free_spend_days"))?.[1]).toEqual(["2026-10-23", -0.1]);
+    expect(query.mock.calls.some(c => c[0] === "UPDATE free_ai_calls SET reserved_usd=0 WHERE id=$1")).toBe(true);
+  });
+  it("releases the reservation but still accounts for a real provider-reported charge on failure", async () => {
+    query.mockImplementation(async (sql: string) => ({
+      rows: sql.startsWith("UPDATE free_ai_calls") ? [{ day: "2026-10-23", reserved_usd: 0.1 }] : [], rowCount: 1,
+    }));
+    await settleFreeCall("charged-failure", "failed", { cost: 0.002 }, {});
+    expect(query.mock.calls.find(c => c[0].startsWith("UPDATE free_spend_days"))?.[1][1]).toBeCloseTo(-0.098);
   });
   it("preflights the capacity before roundtable quota is consumed", async () => {
     query.mockResolvedValue({ rows: [{ charged_usd: 5 }], rowCount: 1 });

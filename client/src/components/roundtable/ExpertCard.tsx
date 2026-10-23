@@ -12,6 +12,7 @@ import {
 } from "@/components/ui/popover";
 import { Separator } from "@/components/ui/separator";
 import { resolveExpertAvatar } from "@/lib/expert-avatar";
+import { requiresUpgradeBadge } from "@/lib/openrouter-model-options";
 
 // --- Define type for OpenRouter Model (Matching ExpertSelector) ---
 interface OpenRouterModel {
@@ -266,7 +267,7 @@ export default function ExpertCard({
                                   <div className="flex min-w-0 flex-col gap-0.5">
                                     <div className="flex items-center gap-2">
                                       <ModelBadge modelId={model.id} modelName={model.name} size="sm" showId={false} />
-                                      {userTier === "free" && !model.id.endsWith(":free") && !model.id.startsWith("local/") && (
+                                      {userTier === "free" && requiresUpgradeBadge(model.id) && (
                                         <Badge variant="secondary" className="text-[10px] px-1 py-0">PRO</Badge>
                                       )}
                                     </div>

@@ -105,6 +105,24 @@ describe("usage caps: OpenRouterProvider enforcement", () => {
     await expect(new OpenRouterProvider(null).chat(messages, "openai/o1-pro", 1)).rejects.toBeInstanceOf(UsageCapError);
     expect(mockFetch).not.toHaveBeenCalled();
   });
+  it.each([undefined, 0, -1, NaN])("denies a missing/invalid user (%s) before any network or reservation", async userId => {
+    await expect(new OpenRouterProvider(null).chat(messages, "arbitrary/expensive-model", userId))
+      .rejects.toMatchObject({ denial: { code: "ai_user_required" } });
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+  it("denies a deleted user before any provider request", async () => {
+    store.getUser.mockResolvedValue(undefined);
+    await expect(new OpenRouterProvider(null).chat(messages, "arbitrary/model", 999))
+      .rejects.toMatchObject({ denial: { code: "ai_user_required" } });
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+  it("keeps an honest credit-unavailable error even if a later fallback is rate limited", async () => {
+    store.getUser.mockResolvedValue({ id: 1, tier: "free" });
+    mockFetch.mockResolvedValueOnce(new Response("credits", { status: 402 }))
+      .mockResolvedValueOnce(new Response("busy", { status: 429 }));
+    await expect(new OpenRouterProvider(null).chat(messages, FREE_EXPERT_MODELS[0], 1))
+      .rejects.toMatchObject({ statusCode: 402, message: expect.stringContaining("temporarily unavailable") });
+  });
 
   it("pins Free house-key calls to a zero-price model, short low-reasoning replies and no paid web plugin", async () => {
     store.getUser.mockResolvedValue({ id: 1, tier: "free" });

@@ -13,7 +13,8 @@ import axios from "axios";
 import { randomBytes } from "crypto";
 import { getProvider, type ChatOptions } from "./ai-providers";
 import { BUDGET_FALLBACK_MODEL, EXPERT_REPLY_MAX_TOKENS, UsageCapError } from "./usage-caps";
-import { ensureFreeVerdictTable } from "./free-synthesis";
+import { ensureFreeVerdictTable, hasFreeVerdictTable } from "./free-synthesis";
+import { FREE_EXPERT_MODELS } from "@shared/free-plan";
 import { findCatalogExpert } from "@shared/expert-catalog";
 import { DELIVERABLE_PLACEHOLDER, pendingDeliverableFor, pendingDeliverableByMessage } from "./pending-deliverables";
 export { commitPendingDeliverable, discardPendingDeliverable } from "./pending-deliverables";
@@ -888,7 +889,10 @@ function appendRetrievedCitationUrls(content: string, citations?: string[]): { c
 }
 
 // Function to call Perplexity API for web search
-export async function callPerplexityAPI(query: string, contextMessages: AIMessage[] = []): Promise<AIModelResponse> {
+export async function callPerplexityAPI(query: string, contextMessages: AIMessage[] = [], userId?: number): Promise<AIModelResponse> {
+  if (!Number.isInteger(userId) || !userId || userId < 1) {
+    throw new UsageCapError({ status: 401, code: "ai_user_required", message: "Sign in before using AI." });
+  }
   try {
     const perplexityKey = process.env.PERPLEXITY_API_KEY;
     if (!perplexityKey) {
@@ -1238,7 +1242,7 @@ export async function getExpertResponseStream(
     if (expert.role === "Research Analyst") {
       // Use OpenRouter streaming for Research Analyst (Perplexity optional)
       if (process.env.PERPLEXITY_API_KEY && process.env.PERPLEXITY_API_KEY.length > 10) {
-        response = await callPerplexityAPI(referenceMessageContent, messages);
+        response = await callPerplexityAPI(referenceMessageContent, messages, conversation?.userId);
         stance = stripExpertStance(response, expert.role);
         onToken(response.message.content);
       } else {
@@ -1420,7 +1424,7 @@ export async function getExpertResponse(
     
     if (expert.role === "Research Analyst") {
       if (process.env.PERPLEXITY_API_KEY) {
-        response = await callPerplexityAPI(referenceMessageContent, messages);
+        response = await callPerplexityAPI(referenceMessageContent, messages, conversation?.userId);
       } else {
         response = await callOpenRouterAPI(messages, expert.model, conversation?.userId, paidWebPluginEnabled(), { maxTokens: EXPERT_REPLY_MAX_TOKENS });
       }
@@ -1606,9 +1610,11 @@ export async function generateInsights(conversationId: number, broadcastFn?: (co
       { role: "user", content: insightPrompt }
     ];
     let response = await callOpenRouterAPI(insightMessages, auxModel, conversation?.userId, false, { purpose: "auxiliary" });
+    const isFree = ((await storage.getUser(conversation!.userId))?.tier || "free") === "free";
     type InsightJson = { title?: unknown; points?: unknown };
     const valid = (d: InsightJson | null): d is { title: string; points: string[] } =>
-      Boolean(d && typeof d.title === "string" && d.title.trim() && Array.isArray(d.points) && d.points.length > 0);
+      Boolean(d && typeof d.title === "string" && d.title.trim() && Array.isArray(d.points) &&
+        d.points.length > 0 && d.points.every(p => typeof p === "string" && p.trim()));
     let parsedInsights = parseModelJson<InsightJson>(response.message.content);
     if (!valid(parsedInsights)) {
       // One retry with the bad output echoed back and a stricter instruction.
@@ -1616,13 +1622,16 @@ export async function generateInsights(conversationId: number, broadcastFn?: (co
         ...insightMessages,
         { role: "assistant", content: String(response.message.content ?? "").slice(0, 4000) },
         { role: "user", content: 'That was not valid JSON. Reply again with ONLY {"title": string, "points": [string, ...]} and nothing else.' },
-      ], auxModel, conversation?.userId, false, { purpose: "auxiliary" });
+      ], auxModel, conversation?.userId, false, {
+        purpose: "auxiliary",
+        ...(isFree ? { freeModelOverride: FREE_EXPERT_MODELS[0] } : {}),
+      });
       parsedInsights = parseModelJson<InsightJson>(response.message.content);
     }
 
     try {
       const insightData = parsedInsights as any;
-      if (!insightData) throw new Error("no parseable JSON in insights response");
+      if (!valid(parsedInsights)) throw new Error("no valid structured insights after retry");
 
       if (insightData.title && Array.isArray(insightData.points) && insightData.points.length > 0) {
         console.log(`Storing insights for conversation ${conversationId}:`, insightData);
@@ -1819,20 +1828,35 @@ export async function generateClosingSynthesis(
     if (!closingModel) {
       throw new Error("No auxiliary model could be resolved for the Moderator closing synthesis.");
     }
-    const response = await callOpenRouterAPIStream(messages, closingModel, (token) => {
+    const isFree = ((await storage.getUser(conversation!.userId))?.tier || "free") === "free";
+    // Buffer Free synthesis until its structure is validated so a retry does
+    // not append a second, contradictory answer to an already visible stream.
+    const emitToken = (token: string) => {
       broadcastFn(conversationId, {
         type: "expert_stream_token",
         expertId: moderatorExpert.id,
         token,
       });
-    }, conversation?.userId, false, { purpose: "auxiliary" });
+    };
+    let response = await callOpenRouterAPIStream(messages, closingModel,
+      isFree ? () => {} : emitToken,
+      conversation?.userId, false, { purpose: "auxiliary" });
     let content = response.message.content;
-    if (((await storage.getUser(conversation!.userId))?.tier || "free") === "free") {
-      const completed = ensureFreeVerdictTable(content, stanceLedger);
-      if (completed !== content) {
-        broadcastFn(conversationId, { type: "expert_stream_token", expertId: moderatorExpert.id, token: completed.slice(content.length) });
-        content = completed;
+    if (isFree) {
+      if (!hasFreeVerdictTable(content, stanceLedger)) {
+        console.warn(`[SYNTHESIS] Invalid structured closing output for ${conversationId}; retrying once on Haiku fallback.`);
+        response = await callOpenRouterAPIStream([
+          ...messages,
+          { role: "assistant", content: String(content ?? "").slice(0, 4000) },
+          { role: "user", content: "Correct the structure: return the requested Markdown sections, including ## Verdict and the Expert | Stance | Confidence | Position table using only the recorded stance ledger." },
+        ], closingModel, () => {}, conversation?.userId, false, {
+          purpose: "auxiliary", freeModelOverride: FREE_EXPERT_MODELS[0],
+        });
+        content = response.message.content;
       }
+      if (!content?.trim()) throw new Error("The Moderator returned no synthesis after retry.");
+      content = ensureFreeVerdictTable(content, stanceLedger);
+      emitToken(content);
     }
 
     const storedMessage = await storage.createMessage({

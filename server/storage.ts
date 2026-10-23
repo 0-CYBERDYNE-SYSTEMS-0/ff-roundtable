@@ -2,7 +2,8 @@ import { users, type User, type InsertUser, conversations, type Conversation, ty
 import { encryptApiKey, decryptApiKey } from "./crypto";
 import createMemoryStore from "memorystore";
 import session from "express-session";
-import { Pool } from "pg";
+import type { Pool } from "pg";
+import { getDatabasePool } from "./database-pool";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { eq, desc, asc, and, isNull, isNotNull, max, sql } from "drizzle-orm";
 import ConnectPgSimple from "connect-pg-simple";
@@ -708,14 +709,7 @@ export class PostgresStorage implements IStorage {
   sessionStore: session.Store;
 
   constructor(databaseUrl: string) {
-    this.pool = new Pool({
-      connectionString: databaseUrl,
-      max: 10,
-      // Columns are `timestamp without time zone` and are read back as UTC.
-      // Pin the session to UTC so defaultNow() writes UTC, whatever the
-      // Postgres server's own TimeZone is (a PT server shifted times by 7h).
-      options: "-c timezone=UTC",
-    });
+    this.pool = getDatabasePool(databaseUrl);
 
     this.db = drizzle(this.pool, {
       schema: { users, conversations, experts, messages, openQuestions, files, insights, farmProfiles, weatherCache, usageMonthly },

@@ -91,7 +91,7 @@ export function monthlyAiBudgetUsd(tier: string | null | undefined): number {
   return 0;
 }
 
-export type CapDenial = { status: 402 | 429; code: string; message: string; upgradeUrl?: string };
+export type CapDenial = { status: 401 | 402 | 429; code: string; message: string; upgradeUrl?: string };
 
 export function checkMessageAllowance(tier: string | null | undefined, usedThisMonth: number): CapDenial | null {
   const limits = getTierLimits(tier || "free");
