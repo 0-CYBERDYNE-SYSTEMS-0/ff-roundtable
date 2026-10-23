@@ -28,7 +28,7 @@ import {
   BUDGET_FALLBACK_MODEL,
   EXPERT_REPLY_MAX_TOKENS,
 } from "../server/usage-caps";
-import { OpenRouterProvider, FREE_MODEL_FALLBACKS } from "../server/ai-providers";
+import { OpenRouterProvider, FREE_MODEL_FALLBACKS, FREE_TRUNCATION_NOTE } from "../server/ai-providers";
 import { REQUESTED_OPENROUTER_MODELS } from "../client/src/lib/openrouter-model-options";
 
 const okResponse = (cost: number) => ({
@@ -118,8 +118,62 @@ describe("usage caps: OpenRouterProvider enforcement", () => {
     const body = JSON.parse(mockFetch.mock.calls[0][1].body);
     expect(body.model).toBe(BUDGET_FALLBACK_MODEL);
     expect(body.model.endsWith(":free")).toBe(true);
+    expect(body.models).toEqual(FREE_MODEL_FALLBACKS.slice(0, 3));
     await new Promise(r => setTimeout(r, 10));
     expect(store.addMonthlyAiSpend).not.toHaveBeenCalled();
+  });
+
+  it("gives Free auxiliary calls 6000 tokens while preserving zero-price fallback routing", async () => {
+    store.getUser.mockResolvedValue({ id: 1, tier: "free" });
+    mockFetch.mockResolvedValue(okResponse(0));
+    await new OpenRouterProvider(null).chat(messages, "paid/model", 1, false, { purpose: "auxiliary" });
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.max_tokens).toBe(6000);
+    expect(body.models).toEqual(FREE_MODEL_FALLBACKS.slice(0, 3));
+    expect(body.models.every((model: string) => model.endsWith(":free"))).toBe(true);
+    expect(body.provider.max_price).toEqual({ prompt: 0, completion: 0 });
+  });
+
+  it("returns Free partial text with a truncation note instead of throwing", async () => {
+    store.getUser.mockResolvedValue({ id: 1, tier: "free" });
+    mockFetch.mockResolvedValue(new Response(JSON.stringify({
+      choices: [{ finish_reason: "length", message: { role: "assistant", content: "Partial answer" } }],
+      usage: { cost: 0 },
+    })));
+    const result = await new OpenRouterProvider(null).chat(messages, BUDGET_FALLBACK_MODEL, 1);
+    expect(result.message.content).toBe("Partial answer" + FREE_TRUNCATION_NOTE);
+  });
+
+  it("keeps null-content Free truncations explicit without returning an empty message", async () => {
+    store.getUser.mockResolvedValue({ id: 1, tier: "free" });
+    mockFetch.mockResolvedValue(new Response(JSON.stringify({
+      choices: [{ finish_reason: "length", message: { role: "assistant", content: null } }],
+      usage: { cost: 0 },
+    })));
+    const result = await new OpenRouterProvider(null).chat(messages, BUDGET_FALLBACK_MODEL, 1);
+    expect(result.message.content).toBe(FREE_TRUNCATION_NOTE);
+  });
+
+  it("streams Free partial text and the same truncation note", async () => {
+    store.getUser.mockResolvedValue({ id: 1, tier: "free" });
+    mockFetch.mockResolvedValue(new Response([
+      `data: ${JSON.stringify({ choices: [{ delta: { content: "Partial answer" } }] })}`,
+      `data: ${JSON.stringify({ choices: [{ finish_reason: "length", delta: {} }], usage: { cost: 0 } })}`,
+      "data: [DONE]", "",
+    ].join("\n\n")));
+    const onToken = vi.fn();
+    const result = await new OpenRouterProvider(null).chatStream(messages, BUDGET_FALLBACK_MODEL, onToken, 1);
+    expect(result.message.content).toBe("Partial answer" + FREE_TRUNCATION_NOTE);
+    expect(onToken).toHaveBeenLastCalledWith(FREE_TRUNCATION_NOTE);
+  });
+
+  it("preserves paid Pro output-limit errors", async () => {
+    store.getUser.mockResolvedValue({ id: 1, tier: "pro" });
+    mockFetch.mockResolvedValue(new Response(JSON.stringify({
+      choices: [{ finish_reason: "length", message: { role: "assistant", content: "Partial" } }],
+      usage: { cost: 0.001 },
+    })));
+    await expect(new OpenRouterProvider(null).chat(messages, "z-ai/glm-5.3-flash", 1)).rejects.toThrow("output limit");
   });
 
   it("caps expert replies at the requested max_tokens", async () => {

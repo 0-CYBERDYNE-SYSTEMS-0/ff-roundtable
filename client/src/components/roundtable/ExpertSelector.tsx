@@ -150,7 +150,7 @@ export default function ExpertSelector({ onClose, onAddExperts, selectedExperts 
       setIsLoadingModels(true);
       setErrorLoadingModels(null);
       try {
-        const response = await fetch("https://openrouter.ai/api/v1/models");
+        const response = await fetch("/api/models");
         if (!response.ok) {
           throw new Error(`HTTP error! status: ${response.status}`);
         }

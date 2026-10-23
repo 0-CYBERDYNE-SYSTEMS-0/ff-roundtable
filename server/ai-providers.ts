@@ -1,9 +1,10 @@
-import { checkHouseKeyCall, currentUsagePeriod, UsageCapError, BUDGET_FALLBACK_MODEL } from "./usage-caps";
+import { checkHouseKeyCall, currentUsagePeriod, UsageCapError, BUDGET_FALLBACK_MODEL, FREE_MODEL_FALLBACKS } from "./usage-caps";
 import type { AIMessage, AIModelResponse } from './ai';
 import { randomUUID } from 'crypto';
 
 const AI_REQUEST_TIMEOUT_MS = 120_000;
 const OUTPUT_LIMIT_ERROR = "Response reached the output limit. Please ask for a shorter response or split the request into smaller parts.";
+export const FREE_TRUNCATION_NOTE = "\n\n[Response shortened at the Free output limit. Ask a shorter follow-up to continue.]";
 // Output ceiling per call. 1024 truncated File Creator SOPs mid-document;
 // 8192 let one runaway answer cost 8x a normal turn. 4096 (~3,000 words)
 // fits the longest documents we generate. Override with OPENROUTER_MAX_OUTPUT_TOKENS.
@@ -12,11 +13,7 @@ export function maxOutputTokens(): number {
   const parsed = Number(process.env.OPENROUTER_MAX_OUTPUT_TOKENS);
   return Number.isInteger(parsed) && parsed >= 256 && parsed <= 32768 ? parsed : DEFAULT_MAX_OUTPUT_TOKENS;
 }
-// Free OpenRouter models come and go; when a :free model is requested,
-// OpenRouter's `models` array lets it fall through to these (verified live 2026-10-16).
-export const FREE_MODEL_FALLBACKS = [
-  "dots-studio/dots-3-note-preview:free",
-];
+export { FREE_MODEL_FALLBACKS };
 export function modelRouting(model: string): { model: string; models?: string[] } {
   if (!model.endsWith(":free")) return { model };
   return { model, models: [model, ...FREE_MODEL_FALLBACKS.filter(m => m !== model)].slice(0, 3) };
@@ -99,7 +96,7 @@ function safeOpenRouterError(status: number | undefined, providerDetail?: unknow
 // ─── Provider Interface ───────────────────────────────────────────────────────
 
 /** Per-call options. maxTokens overrides the default output cap (e.g. expert replies). */
-export type ChatOptions = { maxTokens?: number };
+export type ChatOptions = { maxTokens?: number; purpose?: "auxiliary" };
 
 export interface AIProvider {
   chat(messages: AIMessage[], model: string, userId?: number, webSearch?: boolean, options?: ChatOptions): Promise<AIModelResponse>;
@@ -221,16 +218,16 @@ export class OpenRouterProvider implements AIProvider {
    * (server/usage-caps.ts): tier gate, Pro model allowlist, monthly budget.
    * BYOK calls are never capped and never counted.
    */
-  private async authorizeCall(attempt: OpenRouterAttempt, model: string, userId?: number): Promise<{ key: string; model: string }> {
+  private async authorizeCall(attempt: OpenRouterAttempt, model: string, userId?: number, options: ChatOptions = {}): Promise<{ key: string; model: string }> {
     const { key, byok } = await this.resolveKey(userId);
     if (byok || !userId) return { key, model };
     const { storage } = await import("./storage");
     const user = await storage.getUser(userId);
     if ((user?.tier || "free") === "free") {
-      // A pinned zero-price route protects the house key even for auxiliary
+      // A zero-price fallback route protects the house key even for auxiliary
       // prompts, old experts, forged model names, or provider fallback.
       attempt.model = BUDGET_FALLBACK_MODEL;
-      attempt.maxTokens = Math.min(attempt.maxTokens, 1200);
+      attempt.maxTokens = options.purpose === "auxiliary" ? 6000 : Math.min(attempt.maxTokens, 1200);
       attempt.providerPriceLimit = { prompt: 0, completion: 0 };
       attempt.freeHouseKey = true;
       return { key, model: BUDGET_FALLBACK_MODEL };
@@ -282,7 +279,7 @@ export class OpenRouterProvider implements AIProvider {
     let provider: string | undefined;
     let responseModel: string | undefined;
     try {
-      const authorized = await this.authorizeCall(attempt, model, userId);
+      const authorized = await this.authorizeCall(attempt, model, userId, options);
       const openRouterKey = authorized.key;
       model = authorized.model;
 
@@ -330,7 +327,9 @@ export class OpenRouterProvider implements AIProvider {
       }
 
       if (data.choices[0].finish_reason === "length") {
-        throw new Error(OUTPUT_LIMIT_ERROR);
+        if (!attempt.freeHouseKey) throw new Error(OUTPUT_LIMIT_ERROR);
+        const partial = data.choices[0].message.content;
+        data.choices[0].message.content = (typeof partial === "string" ? partial : "").trimEnd() + FREE_TRUNCATION_NOTE;
       }
 
       this.settleAttempt(attempt, "success", usage, { generationId, responseModel, provider });
@@ -373,7 +372,7 @@ export class OpenRouterProvider implements AIProvider {
     let provider: string | undefined;
     let responseModel: string | undefined;
     try {
-      const authorized = await this.authorizeCall(attempt, model, userId);
+      const authorized = await this.authorizeCall(attempt, model, userId, options);
       const openRouterKey = authorized.key;
       model = authorized.model;
 
@@ -466,7 +465,9 @@ export class OpenRouterProvider implements AIProvider {
       }
 
       if (finishReason === "length") {
-        throw new Error(OUTPUT_LIMIT_ERROR);
+        if (!attempt.freeHouseKey) throw new Error(OUTPUT_LIMIT_ERROR);
+        fullContent = fullContent.trimEnd() + FREE_TRUNCATION_NOTE;
+        onToken(FREE_TRUNCATION_NOTE);
       }
 
       this.settleAttempt(attempt, "success", usage, { generationId, responseModel, provider });

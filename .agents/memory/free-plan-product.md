@@ -10,6 +10,6 @@ People can sign up and try the app without paying. New accounts enter on Free, u
 
 Free reasoning models need enough room to return visible answers; do not reduce their output budget purely as a cost safeguard when provider pricing is already constrained to zero.
 
-**Why:** A live short-question smoke test exhausted an 800-token output budget during reasoning and produced error messages before retrying successfully. Low reasoning effort with the existing short expert-reply budget returned a useful answer.
+**Why:** Live tests exhausted output budgets during hidden reasoning, sometimes returning no visible content even with low reasoning effort and a higher Moderator allowance. Other catalog-listed Free models returned upstream rate-limit/provider errors. Catalog presence and a successful short expert answer do not prove the Moderator will work.
 
-**How to apply:** When tuning Free model limits, verify an actual expert answer, not just an accepted message or mocked provider response.
+**How to apply:** When tuning Free routing or output limits, verify both an actual expert answer and a substantive closing Moderator answer at zero reported cost, not just catalog presence, accepted messages, truncation notices, or mocked provider responses.

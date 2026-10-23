@@ -26,6 +26,7 @@ import { getWeatherForFarm, formatWeatherContext } from './weather';
 import { isDuplicateUserSubmission } from './text-similarity';
 import { format } from 'date-fns';
 import { TIERS, getTierLimits, isPaidModel } from './tiers';
+import { getModelCatalog } from "./model-catalog";
 import { checkMessageAllowance, currentUsagePeriod, isHouseKeyAllowedModel, HOUSE_KEY_PAID_MODEL_ALLOWLIST, UsageCapError, monthlyAiBudgetUsd, BUDGET_EXHAUSTED_NOTICE, BUDGET_FALLBACK_MODEL, FREE_MAX_TURNS, FREE_MAX_MESSAGE_CHARS, FREE_MESSAGES_PER_MINUTE, FREE_MESSAGES_PER_DAY } from './usage-caps';
 
 class OpenQuestionAnswerConflictError extends Error {}
@@ -206,6 +207,16 @@ function getVerifiedSessionIdFromUpgradeRequest(req: { headers: { cookie?: strin
 }
 
 export async function registerRoutes(app: Express): Promise<Server> {
+  app.get("/api/models", async (_req, res) => {
+    try {
+      const models = await getModelCatalog();
+      res.set("Cache-Control", "public, max-age=600").json(models);
+    } catch (error) {
+      console.error("Model catalog fetch failed:", (error as Error).message);
+      res.set("Cache-Control", "no-store").status(502).json({ message: "AI models are temporarily unavailable. Please try again shortly." });
+    }
+  });
+
   // Liveness/readiness for docker-compose and uptime checks (README-SELF-HOST).
   app.get("/api/health", async (_req, res) => {
     let database: "ok" | "memory" | "error" = process.env.DATABASE_URL ? "ok" : "memory";

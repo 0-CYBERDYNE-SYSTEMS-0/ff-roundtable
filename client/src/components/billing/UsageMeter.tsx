@@ -11,7 +11,7 @@ export default function UsageMeter() {
   const isFree = tier.tier.toLowerCase() === "free";
   const limit = tier.limits?.maxMessages;
   const used = tier.usage?.messages ?? 0;
-  if (!isFree || !limit) {
+  if (!limit) {
     return (
       <Link href="/subscribe" className="hidden rounded-full border border-white/25 px-3 py-1.5 text-xs font-medium text-white/90 transition-colors hover:bg-white/10 sm:inline-flex">
         {tier.limits?.name || tier.tier} plan
@@ -25,7 +25,9 @@ export default function UsageMeter() {
       <span className="hidden h-1.5 w-12 overflow-hidden rounded-full bg-white/25 sm:block" aria-hidden="true">
         <span className="block h-full rounded-full bg-[#e7c17d] transition-[width] duration-300" style={{ width: `${percentage}%` }} />
       </span>
-      <UpgradeToProButton label="Pro" className="h-7 rounded-full bg-[#f2eee1] px-2.5 text-[11px] text-[#24372b] hover:bg-white" />
+      {isFree
+        ? <UpgradeToProButton label="Upgrade" className="h-7 rounded-full bg-[#f2eee1] px-2.5 text-[11px] text-[#24372b] hover:bg-white" />
+        : <Link href="/subscribe" className="whitespace-nowrap text-[11px] font-medium">{tier.limits?.name || tier.tier} plan</Link>}
     </div>
   );
 }

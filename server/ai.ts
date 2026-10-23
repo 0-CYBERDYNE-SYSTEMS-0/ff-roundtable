@@ -1598,7 +1598,7 @@ export async function generateInsights(conversationId: number, broadcastFn?: (co
     const response = await callOpenRouterAPI([
       { role: "system", content: "You extract key insights from agricultural conversations. Respond only with the requested JSON format." },
       { role: "user", content: insightPrompt }
-    ], auxModel, conversation?.userId);
+    ], auxModel, conversation?.userId, false, { purpose: "auxiliary" });
     
     try {
       const insightData = JSON.parse(response.message.content);
@@ -1702,7 +1702,7 @@ export async function getModeratorNextSpeakerSuggestion(
             return null;
         }
 
-        const response = await callOpenRouterAPI(messages, auxModel, conversation?.userId);
+        const response = await callOpenRouterAPI(messages, auxModel, conversation?.userId, false, { purpose: "auxiliary" });
         const responseContent = response?.message?.content;
         if (typeof responseContent !== "string" || !responseContent.trim()) {
             console.warn("Moderator returned no next-speaker text. Falling back to round-robin.");
@@ -1803,7 +1803,7 @@ export async function generateClosingSynthesis(
         expertId: moderatorExpert.id,
         token,
       });
-    }, conversation?.userId);
+    }, conversation?.userId, false, { purpose: "auxiliary" });
     const content = response.message.content;
 
     const storedMessage = await storage.createMessage({

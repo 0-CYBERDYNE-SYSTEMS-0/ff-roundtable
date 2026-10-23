@@ -23,8 +23,17 @@ export const HOUSE_KEY_PAID_MODEL_ALLOWLIST = [
 /** Output cap for ordinary expert replies (documents keep maxOutputTokens()). */
 export const EXPERT_REPLY_MAX_TOKENS = 1200;
 
-/** Free model experts use once a Pro user's monthly AI budget is spent. */
-export const BUDGET_FALLBACK_MODEL = "dots-studio/dots-3-note-preview:free";
+/** Catalog-verified zero-price ids; first two also answered live on 2026-10-23. */
+export const FREE_MODEL_FALLBACKS = [
+  "recursive/flint-v1.0:free",
+  "liquid/lfm-2.5-2.6b:free",
+  "google/gemma-4-31b-it:free",
+  "nvidia/nemotron-3-super-120b-a12b:free",
+  "google/gemma-4-26b-a4b-it:free",
+  "dots-studio/dots-3-note-preview:free",
+];
+/** Same primary/fallback list for Free access and exhausted Pro AI budgets. */
+export const BUDGET_FALLBACK_MODEL = FREE_MODEL_FALLBACKS[0];
 export const FREE_MAX_TURNS = 3;
 export const FREE_MAX_MESSAGE_CHARS = 4000;
 export const FREE_MESSAGES_PER_MINUTE = 10;
