@@ -1,4 +1,4 @@
-import { checkHouseKeyCall, currentUsagePeriod, UsageCapError, BUDGET_FALLBACK_MODEL, FREE_MODEL_FALLBACKS } from "./usage-caps";
+import { checkHouseKeyCall, currentUsagePeriod, UsageCapError, BUDGET_FALLBACK_MODEL, FREE_MODEL_FALLBACKS, FREE_EXPERT_MAX_TOKENS, freeModelChain } from "./usage-caps";
 import type { AIMessage, AIModelResponse } from './ai';
 import { randomUUID } from 'crypto';
 
@@ -17,6 +17,20 @@ export { FREE_MODEL_FALLBACKS };
 export function modelRouting(model: string): { model: string; models?: string[] } {
   if (!model.endsWith(":free")) return { model };
   return { model, models: [model, ...FREE_MODEL_FALLBACKS.filter(m => m !== model)].slice(0, 3) };
+}
+
+/** Thrown by a single Free attempt that should move on to the next free model. */
+export class FreeModelRetryError extends Error {
+  constructor(message: string, readonly cause?: unknown) {
+    super(message);
+    this.name = "FreeModelRetryError";
+  }
+}
+const FREE_ALL_FAILED = "The free models are busy right now. Please try again in a minute.";
+/** Visible text after dropping whitespace and a bare STANCE line; empty means nothing for the farmer. */
+export function hasVisibleText(content: unknown): boolean {
+  if (typeof content !== "string") return false;
+  return content.replace(/^\s*\**\s*STANCE\s*:.*$/gim, "").trim().length > 0;
 }
 const SPEND_CAP_PER_REQUEST_USD = 0.4;
 
@@ -96,7 +110,14 @@ function safeOpenRouterError(status: number | undefined, providerDetail?: unknow
 // ─── Provider Interface ───────────────────────────────────────────────────────
 
 /** Per-call options. maxTokens overrides the default output cap (e.g. expert replies). */
-export type ChatOptions = { maxTokens?: number; purpose?: "auxiliary" };
+export type ChatOptions = {
+  maxTokens?: number;
+  purpose?: "auxiliary";
+  /** Structured / synthesis output (Moderator): Free routes to FREE_CAPABLE_MODEL first. */
+  capable?: boolean;
+  /** Internal: exact free model for this attempt (set by the Free retry loop). */
+  freeModelOverride?: string;
+};
 
 export interface AIProvider {
   chat(messages: AIMessage[], model: string, userId?: number, webSearch?: boolean, options?: ChatOptions): Promise<AIModelResponse>;
@@ -226,11 +247,15 @@ export class OpenRouterProvider implements AIProvider {
     if ((user?.tier || "free") === "free") {
       // A zero-price fallback route protects the house key even for auxiliary
       // prompts, old experts, forged model names, or provider fallback.
-      attempt.model = BUDGET_FALLBACK_MODEL;
-      attempt.maxTokens = options.purpose === "auxiliary" ? 6000 : Math.min(attempt.maxTokens, 1200);
+      // Honor the expert's own :free pick; anything else (paid, forged, empty)
+      // is replaced. The zero max_price below enforces $0 either way.
+      const freeModel = options.freeModelOverride
+        ?? freeModelChain(model, options.capable || options.purpose === "auxiliary")[0];
+      attempt.model = freeModel;
+      attempt.maxTokens = options.purpose === "auxiliary" || options.capable ? 6000 : FREE_EXPERT_MAX_TOKENS;
       attempt.providerPriceLimit = { prompt: 0, completion: 0 };
       attempt.freeHouseKey = true;
-      return { key, model: BUDGET_FALLBACK_MODEL };
+      return { key, model: freeModel };
     }
     const period = currentUsagePeriod();
     const usage = await storage.getMonthlyUsage(userId, period);
@@ -271,7 +296,67 @@ export class OpenRouterProvider implements AIProvider {
     return { key: platformKey, byok: false };
   }
 
+  /** True when this call will run on the house key as a Free user (so the Free retry loop applies). */
+  private async isFreeHouseCall(userId?: number): Promise<boolean> {
+    if (!userId) return false;
+    const { byok } = await this.resolveKey(userId);
+    if (byok) return false;
+    const { storage } = await import("./storage");
+    const user = await storage.getUser(userId);
+    return (user?.tier || "free") === "free";
+  }
+
+  /** Free: try the selected model, then the retry chain, until one returns visible text. */
+  private async withFreeRetries(
+    model: string,
+    userId: number | undefined,
+    options: ChatOptions,
+    run: (opts: ChatOptions) => Promise<AIModelResponse>,
+    canRetry: () => boolean = () => true,
+  ): Promise<AIModelResponse> {
+    if (options.freeModelOverride || !(await this.isFreeHouseCall(userId))) return run(options);
+    const chain = freeModelChain(model, options.capable || options.purpose === "auxiliary");
+    let lastError: unknown;
+    for (const freeModel of chain) {
+      try {
+        return await run({ ...options, freeModelOverride: freeModel });
+      } catch (error) {
+        if (error instanceof UsageCapError) throw error;
+        // Once visible tokens reached the farmer, a retry would duplicate text.
+        if (!canRetry()) throw error;
+        lastError = error;
+        console.warn(`[FREE_RETRY] ${freeModel} failed (${(error as Error)?.message ?? error}); trying next free model`);
+      }
+    }
+    console.error("[FREE_RETRY] all free models failed", (lastError as Error)?.message);
+    throw new Error(FREE_ALL_FAILED);
+  }
+
   async chat(messages: AIMessage[], model: string, userId?: number, webSearch = false, options: ChatOptions = {}): Promise<AIModelResponse> {
+    return this.withFreeRetries(model, userId, options, opts => this.chatOnce(messages, model, userId, webSearch, opts));
+  }
+
+  async chatStream(
+    messages: AIMessage[],
+    model: string,
+    onToken: (token: string) => void,
+    userId?: number,
+    webSearch = false,
+    options: ChatOptions = {}
+  ): Promise<AIModelResponse> {
+    let emitted = false;
+    const tracked = (token: string) => {
+      if (token) emitted = true;
+      onToken(token);
+    };
+    return this.withFreeRetries(
+      model, userId, options,
+      opts => this.chatStreamOnce(messages, model, tracked, userId, webSearch, opts),
+      () => !emitted,
+    );
+  }
+
+  private async chatOnce(messages: AIMessage[], model: string, userId?: number, webSearch = false, options: ChatOptions = {}): Promise<AIModelResponse> {
     const attempt = this.beginAttempt(model, messages, options.maxTokens);
     let requestStarted = false;
     let usage: unknown;
@@ -293,7 +378,7 @@ export class OpenRouterProvider implements AIProvider {
           "X-Title": "Farm Friend Roundtable"
         },
         body: JSON.stringify({
-          ...modelRouting(model),
+          ...(attempt.freeHouseKey ? { model } : modelRouting(model)),
           messages: messages,
           temperature: 0.7,
           ...this.requestBudget(attempt),
@@ -326,6 +411,10 @@ export class OpenRouterProvider implements AIProvider {
         throw new Error("Invalid response format from OpenRouter API");
       }
 
+      if (attempt.freeHouseKey && !hasVisibleText(data.choices[0].message.content)) {
+        // Reasoning-only / empty output: never show a bare cut-off notice.
+        throw new FreeModelRetryError(`${model} returned no visible text (finish_reason=${data.choices[0].finish_reason})`);
+      }
       if (data.choices[0].finish_reason === "length") {
         if (!attempt.freeHouseKey) throw new Error(OUTPUT_LIMIT_ERROR);
         const partial = data.choices[0].message.content;
@@ -357,7 +446,7 @@ export class OpenRouterProvider implements AIProvider {
     }
   }
 
-  async chatStream(
+  private async chatStreamOnce(
     messages: AIMessage[],
     model: string,
     onToken: (token: string) => void,
@@ -386,7 +475,7 @@ export class OpenRouterProvider implements AIProvider {
           "X-Title": "Farm Friend Roundtable"
         },
         body: JSON.stringify({
-          ...modelRouting(model),
+          ...(attempt.freeHouseKey ? { model } : modelRouting(model)),
           messages: messages,
           temperature: 0.7,
           ...this.requestBudget(attempt),
@@ -464,6 +553,9 @@ export class OpenRouterProvider implements AIProvider {
         reader.releaseLock();
       }
 
+      if (attempt.freeHouseKey && !hasVisibleText(fullContent)) {
+        throw new FreeModelRetryError(`${model} streamed no visible text (finish_reason=${finishReason})`);
+      }
       if (finishReason === "length") {
         if (!attempt.freeHouseKey) throw new Error(OUTPUT_LIMIT_ERROR);
         fullContent = fullContent.trimEnd() + FREE_TRUNCATION_NOTE;

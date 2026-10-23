@@ -4,6 +4,7 @@ import { artifactExamplesForRequest } from "./artifact-examples";
 // Import shared DB types
 import type { InsertMessage, Expert, InsertFile, Message, File, Artifact, FarmProfile, MessageStance, OpenQuestion } from "@shared/schema";
 import { extractArtifacts } from "./artifact-extractor";
+import { parseModelJson } from "./model-json";
 import { extractMentions } from "@shared/mentions";
 import OpenAI from "openai";
 import path from "path";
@@ -1273,7 +1274,7 @@ export async function getExpertResponseStream(
         streamFilter ? token => streamFilter!.push(token) : onToken,
         conversation?.userId,
         false,
-        { maxTokens: EXPERT_REPLY_MAX_TOKENS },
+        { maxTokens: EXPERT_REPLY_MAX_TOKENS, capable: expert.role === "Moderator" },
       );
       streamFilter?.finish();
       stance = stripExpertStance(response, expert.role);
@@ -1431,7 +1432,7 @@ export async function getExpertResponse(
        response.message.content = deliverableSuccessMessage(saved, request);
     }
     else {
-      response = await callOpenRouterAPI(messages, expert.model, conversation?.userId, false, { maxTokens: EXPERT_REPLY_MAX_TOKENS });
+      response = await callOpenRouterAPI(messages, expert.model, conversation?.userId, false, { maxTokens: EXPERT_REPLY_MAX_TOKENS, capable: expert.role === "Moderator" });
     }
 
     if (expert.role !== "File Creator") {
@@ -1554,6 +1555,8 @@ ${charter?.trim()
     ? `Measure the outcome against the council charter, including its goal and stop criteria:\n${charter.trim()}`
     : ""}
 
+Directly under “## Verdict”, include a markdown table summarizing the ledger with exactly these columns: | Expert | Stance | Confidence | Position |, one row per expert role (write "none recorded" for a null stance). Give the table a short bold caption line above it, not a heading.
+
 Under “Open questions for you,” list the open questions for the farmer. Under “Assumptions awaiting confirmation,” list their paired assumptions. If a list is empty, say that none remain.`;
 }
 
@@ -1595,14 +1598,29 @@ export async function generateInsights(conversationId: number, broadcastFn?: (co
     }
 
     const conversation = await storage.getConversation(conversationId);
-    const response = await callOpenRouterAPI([
-      { role: "system", content: "You extract key insights from agricultural conversations. Respond only with the requested JSON format." },
+    const insightMessages: AIMessage[] = [
+      { role: "system", content: "You extract key insights from agricultural conversations. Respond only with the requested JSON format: a single JSON object, no code fences, no prose." },
       { role: "user", content: insightPrompt }
-    ], auxModel, conversation?.userId, false, { purpose: "auxiliary" });
-    
+    ];
+    let response = await callOpenRouterAPI(insightMessages, auxModel, conversation?.userId, false, { purpose: "auxiliary" });
+    type InsightJson = { title?: unknown; points?: unknown };
+    const valid = (d: InsightJson | null): d is { title: string; points: string[] } =>
+      Boolean(d && typeof d.title === "string" && d.title.trim() && Array.isArray(d.points) && d.points.length > 0);
+    let parsedInsights = parseModelJson<InsightJson>(response.message.content);
+    if (!valid(parsedInsights)) {
+      // One retry with the bad output echoed back and a stricter instruction.
+      response = await callOpenRouterAPI([
+        ...insightMessages,
+        { role: "assistant", content: String(response.message.content ?? "").slice(0, 4000) },
+        { role: "user", content: 'That was not valid JSON. Reply again with ONLY {"title": string, "points": [string, ...]} and nothing else.' },
+      ], auxModel, conversation?.userId, false, { purpose: "auxiliary" });
+      parsedInsights = parseModelJson<InsightJson>(response.message.content);
+    }
+
     try {
-      const insightData = JSON.parse(response.message.content);
-      
+      const insightData = parsedInsights as any;
+      if (!insightData) throw new Error("no parseable JSON in insights response");
+
       if (insightData.title && Array.isArray(insightData.points) && insightData.points.length > 0) {
         console.log(`Storing insights for conversation ${conversationId}:`, insightData);
         await storage.createInsight({ 
