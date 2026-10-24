@@ -868,6 +868,15 @@ describe("GET /api/protected/conversations/:id/export.ics", () => {
     });
   });
 
+  it("calendar preview empty state carries a message the sidebar recognizes", async () => {
+    const agent = request.agent(app);
+    await registerAndLogin(agent, "calEmpty");
+    const convo = await createConversation(agent, "No Plan Preview");
+    const res = await agent.get(`/api/protected/conversations/${convo.id}/calendar?start=2026-10-26`);
+    expect(res.status).toBe(422);
+    expect(res.body.message ?? res.body.error).toMatch(/No schedulable items/);
+  });
+
   it("returns 200 text/calendar starting with BEGIN:VCALENDAR for a table artifact", async () => {
     const agent = request.agent(app);
     await registerAndLogin(agent, "icsTable");

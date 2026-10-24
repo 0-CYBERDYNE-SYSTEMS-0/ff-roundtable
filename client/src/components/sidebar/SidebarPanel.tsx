@@ -132,8 +132,8 @@ export default function SidebarPanel({
           { credentials: "include" },
         );
         if (!response.ok) {
-          const result = await response.json().catch(() => ({})) as { message?: string };
-          if (response.status === 422 && result.message?.includes("No schedulable items")) {
+          const result = await response.json().catch(() => ({})) as { message?: string; error?: string };
+          if (response.status === 422 && (result.message ?? result.error)?.includes("No schedulable items")) {
             if (!cancelled) {
               setCalendarPreview(null);
               setCalendarPreviewError("empty");
