@@ -1,3 +1,4 @@
+import { buildChartPickerPrompt, premiumChartsEnabled } from "./chart-picker";
 // Training inputs are explicitly separate from the farmer's actual evidence.
 export const artifactExamples = [
   {
@@ -49,7 +50,9 @@ export const artifactExamples = [
 ];
 
 export function artifactExamplesForRequest(request: string): string {
+  if (premiumChartsEnabled() && /\b(chart|graph|plot|visuali[sz]\w*|dashboard|heat ?map|map|timeline|gantt|diagram|infographic|trend line)s?\b/i.test(request)) return buildChartPickerPrompt(request);
   if (!/\b(chart|charts|visuali[sz]\w*|graph|graphs|plot|plots|dashboard|heatmap)\b/i.test(request)) return "";
+  if (premiumChartsEnabled()) return buildChartPickerPrompt(request);
   return "VISUAL DESIGN TRAINING EXAMPLES: The following farmer inputs are fictional training context, never evidence for this conversation. Use the designs as inspiration, not a fixed menu. Return chart JSON inside a chart fence.\n" +
     artifactExamples.map(example => `Example farmer input: ${example.request}\nExample chart output: ${JSON.stringify(example.output)}`).join("\n\n");
 }

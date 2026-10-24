@@ -4,13 +4,14 @@ export const visualThemes = {
   earth: ["#276354", "#447b9d", "#b77835", "#866394", "#6c7837", "#bd6262"],
   ocean: ["#216582", "#487e70", "#a66b40", "#77609c", "#a64f68", "#687337"],
   ink: ["#35465e", "#9b6336", "#457c76", "#886487", "#7e792f", "#ae5760"],
+  farmfriend: ["#2F7D4F", "#E0A526", "#3B82A6", "#B5653A", "#7BAF5A", "#8A6FB0", "#D9734E", "#5E8C8A"],
 } as const;
 
 export const vegaChartSchema = z.object({
   type: z.literal("vega-lite"),
   title: z.string().trim().min(1).max(180),
   description: z.string().max(1200).optional(),
-  theme: z.enum(["earth", "ocean", "ink"]).default("earth"),
+  theme: z.enum(["earth", "ocean", "ink", "farmfriend"]).default("earth"),
   sources: z.array(z.string().min(1)).min(1).max(30),
   data: z.array(z.record(z.union([z.string(), z.number().finite(), z.boolean(), z.null()]))).min(1).max(5000),
   spec: z.record(z.unknown()),
@@ -72,6 +73,27 @@ function fixEncodings(node: unknown, numeric: Set<string>): unknown {
   return out;
 }
 
+/** FarmFriend premium look (theme "farmfriend", emitted only when FF_PREMIUM_CHARTS prompts are on). */
+function farmFriendConfig(width: number, hconcat: number) {
+  const ink = "#1F2E2A", muted = "#62716B", grid = "#E6E1D6";
+  return {
+    background: "#FBF8F2", padding: { left: 12, right: 16, top: 10, bottom: 10 },
+    font: "Inter, system-ui, sans-serif",
+    view: { stroke: null, continuousWidth: Math.max(180, width / hconcat - 80), continuousHeight: 240 },
+    range: { category: [...visualThemes.farmfriend], heatmap: ["#F4EED9", "#CFE3B4", "#8FC27A", "#4E9A5C", "#22663F", "#0F3D27"], ramp: ["#F4EED9", "#8FC27A", "#22663F"] },
+    axis: { labelOverlap: true, labelLimit: 140, labelColor: muted, titleColor: muted, labelFontSize: 11.5, titleFontSize: 11.5, titleFontWeight: 600, gridColor: grid, gridDash: [3, 3], domain: false, tickColor: grid, labelPadding: 6, titlePadding: 10 },
+    axisX: { grid: false, domain: true, domainColor: "#CFC8B8" },
+    legend: { orient: "top", direction: "horizontal", labelColor: ink, labelFontSize: 12, titleFontSize: 11, titleColor: muted, symbolType: "circle", symbolSize: 110, columnPadding: 14 },
+    header: { labelFontSize: 13, labelFontWeight: 700, labelColor: ink },
+    title: { anchor: "start", fontSize: 17, fontWeight: 700, color: ink, subtitleColor: muted },
+    area: { line: { strokeWidth: 2 }, interpolate: "monotone" },
+    line: { strokeWidth: 2.6, strokeCap: "round" },
+    bar: { cornerRadiusEnd: 3 },
+    point: { filled: true, size: 70 },
+    text: { color: ink, fontSize: 11 },
+  };
+}
+
 export function themedVegaSpec(chart: VegaChart, width = 600): Record<string, unknown> {
   const normalized = normalizeChartData(chart);
   chart = { ...chart, data: normalized.data, spec: fixEncodings(chart.spec, normalized.numeric) as VegaChart["spec"] };
@@ -83,7 +105,7 @@ export function themedVegaSpec(chart: VegaChart, width = 600): Record<string, un
     data: { values: chart.data },
     ...(composed ? {} : { width: Math.max(180, width - 70), height: 320 }),
     autosize: { type: "fit", contains: "padding" },
-    config: {
+    config: chart.theme === "farmfriend" ? farmFriendConfig(width, Array.isArray(spec.hconcat) ? spec.hconcat.length : 1) : {
       background: "transparent",
       font: "system-ui, sans-serif",
       view: { stroke: null, continuousWidth: Math.max(180, width / (Array.isArray(spec.hconcat) ? spec.hconcat.length : 1) - 80), continuousHeight: 240 },

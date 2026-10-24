@@ -14,6 +14,8 @@ import { randomBytes, randomUUID } from "crypto";
 import { lookup } from "dns/promises";
 import net from "net";
 import { compile, type TopLevelSpec } from "vega-lite";
+import { premiumChartsEnabled } from "./chart-picker";
+import { parseChartJsonWithRepair, fallbackSpecFromRows, hoistNestedData } from "./chart-repair";
 import { parseVegaChart, themedVegaSpec } from "@shared/chart-artifact";
 
 export const MAX_TOOL_CALLS_PER_TURN = 3;
@@ -395,12 +397,17 @@ export function validateChartArtifactDetailed(
   evidence: ChartEvidence = {},
 ): ChartValidationResult {
   let chart: any;
-  try { chart = parseChartJson(chartJson); } catch { return { ok: false, reason: "invalid-json" }; }
+  const premium = premiumChartsEnabled();
+  try { chart = parseChartJson(chartJson); } catch {
+    if (!premium) return { ok: false, reason: "invalid-json" };
+    try { chart = parseChartJsonWithRepair(chartJson).value; } catch { return { ok: false, reason: "invalid-json" }; }
+  }
   if (!chart || typeof chart !== "object" || Array.isArray(chart)) return { ok: false, reason: "invalid-json" };
 
   const title = typeof chart.title === "string" ? chart.title.trim() : "";
   if (!title) return { ok: false, reason: "missing-title" };
   if (GENERIC_TITLES.test(title)) return { ok: false, reason: "generic-title" };
+  if (premium && chart.spec && typeof chart.spec === "object") hoistNestedData(chart);
   if (!Array.isArray(chart.data) || chart.data.length === 0) return { ok: false, reason: "missing-data" };
 
   let sources: unknown[] = Array.isArray(chart.sources) && chart.sources.length
@@ -417,10 +424,19 @@ export function validateChartArtifactDetailed(
   if (!sources.length) return { ok: false, reason: "missing-source" };
   if (!Array.isArray(chart.sources) || chart.sources.length === 0) chart.sources = sources;
 
+  if (premium && chart && typeof chart === "object" && !chart.type && chart.spec) chart.type = "vega-lite";
   if (chart?.type === "vega-lite") {
-    const parsed = parseVegaChart(chart);
+    let parsed = parseVegaChart(chart);
+    const compiles = (c: NonNullable<typeof parsed>) => { try { compile(themedVegaSpec(c) as unknown as TopLevelSpec); return true; } catch { return false; } };
+    if ((!parsed || !compiles(parsed)) && premium) {
+      // Fallback: keep the model's rows, title and sources; rebuild a plain themed chart.
+      const spec = Array.isArray(chart.data) ? fallbackSpecFromRows(chart.data) : null;
+      const rebuilt = spec ? parseVegaChart({ ...chart, spec }) : null;
+      if (rebuilt && compiles(rebuilt)) parsed = rebuilt;
+      else return { ok: false, reason: parsed ? "invalid-vega-spec" : "invalid-vega-envelope" };
+    }
     if (!parsed) return { ok: false, reason: "invalid-vega-envelope" };
-    try { compile(themedVegaSpec(parsed) as unknown as TopLevelSpec); } catch { return { ok: false, reason: "invalid-vega-spec" }; }
+    if (!compiles(parsed)) return { ok: false, reason: "invalid-vega-spec" };
     chart = parsed;
   }
   const allowed = new Set(allowedUrls);
