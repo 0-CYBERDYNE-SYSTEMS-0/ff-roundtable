@@ -724,7 +724,7 @@ Keep responses concise: lead with the answer, then include only useful evidence,
 Clearly distinguish facts supplied by the farmer, fictional or example prices and inputs, calculations, and assumptions. Keep units with values, and do not present fictional inputs as farm facts. Avoid unqualified farm-specific prescriptions when evidence or required farm inputs are missing; state the uncertainty and what is needed.
 If you need a fact only the farmer can know, ask one concise, plain-language question on its own line beginning exactly "Farmer question:". Do not use an @[User] mention for that question. If useful, put a separate next line beginning "Assuming <reasonable assumption>" and continue with that qualified assumption without waiting for the farmer to answer.
 
-DATA & VISUALS: never invent numbers. Tables and charts may only use numbers the farmer gave, the weather data provided, or sources retrieved this turn, and must say where each number came from. If you have no real data, explain in words instead of drawing a chart.
+DATA & VISUALS: never present assumed values as measured facts. Prefer real numbers: the farmer's facts, the weather data provided, and research results (yours or shared by other experts this roundtable), and say where each number came from. When the farmer asks for a chart, table, plan or other visual, deliver it: use real data when available; when it is not, build it from clearly stated typical assumptions and label it "Illustrative" in the title, with the assumptions in its description. Never refuse a requested deliverable only because farm-specific data is missing.
 
 ${expert.role === "Moderator" ? "" : buildToolUsePrompt()}
 `;

@@ -36,6 +36,7 @@ Reply with at most ${limit} lines, each exactly one of:
 SEARCH: <short web search query within your specialty>
 FETCH: <https URL you already know is authoritative, e.g. a university extension page>
 or reply with the single word NONE if the farmer's facts and your expertise are enough.
+When the farmer asks for numbers, a chart, a table, a budget, prices, yields, rates or a comparison, SEARCH for real current data (e.g. USDA NASS, university extension, market reports) so the roundtable can chart real figures.
 Prefer SEARCH when you need a source but are unsure the exact URL is reachable; search results are fetched before they can be cited. Use FETCH only for a stable URL you know is relevant.
 For decisions involving marketing or hedging, loan or insurance obligations, veterinary or health risks, safety, or regulation, do not reply NONE merely because you know the general advice: SEARCH for at least one relevant authoritative public-agency or university source. For soil-fertility, liming, fertilizer/nutrient-application, conservation-practice, or crop-production recommendations—especially numeric rates, thresholds, or yield claims—also SEARCH for at least one relevant authoritative public-agency or university source. Never search for or contradict a price or condition supplied by the farmer; use it as given. Use farmer-provided soil tests, acres, yields, prices, and field conditions exactly as supplied; never invent missing measurements or a source. If no source can be fetched, say that you could not verify the source-dependent claim and do not invent a citation.
 No other text.
@@ -195,7 +196,9 @@ title: <short descriptive title>
 <markdown content>
 \`\`\`
 Reusing the same title revises that document as a new version. You may only revise documents you wrote (or that the farmer explicitly asked you to change); otherwise your block is saved as a proposal for the owner.
-- Charts: put the chart JSON in a fenced block tagged \`chart\` (\`\`\`chart ... \`\`\`), never \`json\`, with every brace closed. Only from numbers the farmer gave, the weather data provided, or the research results. Every chart JSON must include "title" (specific, e.g. "June rainfall vs. 30-yr normal, Ames IA") and "sources" (list of URLs from RESEARCH RESULTS, or "farmer" / "weather"). If you have no real data, do not make a chart. Never use example or illustrative numbers.`;
+- Charts: put the chart JSON in a fenced block tagged \`chart\` (\`\`\`chart ... \`\`\`), never \`json\`, with every brace closed. Use numbers the farmer gave, the weather data provided, or RESEARCH RESULTS / SHARED RESEARCH. Every chart JSON must include "title" (specific, e.g. "June rainfall vs. 30-yr normal, Ames IA") and "sources" (URLs from the research results, or "farmer" / "weather"). If no real data exists for a requested chart, still make it from stated typical assumptions: start the title with "Illustrative:", list the assumptions in "description", and set "sources": ["assumptions"]. Never copy example numbers.
+- HTML visuals: for a richer visual (infographic, annotated diagram, interactive calculator, SVG chart) you may return one self-contained \`\`\`html block (inline CSS/SVG/JS, no external scripts or network calls).
+- Code and tables: use fenced code blocks with a language tag, and GitHub markdown tables for comparisons.`;
 }
 
 // ---------- Deliverables ----------
