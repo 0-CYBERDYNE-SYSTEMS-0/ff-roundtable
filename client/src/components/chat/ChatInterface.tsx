@@ -9,6 +9,7 @@ import { Message, Expert, User, OpenQuestion } from "@shared/schema";
 import { format } from "date-fns";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { markdownTableComponents } from "./markdown-table";
 import { formatMessageDate } from "@/lib/file-utils";
 import ModelBadge from "../roundtable/ModelBadge";
 import ConversationSidebar from "../roundtable/ConversationSidebar";
@@ -504,6 +505,7 @@ export default function ChatInterface({
   // structure, and MentionAwareCode renders those spans as inline pills.
   const markdownComponents = useMemo(
     () => ({
+      ...markdownTableComponents,
       code: (props: React.ComponentPropsWithoutRef<"code"> & { node?: unknown }) => (
         <MentionAwareCode {...props} experts={experts} />
       ),
