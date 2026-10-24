@@ -318,7 +318,7 @@ export async function saveExpertDeliverable(
 
 // ---------- Charts ----------
 
-const GENERIC_TITLES = /^(chart( artifact)?|visual aid|data|trend|untitled|seasonal agricultural trends)$/i;
+const GENERIC_TITLES = /^(chart( artifact)?|visual aid|data|trend|untitled|illustrative( chart)?|seasonal agricultural trends)$/i;
 
 /** Models often drop trailing closers from long JSON; add the missing ones before giving up. */
 function parseChartJson(text: string): unknown {
@@ -338,6 +338,12 @@ function parseChartJson(text: string): unknown {
     if (inString || !closers.length) throw error;
     return JSON.parse(text + closers.reverse().join(""));
   }
+}
+
+/** Charts built from stated assumptions are allowed when visibly labeled "Illustrative". */
+export function isIllustrativeChart(chart: any): boolean {
+  return [chart?.title, chart?.description, chart?.subtitle, chart?.caption]
+    .some(v => typeof v === "string" && /\billustrative\b/i.test(v));
 }
 
 export type ChartArtifactRejectionReason =
@@ -403,6 +409,8 @@ export function validateChartArtifactDetailed(
       sources = [inferredSource];
     }
   }
+  const illustrative = isIllustrativeChart(chart);
+  if (!sources.length && illustrative) sources = ["assumptions"];
   if (!sources.length) return { ok: false, reason: "missing-source" };
   if (!Array.isArray(chart.sources) || chart.sources.length === 0) chart.sources = sources;
 
@@ -413,7 +421,7 @@ export function validateChartArtifactDetailed(
     chart = parsed;
   }
   const allowed = new Set(allowedUrls);
-  const ok = sources.every(s => typeof s === "string" && (allowed.has(s.trim()) || /^(farmer|weather)$/i.test(s.trim())));
+  const ok = sources.every(s => typeof s === "string" && (allowed.has(s.trim()) || /^(farmer|weather)$/i.test(s.trim()) || (illustrative && /^(assumptions?|illustrative)$/i.test(s.trim()))));
   if (!ok) return { ok: false, reason: "unverified-source" };
   return { ok: true, json: JSON.stringify(chart, null, 2), title };
 }
