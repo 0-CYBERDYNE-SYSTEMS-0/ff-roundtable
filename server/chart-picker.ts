@@ -9,7 +9,7 @@ export function premiumChartsEnabled(env: NodeJS.ProcessEnv = process.env): bool
 const INTENT_CUES: Record<ChartIntent, RegExp> = {
   change: /\b(over time|trend|season(al)?|monthly|weekly|daily|year(s|ly)?|history|since|month by month|through the (year|season)|growth|decline|forecast)\b/i,
   part: /\b(share|breakdown|composition|split|mix|portion|percent(age)? of|made up|allocation|where .* (goes|go)|cost per acre)\b/i,
-  rank: /\b(rank|top|best|worst|highest|lowest|leader|order|which .* (most|least|best))\b/i,
+  rank: /\b(rank(ing|ed)?|top \d+|highest|lowest|leader(board)?|in order)\b/i,
   deviation: /\b(profit|loss|margin|variance|above|below|vs\.? (normal|average|budget|plan|target)|anomal|deficit|surplus|over budget|under budget)\b/i,
   correlation: /\b(relationship|correlat|affect|impact of|response|vs\.?|versus|against|related|driv(e|es|er))\b/i,
   distribution: /\b(distribution|spread|range of|variab|consisten|outlier|histogram|how many .* (between|fall))\b/i,
@@ -20,6 +20,14 @@ const INTENT_CUES: Record<ChartIntent, RegExp> = {
   uncertainty: /\b(forecast|projection|outlook|uncertain|scenario|best.?case|worst.?case|risk|confidence|range)\b/i,
 };
 
+const NAMED: Record<string, string[]> = {
+  gantt: ["timeline", "time ?line"], "scatter-trend": ["scatter ?plot", "scatter"], donut: ["pie"], boxplot: ["box ?plot", "box and whisker"],
+  "ranked-lollipop": ["lollipop"], "heatmap": ["heat ?map"], "field-grid-map": ["farm map", "field map", "grid map"], "range-band": ["fan chart", "confidence band"],
+  bullet: ["bullet chart", "progress bar"], "small-multiples": ["facet(ed)?"], "stacked-area": ["stacked area"], "multi-area": ["multi[ -]?area", "area chart"],
+  "line-multi": ["line chart", "line graph"], "grouped-bar": ["grouped bars?", "clustered bars?"], "stacked-bar": ["stacked bars?"], "dual-axis": ["two axes", "dual[ -]axis", "combo chart"],
+  "calendar-heatmap": ["calendar heat ?map", "calendar view"], "normalized-area": ["100% (stacked )?area", "share over time"],
+};
+
 export type ChartClassification = { intents: ChartIntent[]; scores: Record<string, number> };
 
 /** Scores every catalog entry: direct cue match (3) + each matching intent (2 for primary, 1 otherwise). */
@@ -27,7 +35,9 @@ export function classifyChartRequest(request: string): ChartClassification {
   const intents = (Object.keys(INTENT_CUES) as ChartIntent[]).filter(i => INTENT_CUES[i].test(request));
   const scores: Record<string, number> = {};
   for (const e of CHART_CATALOG) {
-    let s = e.cues.test(request) ? 3 : 0;
+    // Explicit chart name ("heatmap", "timeline", "box plot") beats inferred intent.
+    const named = new RegExp(`\\b(${[e.id.replace(/-/g, "[ -]?"), ...(NAMED[e.id] ?? [])].join("|")})`, "i").test(request);
+    let s = (named ? 6 : 0) + (e.cues.test(request) ? 3 : 0);
     e.intents.forEach((i, idx) => { if (intents.includes(i)) s += idx === 0 ? 2 : 1; });
     scores[e.id] = s;
   }
