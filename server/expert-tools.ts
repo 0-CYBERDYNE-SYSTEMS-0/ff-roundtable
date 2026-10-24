@@ -455,3 +455,34 @@ export function filterChartArtifacts<T extends { type: string; content: string; 
   }
   return { kept, dropped, droppedReasons };
 }
+
+// ---------- Shared roundtable research ----------
+// Sources fetched by any expert (or the Research Analyst's retrieval) are shared
+// with every other expert in the same roundtable and count as chart sources.
+const SHARED_RESEARCH_TTL_MS = 6 * 60 * 60 * 1000;
+const SHARED_RESEARCH_MAX = 8;
+const sharedResearchStore = new Map<number, { at: number; sources: ToolSource[] }>();
+
+export function rememberSharedResearch(conversationId: number | undefined, sources: Array<Pick<ToolSource, "title" | "url" | "snippet">>, now = Date.now()): void {
+  if (!conversationId || !sources.length) return;
+  const entry = sharedResearchStore.get(conversationId);
+  const existing = entry && now - entry.at < SHARED_RESEARCH_TTL_MS ? entry.sources : [];
+  const merged = [...existing];
+  for (const s of sources) if (s.url && !merged.some(m => m.url === s.url)) merged.push({ id: "", title: s.title, url: s.url, snippet: s.snippet });
+  const kept = merged.slice(-SHARED_RESEARCH_MAX).map((s, i) => ({ ...s, id: `R${i + 1}` }));
+  sharedResearchStore.set(conversationId, { at: now, sources: kept });
+}
+
+export function getSharedResearch(conversationId: number | undefined, now = Date.now()): ToolSource[] {
+  if (!conversationId) return [];
+  const entry = sharedResearchStore.get(conversationId);
+  if (!entry || now - entry.at >= SHARED_RESEARCH_TTL_MS) return [];
+  return entry.sources;
+}
+
+export function formatSharedResearchForPrompt(sources: ToolSource[], excludeUrls: string[] = []): string {
+  const shown = sources.filter(s => !excludeUrls.includes(s.url));
+  if (!shown.length) return "";
+  return ["📚 SHARED RESEARCH from other experts in this roundtable (fetched pages; cite as [R1](URL); usable as chart sources by URL):",
+    ...shown.map(s => `[${s.id}] ${s.title} — ${s.url}\n${s.snippet.slice(0, 1200)}`)].join("\n");
+}

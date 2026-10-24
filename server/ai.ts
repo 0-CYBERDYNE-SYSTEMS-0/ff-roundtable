@@ -21,7 +21,7 @@ export { commitPendingDeliverable, discardPendingDeliverable } from "./pending-d
 import { enforceCitationIntegrity, removeUnsupportedCitedSentences, stripMetaLines, undecorate, mergeDuplicateFarmerQuestions, removeRepeatedExpertSentences } from "./response-hygiene";
 import {
   buildToolUsePrompt, buildToolPlanningPrompt, parseToolPlan, runToolCalls, formatToolResultsForPrompt,
-  toolCallLimitForTier, extractDeliverable, saveExpertDeliverable, filterChartArtifacts, type ChartArtifactRejectionReason, type ChartEvidence, type ToolRun,
+  toolCallLimitForTier, rememberSharedResearch, getSharedResearch, formatSharedResearchForPrompt, extractDeliverable, saveExpertDeliverable, filterChartArtifacts, type ChartArtifactRejectionReason, type ChartEvidence, type ToolRun,
 } from "./expert-tools";
 
 /** Expert tools are on by default; EXPERT_TOOLS=off disables them. Unit tests never hit the network. */
@@ -871,6 +871,12 @@ function buildPerplexityMessages(query: string, contextMessages: AIMessage[] = [
   }, { role: "user", content: userContext }];
 }
 
+/** Research Analyst retrieval citations become shared roundtable research. */
+function rememberCitations(conversationId: number | undefined, citations?: string[]): void {
+  const urls = (citations ?? []).filter(url => /^https?:\/\//.test(url));
+  rememberSharedResearch(conversationId, urls.map(url => ({ title: url, url, snippet: "(cited by the Research Analyst)" })));
+}
+
 function appendRetrievedCitationUrls(content: string, citations?: string[]): { content: string; addition: string } {
   const urls = (citations ?? []).filter((url, index, allUrls) =>
     typeof url === "string" && url.length > 0 && allUrls.indexOf(url) === index && !content.includes(url),
@@ -1223,6 +1229,10 @@ export async function getExpertResponseStream(
    // Core tools: optional research phase (search / fetch) before answering.
    const toolRun = await runExpertToolPhase(expert, referenceMessageContent, conversation?.userId);
    if (toolRun) messages.push({ role: "system", content: formatToolResultsForPrompt(toolRun) });
+   rememberSharedResearch(expert.conversationId, toolRun?.sources ?? []);
+   const sharedResearch = getSharedResearch(expert.conversationId);
+   const sharedBlock = formatSharedResearchForPrompt(sharedResearch, toolRun?.sources.map(s => s.url) ?? []);
+   if (sharedBlock) messages.push({ role: "system", content: sharedBlock });
    if (retryInstruction?.trim()) messages.push({ role: "system", content: retryInstruction.trim() });
 
    const userText = truncateForModel(referenceMessageContent);
@@ -1293,7 +1303,8 @@ export async function getExpertResponseStream(
       ? { deliverable: null, cleanContent: response.message.content }
       : extractDeliverable(response.message.content);
     const extracted = extractArtifacts(deliverableSplit.cleanContent);
-    const allowedChartUrls = toolRun?.sources.map(src => src.url) ?? [];
+    rememberCitations(expert.conversationId, response.citations);
+    const allowedChartUrls = [...(toolRun?.sources.map(src => src.url) ?? []), ...getSharedResearch(expert.conversationId).map(src => src.url)];
     const chartEvidence: ChartEvidence = {
       farmerText: history.filter(message => message.role === "user").map(message => message.content).join("\n"),
       weatherText: weatherContext,
@@ -1416,6 +1427,11 @@ export async function getExpertResponse(
         : { role: "user", content: userText }
    );
 
+   const toolRunNs = await runExpertToolPhase(expert, referenceMessageContent, conversation?.userId);
+   if (toolRunNs) messages.push({ role: "system", content: formatToolResultsForPrompt(toolRunNs) });
+   rememberSharedResearch(expert.conversationId, toolRunNs?.sources ?? []);
+   const sharedBlockNs = formatSharedResearchForPrompt(getSharedResearch(expert.conversationId), toolRunNs?.sources.map(s => s.url) ?? []);
+   if (sharedBlockNs) messages.push({ role: "system", content: sharedBlockNs });
    console.log(`[DEBUG] Sending ${messages.length} messages to LLM for ${expert.role}${imageParts.length > 0 ? ` (with ${imageParts.length} image part${imageParts.length > 1 ? "s" : ""})` : ""}.`);
 
   try {
@@ -1446,11 +1462,12 @@ export async function getExpertResponse(
     }
     
     requireNonEmptyAssistantContent(response);
+    rememberCitations(expert.conversationId, response.citations);
     const extractedNonStream = extractArtifacts(response.message.content);
     const chartEvidence: ChartEvidence = {
       farmerText: history.filter(message => message.role === "user").map(message => message.content).join("\n"),
     };
-    const { kept: artifacts, dropped: droppedCharts, droppedReasons } = filterChartArtifacts(extractedNonStream.artifacts, [], chartEvidence);
+    const { kept: artifacts, dropped: droppedCharts, droppedReasons } = filterChartArtifacts(extractedNonStream.artifacts, [...(toolRunNs?.sources.map(src => src.url) ?? []), ...getSharedResearch(expert.conversationId).map(src => src.url)], chartEvidence);
     logRejectedCharts(expert.role, droppedReasons);
     const cleanContent = extractedNonStream.cleanContent + (droppedCharts ? CHART_REJECTION_NOTICE : "");
     const researchAnswer = expert.role === "Research Analyst"
