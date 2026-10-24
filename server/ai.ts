@@ -12,7 +12,7 @@ import fs from "fs";
 import axios from "axios";
 import { randomBytes } from "crypto";
 import { getProvider, type ChatOptions } from "./ai-providers";
-import { BUDGET_FALLBACK_MODEL, EXPERT_REPLY_MAX_TOKENS, UsageCapError } from "./usage-caps";
+import { BUDGET_FALLBACK_MODEL, EXPERT_REPLY_MAX_TOKENS, UsageCapError, wantsDeliverable, expertReplyMaxTokens } from "./usage-caps";
 import { ensureFreeVerdictTable, hasFreeVerdictTable } from "./free-synthesis";
 import { FREE_EXPERT_MODELS } from "@shared/free-plan";
 import { findCatalogExpert } from "@shared/expert-catalog";
@@ -1264,7 +1264,7 @@ export async function getExpertResponseStream(
           streamFilter ? token => streamFilter!.push(token) : onToken,
           conversation?.userId,
           paidWebPluginEnabled(),
-          { maxTokens: EXPERT_REPLY_MAX_TOKENS },
+          { maxTokens: expertReplyMaxTokens(referenceMessageContent), deliverable: wantsDeliverable(referenceMessageContent) },
         );
         streamFilter?.finish();
         stance = stripExpertStance(response, expert.role);
@@ -1289,7 +1289,7 @@ export async function getExpertResponseStream(
         streamFilter ? token => streamFilter!.push(token) : onToken,
         conversation?.userId,
         false,
-        { maxTokens: EXPERT_REPLY_MAX_TOKENS, capable: expert.role === "Moderator" },
+        { maxTokens: expertReplyMaxTokens(referenceMessageContent), deliverable: wantsDeliverable(referenceMessageContent), capable: expert.role === "Moderator" },
       );
       streamFilter?.finish();
       stance = stripExpertStance(response, expert.role);
@@ -1442,7 +1442,7 @@ export async function getExpertResponse(
       if (process.env.PERPLEXITY_API_KEY) {
         response = await callPerplexityAPI(referenceMessageContent, messages, conversation?.userId);
       } else {
-        response = await callOpenRouterAPI(messages, expert.model, conversation?.userId, paidWebPluginEnabled(), { maxTokens: EXPERT_REPLY_MAX_TOKENS });
+        response = await callOpenRouterAPI(messages, expert.model, conversation?.userId, paidWebPluginEnabled(), { maxTokens: expertReplyMaxTokens(referenceMessageContent), deliverable: wantsDeliverable(referenceMessageContent) });
       }
     } 
     else if (expert.role === "File Creator") {
@@ -1454,7 +1454,7 @@ export async function getExpertResponse(
        response.message.content = deliverableSuccessMessage(saved, request);
     }
     else {
-      response = await callOpenRouterAPI(messages, expert.model, conversation?.userId, false, { maxTokens: EXPERT_REPLY_MAX_TOKENS, capable: expert.role === "Moderator" });
+      response = await callOpenRouterAPI(messages, expert.model, conversation?.userId, false, { maxTokens: expertReplyMaxTokens(referenceMessageContent), deliverable: wantsDeliverable(referenceMessageContent), capable: expert.role === "Moderator" });
     }
 
     if (expert.role !== "File Creator") {

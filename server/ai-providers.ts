@@ -1,4 +1,4 @@
-import { checkHouseKeyCall, currentUsagePeriod, UsageCapError, BUDGET_FALLBACK_MODEL, FREE_MODEL_FALLBACKS, FREE_EXPERT_MAX_TOKENS, freeModelChain } from "./usage-caps";
+import { checkHouseKeyCall, currentUsagePeriod, UsageCapError, BUDGET_FALLBACK_MODEL, FREE_MODEL_FALLBACKS, FREE_EXPERT_MAX_TOKENS, FREE_DELIVERABLE_MAX_TOKENS, freeModelChain } from "./usage-caps";
 import type { AIMessage, AIModelResponse } from './ai';
 import { randomUUID } from 'crypto';
 import { reserveFreeCall, settleFreeCall, FREE_CALL_RESERVATION_USD } from "./free-capacity";
@@ -128,6 +128,8 @@ export type ChatOptions = {
   capable?: boolean;
   /** Internal: exact free model for this attempt (set by the Free retry loop). */
   freeModelOverride?: string;
+  /** Expert turn that builds a deliverable (chart/table/HTML/code/plan): Free gets FREE_DELIVERABLE_MAX_TOKENS. */
+  deliverable?: boolean;
 };
 
 function requireAIUser(userId?: number): asserts userId is number {
@@ -278,7 +280,7 @@ export class OpenRouterProvider implements AIProvider {
         throw new UsageCapError({ status: 402, code: "model_not_in_free_allowlist", message: "Choose an included Free model.", upgradeUrl: "/subscribe" });
       }
       attempt.model = freeModel;
-      attempt.maxTokens = options.purpose === "auxiliary" || options.capable ? 4000 : FREE_EXPERT_MAX_TOKENS;
+      attempt.maxTokens = options.purpose === "auxiliary" || options.capable ? 4000 : options.deliverable ? FREE_DELIVERABLE_MAX_TOKENS : FREE_EXPERT_MAX_TOKENS;
       attempt.freeReasoningEffort = options.purpose === "auxiliary" || options.capable ? "medium" : "low";
       // Reserve before dispatch, bounding both input and output price. Never
       // let a provider's route change bypass the daily USD ceiling.

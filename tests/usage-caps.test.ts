@@ -124,6 +124,19 @@ describe("usage caps: OpenRouterProvider enforcement", () => {
       .rejects.toMatchObject({ statusCode: 402, message: expect.stringContaining("temporarily unavailable") });
   });
 
+  it("gives Free deliverable turns 8500 output tokens and keeps chat turns at 3000", async () => {
+    store.getUser.mockResolvedValue({ id: 1, tier: "free" });
+    mockFetch.mockResolvedValue(okResponse(0));
+    await new OpenRouterProvider(null).chat(messages, FREE_EXPERT_MODELS[0], 1, false, { deliverable: true });
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.max_tokens).toBe(8500);
+    expect(body.provider.max_price.completion * 1e6 / 1e6).toBeGreaterThan(0.000001); // still admits $0.60/M models
+    const { wantsDeliverable, expertReplyMaxTokens } = await import("../server/usage-caps");
+    expect(wantsDeliverable("Chart my rainfall vs soil moisture")).toBe(true);
+    expect(wantsDeliverable("What do you think about cover crops?")).toBe(false);
+    expect(expertReplyMaxTokens("make a budget table")).toBe(8500);
+  });
+
   it("pins Free house-key calls to the allowlist, 3000 low-reasoning tokens and no paid web plugin", async () => {
     store.getUser.mockResolvedValue({ id: 1, tier: "free" });
     mockFetch.mockResolvedValue(okResponse(0));

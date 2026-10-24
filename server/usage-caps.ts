@@ -27,6 +27,17 @@ export const HOUSE_KEY_PAID_MODEL_ALLOWLIST = [
 export const EXPERT_REPLY_MAX_TOKENS = 1200;
 /** Free expert cap, including reasoning tokens. */
 export const FREE_EXPERT_MAX_TOKENS = 3000;
+/** Free expert cap for turns that build charts, tables, HTML, code, plans or files. */
+export const FREE_DELIVERABLE_MAX_TOKENS = 8500;
+const DELIVERABLE_REQUEST = /\b(chart|graph|plot|visuali[sz]|diagram|infographic|table|spreadsheet|budget|plan|calendar|schedule|timeline|html|code|script|calculator|report|deliverable|document|checklist|sop|compare|comparison)/i;
+/** True when the farmer's message asks for a deliverable, so Free experts get the larger output cap. */
+/** Expert output cap: chat turns stay short; deliverable turns get room for full chart/HTML/table output. */
+export function expertReplyMaxTokens(text: string | null | undefined): number {
+  return wantsDeliverable(text) ? FREE_DELIVERABLE_MAX_TOKENS : EXPERT_REPLY_MAX_TOKENS;
+}
+export function wantsDeliverable(text: string | null | undefined): boolean {
+  return DELIVERABLE_REQUEST.test(text ?? "");
+}
 /** Moderator synthesis, insights and other structured/auxiliary calls on Free. */
 export const FREE_CAPABLE_MODEL = FREE_MODERATOR_MODEL;
 /** Paid trial routes; distinct from Pro's unchanged zero-price budget fallback. */
