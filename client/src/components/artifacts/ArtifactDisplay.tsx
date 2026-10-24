@@ -4,11 +4,11 @@ import { Copy, Download, Maximize2, Code, Table, BarChart3, FileJson } from "luc
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { LineChart, Line, BarChart, Bar, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from "recharts";
-import DOMPurify from "isomorphic-dompurify";
 import { cn } from "@/lib/utils";
 import { formatJsonArtifact } from "@/lib/format-json-artifact";
 import VegaChart from "./VegaChart";
 import { TableCellMarkdown } from "./TableCellMarkdown";
+import { buildHtmlArtifactDoc, HTML_ARTIFACT_SANDBOX } from "./html-artifact";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
 interface ArtifactDisplayProps {
@@ -22,10 +22,7 @@ export default function ArtifactDisplay({ artifact }: ArtifactDisplayProps) {
   // Sanitize HTML content to prevent XSS attacks
   const sanitizedHTML = useMemo(() => {
     if (artifact.type === "html") {
-      return DOMPurify.sanitize(artifact.content, {
-        ADD_TAGS: ["iframe"],
-        ADD_ATTR: ["allow", "allowfullscreen", "frameborder", "scrolling"]
-      });
+      return buildHtmlArtifactDoc(artifact.content);
     }
     return artifact.content;
   }, [artifact.content, artifact.type]);
@@ -285,13 +282,13 @@ export default function ArtifactDisplay({ artifact }: ArtifactDisplayProps) {
         return <div className="text-sm text-neutral-600">Unsupported chart type</div>;
 
       case "html":
-        // HTML content is sanitized with DOMPurify to prevent XSS attacks
-        // sandbox allows both scripts and same-origin for full functionality
+        // Expert HTML runs isolated (see html-artifact.ts)
+        // opaque-origin sandbox + CSP: scripts run, but cannot reach the app or network
         return (
           <iframe
             srcDoc={sanitizedHTML}
             className="w-full h-80 border border-neutral-200 rounded"
-            sandbox="allow-scripts allow-same-origin"
+            sandbox={HTML_ARTIFACT_SANDBOX}
             title="HTML Artifact"
           />
         );
