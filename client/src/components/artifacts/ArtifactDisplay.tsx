@@ -8,6 +8,7 @@ import DOMPurify from "isomorphic-dompurify";
 import { cn } from "@/lib/utils";
 import { formatJsonArtifact } from "@/lib/format-json-artifact";
 import VegaChart from "./VegaChart";
+import { TableCellMarkdown } from "./TableCellMarkdown";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
 interface ArtifactDisplayProps {
@@ -165,7 +166,7 @@ export default function ArtifactDisplay({ artifact }: ArtifactDisplayProps) {
                               key={j}
                               className={`p-2 border border-neutral-200 ${i === 0 ? "font-semibold bg-neutral-100" : ""}`}
                             >
-                              {cell.trim()}
+                              <TableCellMarkdown value={cell.trim()} />
                             </td>
                           ))}
                       </tr>
