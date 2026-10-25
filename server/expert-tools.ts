@@ -16,7 +16,7 @@ import net from "net";
 import { compile, type TopLevelSpec } from "vega-lite";
 import { premiumChartsEnabled } from "./chart-picker";
 import { parseChartJsonWithRepair, fallbackSpecFromRows, hoistNestedData } from "./chart-repair";
-import { parseVegaChart, themedVegaSpec, chartHasPlottableSeries, stripDualAxis, asksForDualAxis, filterRelevantSources, tidySourceList, applyFacetScales, rankSource, ensureFacetWhenAsked, readableSourceTitle } from "@shared/chart-artifact";
+import { parseVegaChart, themedVegaSpec, chartHasPlottableSeries, stripDualAxis, asksForDualAxis, filterRelevantSources, tidySourceList, applyFacetScales, rankSource, ensureFacetWhenAsked, readableSourceTitle, isFrostClimateQuestion, isAuthoritativeClimateHost } from "@shared/chart-artifact";
 
 export const MAX_TOOL_CALLS_PER_TURN = 3;
 export const TOOL_TIMEOUT_MS = 10_000;
@@ -143,6 +143,13 @@ export async function fetchPage(rawUrl: string, fetchImpl: FetchLike = fetch): P
   return { title, url: url.toString(), text: stripHtml(html).slice(0, MAX_PAGE_CHARS) };
 }
 
+export const FROST_FALLBACK_CALLS: ToolCall[] = [
+  { tool: "search", query: "OSU Extension frost dates Oregon last frost" },
+  { tool: "search", query: "NOAA NCEI climate normals freeze dates" },
+  { tool: "fetch", url: "https://www.ncei.noaa.gov/access/us-climate-normals/" },
+  { tool: "fetch", url: "https://planthardiness.ars.usda.gov/" },
+];
+
 /** Executes planned calls; never throws (failures become notes). */
 export async function runToolCalls(calls: ToolCall[], fetchImpl: FetchLike = fetch, questionText?: string): Promise<ToolRun> {
   const sources: ToolSource[] = [];
@@ -179,17 +186,41 @@ export async function runToolCalls(calls: ToolCall[], fetchImpl: FetchLike = fet
       notes.push(`${call.tool === "search" ? `Search "${call.query}"` : `Fetch ${call.url}`} failed: ${(error as Error).message}`);
     }
   }
+  // Frost / climate answers must lead with OSU, USDA or NOAA: when research found none
+  // (e.g. only Almanac.com), run targeted follow-ups before the expert answers.
+  if (isFrostClimateQuestion(questionText) && !sources.some(s => isAuthoritativeClimateHost(s.url))) {
+    for (const call of FROST_FALLBACK_CALLS) {
+      if (sources.some(s => isAuthoritativeClimateHost(s.url))) break;
+      try {
+        if (call.tool === "search") {
+          const results = (await webSearch(call.query, fetchImpl)).filter(r => isAuthoritativeClimateHost(r.url));
+          for (const r of results) {
+            if (sources.some(s => s.url === r.url)) break;
+            try { const page = await fetchPage(r.url, fetchImpl); sources.push({ id: "", title: readableSourceTitle(page.title, page.url, r.title), url: page.url, snippet: page.text }); break; } catch { /* next */ }
+          }
+        } else {
+          const page = await fetchPage(call.url, fetchImpl);
+          sources.push({ id: "", title: readableSourceTitle(page.title, page.url), url: page.url, snippet: page.text });
+        }
+      } catch (error) {
+        notes.push(`Frost/climate follow-up ${call.tool === "search" ? call.query : call.url} failed: ${(error as Error).message}`);
+      }
+    }
+    if (!sources.some(s => isAuthoritativeClimateHost(s.url))) notes.push("No OSU, USDA or NOAA frost/climate source could be fetched; say the frost dates are unverified.");
+  }
   // Authoritative first across calls (OSU/USDA/NOAA before app frost sites); ids follow the new order.
   const ranked = sources.map((s, i) => ({ s, i })).sort((a, b) => rankSource(a.s.url, questionText) - rankSource(b.s.url, questionText) || a.i - b.i).map(({ s }, i) => ({ ...s, id: `S${i + 1}` }));
   return { calls, sources: ranked, notes };
 }
 
 export function formatToolResultsForPrompt(run: ToolRun): string {
+  // (sources are pre-ranked: S1 is the most authoritative; frost/climate answers cite it first)
   if (!run.calls.length) return "";
   const lines = [
     "🔎 RESEARCH RESULTS (fetched this turn; cite each source inline as [S1](URL)):",
     "MANDATORY CITATION CONTRACT: If a fetched result directly supports a relevant fact, include at least one concise sentence using only that fact and cite it inline in that same sentence as [S1](URL); do not only add a source list. For a cited sentence, every numeric value must appear in the fetched text—never compute or combine figures in a cited claim. Preserve the source's scope and caveats; put any calculation in a separate sentence and label it as your calculation. If nothing supports a claim, omit or qualify it.",
   ];
+  if (run.sources.length && isAuthoritativeClimateHost(run.sources[0].url)) lines.splice(2, 0, "Sources are ordered most authoritative first: for frost dates, freeze risk or climate normals, cite [S1] (OSU, USDA or NOAA) first, before any other source.");
   for (const s of run.sources) lines.push(`[${s.id}] ${s.title} — ${s.url}\n${s.snippet}`);
   if (!run.sources.length) lines.push("No sources could be retrieved. Say that you could not verify current information; do not invent citations.");
   for (const n of run.notes) lines.push(`(note: ${n})`);

@@ -331,6 +331,11 @@ const FIELD_CROP_URL = /(crop[-_]production|field[-_]crops?|cropandsoil|agsci|gr
  * Lower is better. OSU first; for field-crop questions OSU / regional crop-
  * production and field-crop guides outrank home-garden calendars.
  */
+export function isFrostClimateQuestion(text?: string): boolean { return FROST_CLIMATE_QUESTION.test(text ?? ""); }
+export function isAuthoritativeClimateHost(url: string): boolean {
+  try { return /(^|\.)(oregonstate\.edu|usda\.gov|noaa\.gov|weather\.gov|climate\.gov)$/.test(new URL(url).hostname); } catch { return false; }
+}
+
 export function rankSource(url: string, questionText?: string): number {
   if (!/^https?:/i.test(url)) return 4;
   const h = hostOf(url);
