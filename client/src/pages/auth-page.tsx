@@ -11,7 +11,7 @@ import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { ArrowLeft, Loader2 } from "lucide-react";
-import { queryClient } from "@/lib/queryClient";
+import { queryClient, resetCacheForSession } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import "../styles/public-pages.css";
 
@@ -90,7 +90,7 @@ export default function AuthPage() {
       const user = await response.json();
       
       // Update the cache
-      queryClient.setQueryData(["/api/user"], user);
+      resetCacheForSession(queryClient, user);
       
       // Redirect to home (handled by our component)
     } catch (error: any) {

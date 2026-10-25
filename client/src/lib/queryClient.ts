@@ -55,3 +55,13 @@ export const queryClient = new QueryClient({
     },
   },
 });
+
+/**
+ * Account switch: staleTime is Infinity, so the previous user's conversations,
+ * usage and tier would keep showing until a reload. Drop every cached query,
+ * then seed the new session's user.
+ */
+export function resetCacheForSession(client: { clear: () => void; setQueryData: (key: unknown[], data: unknown) => unknown }, user: unknown) {
+  client.clear();
+  client.setQueryData(["/api/user"], user);
+}
