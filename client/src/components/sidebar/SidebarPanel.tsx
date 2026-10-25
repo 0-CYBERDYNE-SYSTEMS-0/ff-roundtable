@@ -142,7 +142,14 @@ export default function SidebarPanel({
           }
           throw new Error("Schedule preview unavailable");
         }
-        const draft = await response.json() as CalendarDraft;
+        const draft = await response.json() as CalendarDraft & { empty?: boolean };
+        if (draft.empty || draft.events.length === 0) {
+          if (!cancelled) {
+            setCalendarPreview(null);
+            setCalendarPreviewError("empty");
+          }
+          return;
+        }
         const startDate = draft.events.map(event => event.startDate).sort()[0];
         const preview: CalendarPreview = {
           eventCount: draft.events.length, startDate, year: Number(startDate.slice(0, 4)),

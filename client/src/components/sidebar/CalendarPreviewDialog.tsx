@@ -27,6 +27,7 @@ export default function CalendarPreviewDialog({ conversationId, start, fileId, o
       .then(async response => {
         const result = await response.json();
         if (!response.ok) throw new Error(result.message || "Calendar preview unavailable");
+        if (result.empty) throw new Error(result.message || "No schedulable items found.");
         if (!controller.signal.aborted) {
           setDraft(result); setEvents(result.events);
           setMonth(result.events.map((event: CalendarEvent) => event.startDate).sort()[0]?.slice(0, 7) || start.slice(0, 7));

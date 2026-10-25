@@ -873,8 +873,11 @@ describe("GET /api/protected/conversations/:id/export.ics", () => {
     await registerAndLogin(agent, "calEmpty");
     const convo = await createConversation(agent, "No Plan Preview");
     const res = await agent.get(`/api/protected/conversations/${convo.id}/calendar?start=2026-10-26`);
-    expect(res.status).toBe(422);
-    expect(res.body.message ?? res.body.error).toMatch(/No schedulable items/);
+    // 200 empty state (not 422) so the sidebar preview doesn't log console errors.
+    expect(res.status).toBe(200);
+    expect(res.body.empty).toBe(true);
+    expect(res.body.events).toEqual([]);
+    expect(res.body.message).toMatch(/No schedulable items/);
   });
 
   it("returns 200 text/calendar starting with BEGIN:VCALENDAR for a table artifact", async () => {

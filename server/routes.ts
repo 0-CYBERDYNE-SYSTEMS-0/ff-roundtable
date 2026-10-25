@@ -1902,7 +1902,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const anchor = typeof req.query.start === "string" ? parseIsoDate(req.query.start) : nextMondayFrom(new Date());
       if (!anchor) return res.status(422).json({ message: "Invalid start date" });
       const rows = extractScheduleRows(await storage.getConversationMessages(conversationId), await storage.getConversationFiles(conversationId));
-      if (!rows.length) return res.status(422).json({ message: "No schedulable items found. Ask the council for a dated plan first." });
+      // An empty schedule is a normal state, not an error: 200 keeps the sidebar's
+      // background preview from logging a 422 for every plan-less conversation.
+      if (!rows.length) return res.json({ events: [], empty: true, calendarName: conversation.title ?? "Roundtable", currentFileId: null, version: null, message: "No schedulable items found. Ask the council for a dated plan first." });
       const draft: CalendarDraft = {
         events: rows.map((row, index) => ({ uid: `${conversationId}-${index}@farmfriend-roundtable`, summary: buildRowSummary(row), startDate: resolveRowStartDate(row, anchor), description: row.description })),
         calendarName: conversation.title ?? "Roundtable", currentFileId: null, version: null,
