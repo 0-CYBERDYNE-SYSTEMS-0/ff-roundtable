@@ -317,7 +317,9 @@ export default function ChatInterface({
     const handleScroll = () => {
       isNearBottomRef.current =
         viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 120;
-      setShowJumpToLatest(!isNearBottomRef.current);
+      // Scrolling alone never shows the pill; it only hides it once the
+      // reader is back at the bottom.
+      if (isNearBottomRef.current) setShowJumpToLatest(false);
     };
     handleScroll();
     viewport.addEventListener("scroll", handleScroll, { passive: true });
@@ -333,6 +335,23 @@ export default function ChatInterface({
       messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
     }
   }, [messages, streamingMessages, isLoading, isLoadingMessages]);
+
+  // Show the "New messages" pill only when a new message arrives while the
+  // reader is scrolled up (also after a dismissal), never from scrolling.
+  const messageCountRef = useRef<number | null>(null);
+  const messageCount = messages.length + streamingMessages.size;
+  useEffect(() => {
+    const previous = messageCountRef.current;
+    messageCountRef.current = messageCount;
+    if (isLoadingMessages) {
+      messageCountRef.current = null;
+      setShowJumpToLatest(false);
+      return;
+    }
+    if (previous !== null && messageCount > previous && !isNearBottomRef.current) {
+      setShowJumpToLatest(true);
+    }
+  }, [messageCount, isLoadingMessages]);
   // G4: the latest message's mentions drive the expert strip highlight.
   const latestMessage = messages.length > 0 ? messages[messages.length - 1] : null;
   const latestMentionedRoles = new Set(
@@ -1006,20 +1025,33 @@ export default function ChatInterface({
         </ScrollArea>
 
         {showJumpToLatest && (
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="absolute bottom-4 left-1/2 z-20 -translate-x-1/2 rounded-full bg-card shadow-md"
-            onClick={() => {
-              isNearBottomRef.current = true;
-              setShowJumpToLatest(false);
-              messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
-            }}
-            aria-label="New messages, jump to latest"
-          >
-            New messages ↓
-          </Button>
+          <div className="absolute bottom-4 left-1/2 z-20 flex -translate-x-1/2 items-center rounded-full border bg-card shadow-md" data-testid="new-messages-pill">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="rounded-l-full rounded-r-none"
+              onClick={() => {
+                isNearBottomRef.current = true;
+                setShowJumpToLatest(false);
+                messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+              }}
+              aria-label="New messages, jump to latest"
+            >
+              New messages ↓
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="rounded-l-none rounded-r-full border-l px-2"
+              onClick={() => setShowJumpToLatest(false)}
+              aria-label="Dismiss new messages notice"
+              data-testid="new-messages-dismiss"
+            >
+              ×
+            </Button>
+          </div>
         )}
         </div>
         
