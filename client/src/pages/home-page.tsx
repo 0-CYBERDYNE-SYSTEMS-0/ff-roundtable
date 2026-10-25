@@ -467,6 +467,9 @@ export default function HomePage() {
   // input should wait for the next Moderator route. `/new` is the explicit
   // same-conversation restart command.
   const handleSendMessage = (content: string, answersQuestionId?: number) => {
+    // While "New Roundtable" is still creating, activeConversation is the OLD
+    // id; sending now would post into the previous thread (seen on dev).
+    if (createConversationMutation.isPending) return;
     setLimitNotice(null);
     const topic = parseNewCommand(content);
     if (topic !== null) {
@@ -1372,7 +1375,7 @@ export default function HomePage() {
                         onSendMessage={handleSendMessage}
                         onUploadFile={handleFileUpload}
                         isUploading={uploadFileMutation.isPending}
-                        isLoading={sendMessageMutation.isPending || restartConversationMutation.isPending || isProcessing}
+                        isLoading={sendMessageMutation.isPending || restartConversationMutation.isPending || createConversationMutation.isPending || isProcessing}
                         isLoadingMessages={isLoadingMessages}
                         messagesError={messagesError}
                         user={user}
