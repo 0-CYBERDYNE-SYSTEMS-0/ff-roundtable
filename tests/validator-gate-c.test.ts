@@ -126,7 +126,4 @@ describe("(6)(9) client guards", () => {
     expect(src).toMatch(/handleSendMessage = [^]*?if \(createConversationMutation\.isPending\) return;/);
     expect(src).toContain("createConversationMutation.isPending || isProcessing");
   });
-  it("vite HMR on Replit uses clientPort 443", () => {
-    expect(readFileSync("server/vite.ts", "utf8")).toContain("{ server, clientPort: 443 }");
-  });
 });

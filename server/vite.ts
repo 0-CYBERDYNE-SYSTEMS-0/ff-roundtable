@@ -22,9 +22,7 @@ export function log(message: string, source = "express") {
 export async function setupVite(app: Express, server: Server) {
   const serverOptions = {
     middlewareMode: true,
-    // Behind Replit's HTTPS proxy the HMR client must use port 443; without it the
-    // client falls back to wss://localhost:undefined and logs unhandled rejections.
-    hmr: process.env.REPL_ID ? { server, clientPort: 443 } : { port: 24678 },
+    hmr: process.env.REPL_ID ? { server } : { port: 24678 },
     allowedHosts: true as const,
   };
 
