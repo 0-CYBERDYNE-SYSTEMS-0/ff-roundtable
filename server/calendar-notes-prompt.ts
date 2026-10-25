@@ -32,3 +32,9 @@ Completion checks: Every factual claim has appropriate support; uncertainty is e
 Limits / human approval: Prepare a draft only. Do not publish, contact others or change external records without approval.
 Never copy this example as actual event content without tailoring it to the user's task.
 `;
+
+/**
+ * A table the farmer wants "as a calendar" must carry a schedulable column, or
+ * the Calendar plan (shared/schedule-extract.ts) has nothing to pick up.
+ */
+export const CALENDAR_TABLE_RULE = `CALENDAR REQUESTS: when the farmer asks for a calendar, schedule, or dated plan, the table itself is the calendar. Its FIRST column must be "Week" (values W1, W2, …, counted from the plan's start) or "Date" (ISO YYYY-MM-DD). Never use relative offsets like "T-14" or "2 weeks before planting" as the only timing, and never promise "the following calendar" without that table. If the start date is unknown, use Week numbers and say the farmer picks the start date in the Calendar plan.`;

@@ -1,3 +1,4 @@
+import { CALENDAR_TABLE_RULE } from "./calendar-notes-prompt";
 import { storage } from "./storage";
 import { ARTIFACT_DESIGN_PROMPT } from "./artifact-design";
 import { artifactExamplesForRequest } from "./artifact-examples";
@@ -726,6 +727,7 @@ If you need a fact only the farmer can know, ask one concise, plain-language que
 
 DATA & VISUALS: never present assumed values as measured facts. Prefer real numbers: the farmer's facts, the weather data provided, and research results (yours or shared by other experts this roundtable), and say where each number came from. When the farmer asks for a chart, table, plan or other visual, deliver it: use real data when available; when it is not, build it from clearly stated typical assumptions and label it "Illustrative" in the title, with the assumptions in its description. Never refuse a requested deliverable only because farm-specific data is missing.
 
+${CALENDAR_TABLE_RULE}
 ${expert.role === "Moderator" ? "" : buildToolUsePrompt()}
 `;
 
