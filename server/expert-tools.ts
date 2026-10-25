@@ -16,7 +16,7 @@ import net from "net";
 import { compile, type TopLevelSpec } from "vega-lite";
 import { premiumChartsEnabled } from "./chart-picker";
 import { parseChartJsonWithRepair, fallbackSpecFromRows, hoistNestedData } from "./chart-repair";
-import { parseVegaChart, themedVegaSpec } from "@shared/chart-artifact";
+import { parseVegaChart, themedVegaSpec, chartHasPlottableSeries, stripDualAxis, asksForDualAxis, filterRelevantSources, tidySourceList } from "@shared/chart-artifact";
 
 export const MAX_TOOL_CALLS_PER_TURN = 3;
 export const TOOL_TIMEOUT_MS = 10_000;
@@ -353,6 +353,7 @@ export function isIllustrativeChart(chart: any): boolean {
 
 export type ChartArtifactRejectionReason =
   | "invalid-json"
+  | "empty-series"
   | "invalid-vega-envelope"
   | "invalid-vega-spec"
   | "missing-title"
@@ -444,6 +445,16 @@ export function validateChartArtifactDetailed(
     }
     if (!parsed) return { ok: false, reason: "invalid-vega-envelope" };
     if (!compiles(parsed)) return { ok: false, reason: "invalid-vega-spec" };
+    if (premium) {
+      if (!asksForDualAxis(evidence.farmerText)) parsed = { ...parsed, spec: stripDualAxis(parsed.spec as Record<string, unknown>) as typeof parsed.spec };
+      if (!chartHasPlottableSeries(parsed)) {
+        // Axes with no series: rebuild from the rows, or drop the chart.
+        const spec = fallbackSpecFromRows(parsed.data as Record<string, unknown>[]);
+        const rebuilt = spec ? parseVegaChart({ ...chart, data: parsed.data, spec }) : null;
+        if (!rebuilt || !compiles(rebuilt) || !chartHasPlottableSeries(rebuilt)) return { ok: false, reason: "empty-series" };
+        parsed = rebuilt;
+      }
+    }
     chart = parsed;
   }
   const allowed = new Set(allowedUrls);
@@ -461,8 +472,17 @@ export function validateChartArtifactDetailed(
   }
   if (!ok) return { ok: false, reason: "unverified-source" };
   // The footer lists the real research behind the turn, not just "assumptions".
-  const research = (evidence.researchUrls ?? []).filter(u => allowed.has(u));
+  let research = (evidence.researchUrls ?? []).filter(u => allowed.has(u));
+  if (premium) {
+    research = filterRelevantSources(research, evidence.farmerText);
+    const relevant = filterRelevantSources(sources.filter((x): x is string => typeof x === "string"), evidence.farmerText);
+    if (!relevant.length) {
+      if (!illustrative) return { ok: false, reason: "unverified-source" };
+      sources = ["assumptions"];
+    } else sources = relevant;
+  }
   if (research.length && sources.every(isAssumption)) sources = [...research, ...sources];
+  if (premium) sources = tidySourceList(sources as string[]);
   if (chart && typeof chart === "object") chart.sources = sources;
   return { ok: true, json: JSON.stringify(chart, null, 2), title };
 }

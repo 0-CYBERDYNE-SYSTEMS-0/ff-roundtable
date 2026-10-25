@@ -165,7 +165,7 @@ export function themedVegaSpec(chart: VegaChart, width = 600): Record<string, un
   chart = { ...chart, data: normalized.data, spec: fixEncodings(chart.spec, info) as VegaChart["spec"] };
   const { config: _config, $schema: _schema, ...rawSpec } = chart.spec;
   const composed = ["facet", "repeat", "concat", "hconcat", "vconcat"].some(key => key in rawSpec);
-  const spec = composed ? rawSpec : addSparseLabels(rawSpec, chart.data.length);
+  const spec = dedupeConstantTextLayers(composed ? rawSpec : addSparseLabels(rawSpec, chart.data.length));
   return {
     ...spec,
     $schema: "https://vega.github.io/schema/vega-lite/v6.json",
@@ -187,4 +187,141 @@ export function themedVegaSpec(chart: VegaChart, width = 600): Record<string, un
       title: { anchor: "start", fontSize: 16, color: "#253b36" },
     },
   };
+}
+
+// ---------- Gate C r3 helpers ----------
+
+const POSITION_FIELD_CHANNELS = ["x", "y", "theta", "x2", "y2", "color", "size", "radius"];
+
+/**
+ * True when the spec would draw at least one series: every positional field it
+ * encodes exists in the rows (or is produced by a transform `as`), and at least
+ * one quantitative field has a finite number. Composite specs (repeat/facet/
+ * concat) are trusted. An empty plot (axes, no marks) fails this check.
+ */
+export function chartHasPlottableSeries(chart: Pick<VegaChart, "data" | "spec">): boolean {
+  const spec = chart.spec as Record<string, unknown>;
+  if (["repeat", "facet", "concat", "hconcat", "vconcat"].some(k => k in spec)) return true;
+  const keys = new Set(chart.data.flatMap(row => Object.keys(row)));
+  const produced = new Set<string>();
+  const fields: Array<{ field: string; type?: string; aggregate?: unknown }> = [];
+  const walk = (node: unknown) => {
+    if (Array.isArray(node)) { node.forEach(walk); return; }
+    if (!node || typeof node !== "object") return;
+    const obj = node as Record<string, any>;
+    if (Array.isArray(obj.transform)) {
+      for (const t of obj.transform) {
+        if (!t || typeof t !== "object") continue;
+        for (const v of [t.as].flat()) if (typeof v === "string") produced.add(v);
+        for (const arr of [t.aggregate, t.window, t.joinaggregate]) if (Array.isArray(arr)) for (const a of arr) if (typeof a?.as === "string") produced.add(a.as);
+        if (t.fold) { produced.add("key"); produced.add("value"); }
+      }
+    }
+    if (obj.encoding && typeof obj.encoding === "object") {
+      for (const ch of POSITION_FIELD_CHANNELS) {
+        const enc = obj.encoding[ch];
+        if (enc && typeof enc === "object" && typeof enc.field === "string") fields.push({ field: enc.field.split(".")[0], type: enc.type, aggregate: enc.aggregate });
+      }
+    }
+    if (obj.layer) walk(obj.layer);
+  };
+  walk(spec);
+  if (!fields.length) return false;
+  const known = (f: string) => keys.has(f) || produced.has(f);
+  if (!fields.every(f => known(f.field))) return false;
+  const quantitative = fields.filter(f => f.type === "quantitative" && keys.has(f.field));
+  if (quantitative.length) {
+    return quantitative.some(f => chart.data.some(row => {
+      const v = (row as Record<string, unknown>)[f.field];
+      return (typeof v === "number" && Number.isFinite(v)) || (typeof v === "string" && NUMERIC_STRING.test(v));
+    }));
+  }
+  return true;
+}
+
+/** "12-month average" style labels: a constant text layer would repeat once per row; draw it once. */
+export function dedupeConstantTextLayers(spec: Record<string, unknown>): Record<string, unknown> {
+  if (!Array.isArray(spec.layer)) return spec;
+  const layer = (spec.layer as Array<Record<string, any>>).map(l => {
+    const mark = typeof l?.mark === "string" ? l.mark : l?.mark?.type;
+    const enc = l?.encoding ?? {};
+    const constantY = enc.y && (enc.y.datum !== undefined || enc.y.value !== undefined);
+    const constantText = (l?.mark && typeof l.mark === "object" && typeof l.mark.text === "string") || (enc.text && (enc.text.datum !== undefined || enc.text.value !== undefined));
+    if (mark !== "text" || !constantY || !constantText) return l;
+    const transform = Array.isArray(l.transform) ? l.transform : [];
+    if (transform.some((t: any) => t?.filter === "datum.__ff_rn === 1")) return l;
+    return { ...l, transform: [...transform, { window: [{ op: "row_number", as: "__ff_rn" }] }, { filter: "datum.__ff_rn === 1" }] };
+  });
+  return { ...spec, layer };
+}
+
+/** True when the farmer explicitly asked for a second / dual / right y-axis. */
+export function asksForDualAxis(text: string | undefined): boolean {
+  return !!text && /\b(dual|secondary|second|two|twin|right[- ]hand|right)\s+(y[- ]?)?ax(is|es)\b|\bdual[- ]axis\b|\btwo y\b/i.test(text);
+}
+
+/** Removes independent y scales/axes and right-oriented y axes (no dual axis unless asked). */
+export function stripDualAxis(spec: Record<string, unknown>): Record<string, unknown> {
+  const strip = (node: unknown): unknown => {
+    if (Array.isArray(node)) return node.map(strip);
+    if (!node || typeof node !== "object") return node;
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(node as Record<string, unknown>)) {
+      if (k === "resolve" && v && typeof v === "object") {
+        const r = JSON.parse(JSON.stringify(v));
+        if (r.scale) delete r.scale.y;
+        if (r.axis) delete r.axis.y;
+        if (r.scale && !Object.keys(r.scale).length) delete r.scale;
+        if (r.axis && !Object.keys(r.axis).length) delete r.axis;
+        if (Object.keys(r).length) out[k] = r;
+        continue;
+      }
+      if (k === "y" && v && typeof v === "object" && (v as any).axis && typeof (v as any).axis === "object" && (v as any).axis.orient === "right") {
+        const { orient: _o, ...axis } = (v as any).axis;
+        out[k] = { ...(v as object), axis };
+        continue;
+      }
+      out[k] = strip(v);
+    }
+    return out;
+  };
+  return strip(spec) as Record<string, unknown>;
+}
+
+const OUT_OF_REGION_DOMAINS = /(^|\.)(iastate\.edu|purdue\.edu|illinois\.edu|umn\.edu|unl\.edu|k-state\.edu|ksu\.edu|osu\.edu|psu\.edu|cornell\.edu|wisc\.edu|msu\.edu|uky\.edu|ufl\.edu|tamu\.edu|uga\.edu|ncsu\.edu|missouri\.edu|ohio-state\.edu)$/i;
+const LOW_QUALITY_DOMAINS = /(^|\.)(shuncy\.com|gardeningknowhow\.com|thespruce\.com|wikihow\.com|hunker\.com|homesandgardens\.com|reddit\.com|quora\.com|pinterest\.com)$/i;
+const PNW_QUESTION = /\b(oregon|willamette|eugene|corvallis|salem|portland|pacific northwest|pnw|western oregon|washington state|idaho)\b/i;
+const MIDWEST_CROP = /\b(corn|soybeans?|maize)\b/i;
+
+function hostOf(url: string): string {
+  try { return new URL(url).hostname.replace(/^www\./, "").toLowerCase(); } catch { return ""; }
+}
+
+/**
+ * Drops cited URLs that don't fit the question: low-quality content farms always,
+ * and out-of-region extension pages (Iowa, Purdue…) for a Pacific-Northwest
+ * question, unless the page is about a crop the farmer named. Regional sources
+ * (oregonstate.edu, wsu.edu, uidaho.edu, usda.gov) sort first.
+ */
+export function filterRelevantSources(sources: string[], questionText: string | undefined): string[] {
+  const q = questionText ?? "";
+  const pnw = PNW_QUESTION.test(q);
+  const askedMidwestCrop = MIDWEST_CROP.test(q);
+  const kept = sources.filter(s => {
+    if (!/^https?:\/\//i.test(s)) return true;
+    const host = hostOf(s);
+    if (LOW_QUALITY_DOMAINS.test(host)) return false;
+    if (pnw && OUT_OF_REGION_DOMAINS.test(host)) return false;
+    if (pnw && !askedMidwestCrop && MIDWEST_CROP.test(s)) return false;
+    return true;
+  });
+  const rank = (s: string) => { const h = hostOf(s); return /oregonstate\.edu$/.test(h) ? 0 : /(wsu\.edu|uidaho\.edu|usda\.gov|\.gov)$/.test(h) ? 1 : /^https?:/i.test(s) ? 2 : 3; };
+  return kept.map((s, i) => [s, i] as const).sort((a, b) => rank(a[0]) - rank(b[0]) || a[1] - b[1]).map(([s]) => s);
+}
+
+/** Footer: "assumptions" only when no real source remains. */
+export function tidySourceList(sources: string[]): string[] {
+  const isAssumption = (s: string) => /^(assumptions?|illustrative)$/i.test(s.trim());
+  const real = sources.filter(s => !isAssumption(s));
+  return real.length ? Array.from(new Set(real)) : sources.length ? ["assumptions"] : [];
 }
