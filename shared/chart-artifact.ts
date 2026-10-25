@@ -55,22 +55,85 @@ export function normalizeChartData(chart: VegaChart): { data: VegaChart["data"];
 }
 
 const MEASURE_CHANNELS = new Set(["y", "y2", "size", "theta", "radius"]);
-function fixEncodings(node: unknown, numeric: Set<string>): unknown {
-  if (Array.isArray(node)) return node.map(n => fixEncodings(n, numeric));
+const CATEGORY_CHANNELS = new Set(["x", "y", "row", "column", "color", "facet", "detail", "shape"]);
+const MONTHS_LONG = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
+/** Month index (0-11) for "Jan", "January", "Sept", etc.; -1 otherwise. */
+export function monthIndex(value: unknown): number {
+  if (typeof value !== "string") return -1;
+  const v = value.trim().toLowerCase().replace(/\.$/, "");
+  if (v.length < 3) return -1;
+  return MONTHS_LONG.findIndex(m => m.startsWith(v) || (v === "sept" && m === "september"));
+}
+type FieldInfo = { numeric: Set<string>; months: Map<string, string[]>; years: Set<string> };
+
+/** Field profiles used to fix encodings: month-name fields (calendar order) and integer-year fields. */
+export function profileFields(data: VegaChart["data"], numeric: Set<string>): FieldInfo {
+  const months = new Map<string, string[]>();
+  const years = new Set<string>();
+  const fields = Array.from(new Set(data.flatMap(row => Object.keys(row))));
+  for (const f of fields) {
+    const vals = data.map(r => (r as Record<string, unknown>)[f]).filter(v => v !== null && v !== undefined && v !== "");
+    if (!vals.length) continue;
+    if (vals.every(v => monthIndex(v) >= 0)) {
+      const distinct = Array.from(new Set(vals as string[]));
+      months.set(f, distinct.sort((a, b) => monthIndex(a) - monthIndex(b)));
+    } else if (numeric.has(f) && vals.every(v => Number.isInteger(Number(v)) && Number(v) >= 1900 && Number(v) <= 2100)
+      && (/year|season|yr/i.test(f) || vals.length <= 30)) {
+      years.add(f);
+    }
+  }
+  return { numeric, months, years };
+}
+
+function fixEncodings(node: unknown, info: FieldInfo | Set<string>): unknown {
+  const fi: FieldInfo = info instanceof Set ? { numeric: info, months: new Map(), years: new Set() } : info;
+  if (Array.isArray(node)) return node.map(n => fixEncodings(n, fi));
   if (!node || typeof node !== "object") return node;
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(node as Record<string, unknown>)) {
     if (k === "encoding" && v && typeof v === "object") {
       out[k] = Object.fromEntries(Object.entries(v as Record<string, any>).map(([ch, enc]) => {
-        if (enc && typeof enc === "object" && !Array.isArray(enc) && MEASURE_CHANNELS.has(ch)
-          && typeof enc.field === "string" && numeric.has(enc.field) && (enc.type === "ordinal" || enc.type === "nominal" || !enc.type)) {
+        if (!enc || typeof enc !== "object" || Array.isArray(enc) || typeof enc.field !== "string") return [ch, fixEncodings(enc, fi)];
+        if (MEASURE_CHANNELS.has(ch) && fi.numeric.has(enc.field) && (enc.type === "ordinal" || enc.type === "nominal" || !enc.type)) {
           return [ch, { ...enc, type: "quantitative" }];
         }
-        return [ch, fixEncodings(enc, numeric)];
+        const order = fi.months.get(enc.field);
+        if (order && CATEGORY_CHANNELS.has(ch)) {
+          // Month names are categories in calendar order. An explicit array sort
+          // from the spec is kept; "ascending"/"descending"/missing would be alphabetical.
+          const keep = Array.isArray(enc.sort) || (enc.sort && typeof enc.sort === "object") || (typeof enc.sort === "string" && !/^(ascending|descending)$/.test(enc.sort));
+          const sort = keep ? enc.sort : enc.sort === "descending" ? [...order].reverse() : order;
+          const type = enc.type === "temporal" || enc.type === "quantitative" || !enc.type ? "ordinal" : enc.type;
+          const { timeUnit: _tu, ...rest } = enc;
+          return [ch, { ...rest, type, sort }];
+        }
+        if (fi.years.has(enc.field) && (ch === "x" || ch === "y") && (enc.type === "quantitative" || !enc.type)) {
+          const axis = enc.axis === null ? null : { tickMinStep: 1, format: "d", ...(enc.axis ?? {}) };
+          return [ch, { ...enc, type: "quantitative", axis, scale: { zero: false, ...(enc.scale ?? {}) } }];
+        }
+        if (ch === "x" && (enc.type === "nominal" || enc.type === "ordinal") && enc.axis && typeof enc.axis === "object" && "labelOverlap" in enc.axis) {
+          // Specs that ask for labelOverlap hide every other category label (waterfalls).
+          const { labelOverlap: _lo, ...axis } = enc.axis;
+          return [ch, fixEncodings({ ...enc, axis }, fi)];
+        }
+        return [ch, fixEncodings(enc, fi)];
       }));
-    } else out[k] = fixEncodings(v, numeric);
+    } else out[k] = fixEncodings(v, fi);
   }
   return out;
+}
+
+/** Sparse single-view line/point charts get value labels so a handful of points read without hovering. */
+function addSparseLabels(spec: Record<string, unknown>, rows: number): Record<string, unknown> {
+  const mark = typeof spec.mark === "string" ? spec.mark : (spec.mark as any)?.type;
+  const enc = spec.encoding as Record<string, any> | undefined;
+  if (rows > 12 || !enc || !["line", "point"].includes(mark) || "layer" in spec) return spec;
+  const y = enc.y;
+  if (!y || typeof y.field !== "string" || y.type !== "quantitative" || y.aggregate) return spec;
+  const { mark: m, encoding, ...rest } = spec;
+  const textEnc: Record<string, unknown> = { x: enc.x, y, text: { field: y.field, type: "quantitative", format: ",.0f" } };
+  if (enc.color) textEnc.color = enc.color;
+  return { ...rest, layer: [{ mark: m, encoding }, { mark: { type: "text", dy: -10, fontSize: 11, fontWeight: 600 }, encoding: textEnc }] };
 }
 
 /** FarmFriend premium look (theme "farmfriend", emitted only when FF_PREMIUM_CHARTS prompts are on). */
@@ -82,8 +145,10 @@ function farmFriendConfig(width: number, hconcat: number) {
     view: { stroke: null, continuousWidth: Math.max(180, width / hconcat - 80), continuousHeight: 240 },
     range: { category: [...visualThemes.farmfriend], heatmap: ["#F4EED9", "#CFE3B4", "#8FC27A", "#4E9A5C", "#22663F", "#0F3D27"], ramp: ["#F4EED9", "#8FC27A", "#22663F"] },
     axis: { labelOverlap: true, labelLimit: 140, labelColor: muted, titleColor: muted, labelFontSize: 11.5, titleFontSize: 11.5, titleFontWeight: 600, gridColor: grid, gridDash: [3, 3], domain: false, tickColor: grid, labelPadding: 6, titlePadding: 10 },
-    axisX: { grid: false, domain: true, domainColor: "#CFC8B8" },
-    legend: { orient: "top", direction: "horizontal", labelColor: ink, labelFontSize: 12, titleFontSize: 11, titleColor: muted, symbolType: "circle", symbolSize: 110, columnPadding: 14 },
+    axisX: { grid: false, domain: true, domainColor: "#CFC8B8", labelFontSize: 12.5 },
+    // Category x labels: never drop alternate labels; angle + wrap-friendly limit instead.
+    axisXDiscrete: { labelOverlap: false, labelAngle: -35, labelAlign: "right", labelBaseline: "middle", labelLimit: 160, labelFontSize: 12.5 },
+    legend: { orient: "top", direction: "horizontal", titleLimit: 400, labelLimit: 260, titleOrient: "top", labelColor: ink, labelFontSize: 12, titleFontSize: 11, titleColor: muted, symbolType: "circle", symbolSize: 110, columnPadding: 14 },
     header: { labelFontSize: 13, labelFontWeight: 700, labelColor: ink },
     title: { anchor: "start", fontSize: 17, fontWeight: 700, color: ink, subtitleColor: muted },
     area: { line: { strokeWidth: 2 }, interpolate: "monotone" },
@@ -96,9 +161,11 @@ function farmFriendConfig(width: number, hconcat: number) {
 
 export function themedVegaSpec(chart: VegaChart, width = 600): Record<string, unknown> {
   const normalized = normalizeChartData(chart);
-  chart = { ...chart, data: normalized.data, spec: fixEncodings(chart.spec, normalized.numeric) as VegaChart["spec"] };
-  const { config: _config, $schema: _schema, ...spec } = chart.spec;
-  const composed = ["facet", "repeat", "concat", "hconcat", "vconcat"].some(key => key in spec);
+  const info = profileFields(normalized.data, normalized.numeric);
+  chart = { ...chart, data: normalized.data, spec: fixEncodings(chart.spec, info) as VegaChart["spec"] };
+  const { config: _config, $schema: _schema, ...rawSpec } = chart.spec;
+  const composed = ["facet", "repeat", "concat", "hconcat", "vconcat"].some(key => key in rawSpec);
+  const spec = composed ? rawSpec : addSparseLabels(rawSpec, chart.data.length);
   return {
     ...spec,
     $schema: "https://vega.github.io/schema/vega-lite/v6.json",
@@ -111,8 +178,9 @@ export function themedVegaSpec(chart: VegaChart, width = 600): Record<string, un
       view: { stroke: null, continuousWidth: Math.max(180, width / (Array.isArray(spec.hconcat) ? spec.hconcat.length : 1) - 80), continuousHeight: 240 },
       range: { category: [...visualThemes[chart.theme]] },
       axis: { labelOverlap: true, labelLimit: 140, labelFontSize: 12, titleFontSize: 12, titlePadding: 14, labelPadding: 8, labelColor: "#525b64", titleColor: "#354153", domain: false, tickSize: 0, gridColor: "#e8ecea", gridOpacity: 0.7 },
-      axisX: { labelAngle: -30, labelAlign: "right" },
-      legend: { orient: "bottom", labelFontSize: 12, titleFontSize: 12, padding: 12 },
+      axisX: { labelAngle: -30, labelAlign: "right", labelFontSize: 12.5 },
+      axisXDiscrete: { labelOverlap: false, labelAngle: -35, labelAlign: "right", labelBaseline: "middle", labelLimit: 160, labelFontSize: 12.5 },
+      legend: { orient: "bottom", titleLimit: 400, labelLimit: 260, labelFontSize: 12, titleFontSize: 12, padding: 12 },
       area: { opacity: 0.55 },
       line: { strokeWidth: 2.5 },
       point: { filled: true, size: 55 },
