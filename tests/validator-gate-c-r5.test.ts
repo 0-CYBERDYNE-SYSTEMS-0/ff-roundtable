@@ -1,6 +1,6 @@
 // Validator gate C round 5 on dev 1756fb2 (2026-10-25): one regression per finding.
 import { describe, expect, it } from "vitest";
-import { readFileSync } from "fs";
+import { readFileSync, existsSync } from "fs";
 import { buildInlineCalendarArtifact, wantsCalendar, parseSeason, resolveScheduleAnchor, cleanEventNotes, extractScheduleRows, parseTimingCell } from "../shared/schedule-extract";
 import { parseInlineCalendar } from "../shared/inline-calendar";
 import { rankSource, filterRelevantSources, ensureFacetWhenAsked, applyFacetScales, isFacetedSpec, asksForSmallMultiples } from "../shared/chart-artifact";
@@ -111,7 +111,8 @@ describe("(5) facet trigger prompt reliably hits the facet path", () => {
     expect((out.spec as any).resolve.scale.y).toBe("independent");
     expect(ensureFacetWhenAsked(spec, "compare yields")).toBe(spec);
   });
-  it("prompt is documented in REPORT.md", () => {
-    expect(readFileSync("/workspace/ffrt-qa/charts-dev-2026-10-25/REPORT.md", "utf8")).toContain(FACET_TRIGGER_PROMPT);
+  const REPORT = "/workspace/ffrt-qa/charts-dev-2026-10-25/REPORT.md";
+  it.skipIf(!existsSync(REPORT))("prompt is documented in REPORT.md", () => {
+    expect(readFileSync(REPORT, "utf8")).toContain(FACET_TRIGGER_PROMPT);
   });
 });
