@@ -96,6 +96,47 @@ const GENERIC_TABLE_TITLE_RE = /^Data Table \d+$/;
  * from the row's first meaningful description cell instead — "Soil test —
  * Week 1" reads like an event, "Data Table 1 — Week 1" does not.
  */
+/** Calendar display name: the conversation title unless it is the default, else the plan's calendar or file title. */
+export function calendarDisplayName(conversationTitle: string | null | undefined, messages: Message[], files: File[] = []): string {
+  const t = (conversationTitle ?? "").trim();
+  if (t && !/^(new conversation|untitled|roundtable)$/i.test(t)) return t;
+  for (const m of messages ?? []) for (const a of (m as { artifacts?: Artifact[] }).artifacts ?? []) {
+    if ((a as { type?: string }).type === "calendar" && a.title && !/^calendar$/i.test(a.title)) return humanizeTitle(a.title);
+  }
+  const plan = (files ?? []).find(f => !f.supersededAt && f.uploadedBy?.startsWith("Expert:") && /\.md$/i.test(f.filename));
+  if (plan) return humanizeTitle(plan.filename.replace(/\.md$/i, ""));
+  return t || "Roundtable calendar";
+}
+
+function humanizeTitle(slug: string): string {
+  if (/\s/.test(slug)) return slug;
+  const w = slug.replace(/[-_]+/g, " ").trim();
+  return w.charAt(0).toUpperCase() + w.slice(1);
+}
+
+/** Notes never repeat the event title. */
+export function notesWithoutTitle(description: string, title: string): string {
+  const t = title.replace(/ — Week \d+$/, "").trim();
+  if (!t) return description;
+  const parts = description.split(" — ").map(p => p.trim()).filter(p => p && p.toLowerCase() !== t.toLowerCase());
+  return parts.join(" — ");
+}
+
+const WARM_SEASON_RE = /\b(warm[- ]season|tomato(es)?|peppers?|squash|melons?|cucumbers?|beans?|corn|basil|eggplants?)\b/i;
+/** Warm-season transplants / direct seeding go after the quoted last-frost average (+7 days), never before. */
+export function afterLastFrost(summary: string, startDate: string, frostIso: string | undefined): string {
+  if (!frostIso || !WARM_SEASON_RE.test(summary) || !/\b(transplant|set out|plant(ing)? out|direct[- ]seed|sow)\b/i.test(summary)) return startDate;
+  const min = addDaysIso(frostIso, 7);
+  return startDate < min ? min : startDate;
+}
+
+/** Final event list for any calendar surface: dates, frost rule, clean de-duplicated notes. */
+export function finalizeCalendarEvents<T extends { summary: string; startDate: string; description: string }>(events: T[], frostIso: string | undefined): T[] {
+  return events
+    .map(e => ({ ...e, startDate: afterLastFrost(e.summary, e.startDate, frostIso), description: notesWithoutTitle(e.description, e.summary) }))
+    .sort((a, b) => a.startDate.localeCompare(b.startDate));
+}
+
 export function buildRowSummary(row: ScheduleRow): string {
   if (row.task) return row.weekIndex !== undefined && !row.date ? `${row.task} — Week ${row.weekIndex}` : row.task;
   if (GENERIC_TABLE_TITLE_RE.test(row.title.trim())) {
@@ -482,7 +523,20 @@ export function planFileTexts(files: File[], readFile: (absolutePath: string) =>
   return out;
 }
 
+/** The Week-1 anchor saved with the conversation's first calendar artifact (gate C r7: one anchor per calendar). */
+export function findPersistedCalendarAnchor(messages: Message[]): string | undefined {
+  for (const m of messages ?? []) {
+    for (const a of (m as { artifacts?: Artifact[] }).artifacts ?? []) {
+      if ((a as { type?: string }).type !== "calendar") continue;
+      try { const anchor = JSON.parse(a.content)?.anchor; if (typeof anchor === "string" && parseIsoDate(anchor)) return anchor; } catch { /* not JSON */ }
+    }
+  }
+  return undefined;
+}
+
 export function findConversationAnchor(messages: Message[], todayIso: string, extraTexts: string[] = []): string | undefined {
+  const persisted = findPersistedCalendarAnchor(messages);
+  if (persisted) return persisted;
   return findPlanAnchor([...messageTexts(messages), ...extraTexts], todayIso);
 }
 
@@ -502,7 +556,7 @@ export function extractScheduleRows(
   todayIso: string = new Date().toISOString().slice(0, 10),
 ): ScheduleRow[] {
   const rows: ScheduleRow[] = [];
-  let anchorIso: string | undefined = findPlanAnchor([...messageTexts(messages), ...planFileTexts(files, readFile)], todayIso);
+  let anchorIso: string | undefined = findConversationAnchor(messages, todayIso, planFileTexts(files, readFile));
 
   for (const message of messages ?? []) {
     anchorIso = findTimingAnchor(String((message as { content?: unknown }).content ?? ""), todayIso) ?? anchorIso;
@@ -564,6 +618,8 @@ export function buildInlineCalendarArtifact(opts: {
   deliverableTitle?: string;
   contextText: string;
   todayIso: string;
+  /** Anchor persisted with this conversation's calendar; when set it is used verbatim. */
+  persistedAnchor?: string;
 }): Artifact | null {
   const messages = [{ content: opts.contextText, artifacts: opts.artifacts }] as unknown as Message[];
   const files = opts.deliverableMarkdown
@@ -572,9 +628,9 @@ export function buildInlineCalendarArtifact(opts: {
   const rows = extractScheduleRows(messages, files, () => opts.deliverableMarkdown ?? null, opts.todayIso);
   if (!rows.length) return null;
   const stated = findConversationAnchor(messages, opts.todayIso, opts.deliverableMarkdown ? [opts.deliverableMarkdown] : []);
-  const anchor = resolveScheduleAnchor(stated, opts.todayIso);
-  const events: InlineCalendarEvent[] = rows
-    .map((row) => ({ summary: buildRowSummary(row), startDate: resolveRowStartDate(row, anchor), description: row.description }))
-    .sort((a, b) => a.startDate.localeCompare(b.startDate));
+  const anchor = opts.persistedAnchor ?? resolveScheduleAnchor(stated, opts.todayIso);
+  const frost = [opts.contextText, opts.deliverableMarkdown ?? "", ...opts.artifacts.filter(a => a.type === "table").map(a => a.content)].map(t => findFrostAnchor(t, opts.todayIso)).find(Boolean);
+  const events: InlineCalendarEvent[] = finalizeCalendarEvents(rows
+    .map((row) => ({ summary: buildRowSummary(row), startDate: resolveRowStartDate(row, anchor), description: row.description })), frost);
   return { type: "calendar", title: opts.deliverableTitle ?? "Calendar", content: JSON.stringify({ anchor, events }), language: "json" } as Artifact;
 }

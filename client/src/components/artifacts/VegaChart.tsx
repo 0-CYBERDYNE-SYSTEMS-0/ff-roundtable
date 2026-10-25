@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { parseVegaChart, themedVegaSpec, chartHasPlottableSeries, tidySourceList } from "@shared/chart-artifact";
+import { parseVegaChart, themedVegaSpec, chartHasPlottableSeries, tidySourceList, readableSourceTitle } from "@shared/chart-artifact";
 
 export default function VegaChart({ content }: { content: string }) {
   const host = useRef<HTMLDivElement>(null);
@@ -56,7 +56,7 @@ export default function VegaChart({ content }: { content: string }) {
       {error && <p role="alert" className="text-sm text-amber-800 dark:text-amber-300">{error}</p>}
       <div ref={host} className="w-full overflow-x-auto rounded-lg bg-white p-1" aria-label={chart?.title || "Visualization"} />
       {chart && <>
-        <p className="text-xs text-neutral-500">Sources: {tidySourceList(chart.sources).map((source, index) => <span key={source}>{index > 0 && " · "}{/^https?:\/\//i.test(source) ? <a className="underline" href={source} target="_blank" rel="noopener noreferrer">{source}</a> : source}</span>)}</p>
+        <p className="text-xs text-neutral-500">Sources: {tidySourceList(chart.sources).map((source, index) => <span key={source}>{index > 0 && " · "}{/^https?:\/\//i.test(source) ? <a className="underline" href={source} target="_blank" rel="noopener noreferrer" title={source}>{readableSourceTitle(undefined, source)}</a> : source}</span>)}</p>
         <details className="text-xs text-neutral-600">
           <summary className="cursor-pointer">View source data · {chart.data.length} rows</summary>
           {chart.data.length > 100 && <p className="mt-2">Showing the first 100 rows. Download the chart JSON for the complete dataset.</p>}

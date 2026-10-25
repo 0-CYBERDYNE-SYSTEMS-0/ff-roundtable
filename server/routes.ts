@@ -20,7 +20,7 @@ import { extractMentions } from "@shared/mentions";
 import { buildVCalendar } from "@shared/ics";
 import { calendarEventsSchema, type CalendarDraft } from "@shared/calendar-draft";
 import { inspectCalendar } from "./calendar-files";
-import { extractScheduleRows, parseIsoDate, nextMondayFrom, resolveRowStartDate, buildRowSummary, resolveScheduleAnchor, findConversationAnchor, planFileTexts } from "@shared/schedule-extract";
+import { extractScheduleRows, parseIsoDate, nextMondayFrom, resolveRowStartDate, buildRowSummary, resolveScheduleAnchor, findConversationAnchor, planFileTexts, calendarDisplayName, finalizeCalendarEvents, findFrostAnchor } from "@shared/schedule-extract";
 import { generateComprehensiveMarkdown } from './export-utils';
 import { getWeatherForFarm, formatWeatherContext } from './weather';
 import { isDuplicateUserSubmission } from './text-similarity';
@@ -379,6 +379,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
     let pathname = "";
     try { pathname = new URL(req.url ?? "", "http://localhost").pathname; } catch { /* malformed */ }
     if (pathname !== "/ws") return;
+    // Diagnostics (no secrets): which upgrades reach /ws and whether a session cookie came with them.
+    console.log(`[WS] upgrade ${pathname}${(req.url ?? "").includes("?") ? "?…" : ""} cookie=${/(?:^|;\s*)connect\.sid=/.test(req.headers.cookie ?? "") ? "yes" : "no"}`);
     wss.handleUpgrade(req, socket, head, ws => wss.emit("connection", ws, req));
   });
   
@@ -402,6 +404,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     const sid = getVerifiedSessionIdFromUpgradeRequest(req);
 
     if (!sid) {
+      console.log(`[WS] 4401: ${req.headers.cookie?.includes("connect.sid=") ? "session cookie signature did not verify (SESSION_SECRET " + (process.env.SESSION_SECRET ? "set" : "missing") + ")" : "no session cookie on upgrade"}`);
       rejectUnauthenticated();
       return;
     }
@@ -427,6 +430,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       const userId = session?.passport?.user;
       if (err || userId == null) {
+        console.log(`[WS] 4401: ${err ? "session store error" : "session has no logged-in user"}`);
         rejectUnauthenticated();
         return;
       }
@@ -1919,8 +1923,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // background preview from logging a 422 for every plan-less conversation.
       if (!rows.length) return res.json({ events: [], empty: true, calendarName: conversation.title ?? "Roundtable", currentFileId: null, version: null, message: "No schedulable items found. Ask the council for a dated plan first." });
       const draft: CalendarDraft = {
-        events: rows.map((row, index) => ({ uid: `${conversationId}-${index}@farmfriend-roundtable`, summary: buildRowSummary(row), startDate: resolveRowStartDate(row, anchor), description: row.description })),
-        calendarName: conversation.title ?? "Roundtable", currentFileId: null, version: null,
+        events: finalizeCalendarEvents(rows.map((row, index) => ({ uid: `${conversationId}-${index}@farmfriend-roundtable`, summary: buildRowSummary(row), startDate: resolveRowStartDate(row, anchor), description: row.description })), [...planMessages.map(m => m.content), ...planFileTexts(planFiles)].map(t => findFrostAnchor(String(t ?? ""), todayIso)).find(Boolean)),
+        calendarName: calendarDisplayName(conversation.title, planMessages, planFiles), currentFileId: null, version: null,
       };
       return res.json({ ...draft, anchor, autoAnchor });
     } catch {
@@ -1997,12 +2001,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
         });
       }
 
-      const events = rows.map((row, index) => ({
+      const events = finalizeCalendarEvents(rows.map((row, index) => ({
         uid: `${conversationId}-${index}@farmfriend-roundtable`,
         summary: buildRowSummary(row),
         startDate: resolveRowStartDate(row, anchor),
         description: row.description,
-      }));
+      })), [...messages.map(m => String(m.content ?? "")), ...planFileTexts(files)].map(t => findFrostAnchor(t, todayIso)).find(Boolean));
 
       if (req.query.preview === "1") {
         const scheduleVersions = files
