@@ -267,6 +267,27 @@ describe("WebSocket scoping (G3)", () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });
 
+  it("leaves non-/ws upgrades (Vite HMR) alone instead of answering 400", async () => {
+    // A sibling upgrade listener (like Vite HMR) must get the socket untouched.
+    let sawOther = false;
+    const other = (req: any, socket: any) => {
+      if (String(req.url).startsWith("/vite-hmr")) { sawOther = true; socket.destroy(); }
+    };
+    server.on("upgrade", other);
+    try {
+      const outcome = await new Promise<string>((resolve) => {
+        const ws = new WebSocket(wsUrl.replace("/ws", "/vite-hmr?token=x"), "vite-hmr");
+        ws.on("unexpected-response", (_req, res) => resolve(`http ${res.statusCode}`));
+        ws.on("error", () => resolve("error"));
+        ws.on("close", () => resolve("closed"));
+      });
+      expect(outcome).not.toBe("http 400");
+      expect(sawOther).toBe(true);
+    } finally {
+      server.off("upgrade", other);
+    }
+  });
+
   it("closes unauthenticated upgrades with 4401 and sends no messages", async () => {
     const noCookie = await connect(wsUrl);
     const closed = await closeOf(noCookie.ws);

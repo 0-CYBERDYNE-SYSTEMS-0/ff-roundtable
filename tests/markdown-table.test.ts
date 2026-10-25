@@ -19,6 +19,7 @@ it("dev HMR stays on the page's own origin (no forced clientPort)", async () => 
   const { readFileSync } = await import("fs");
   const src = readFileSync(new URL("../server/vite.ts", import.meta.url), "utf8");
   expect(src).not.toMatch(/clientPort/);
+  expect(src).toContain('path: "/vite-hmr"');
   const ws = readFileSync(new URL("../client/src/lib/websocket-utils.ts", import.meta.url), "utf8");
   expect(ws).toContain("window.location.host");
 });

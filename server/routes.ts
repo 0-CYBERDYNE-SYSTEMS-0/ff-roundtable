@@ -370,9 +370,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
   const httpServer = createServer(app);
   
   // Initialize WebSocket server for real-time expert responses
-  const wss = new WebSocketServer({ 
-    server: httpServer,
-    path: "/ws" // Specify a path for WebSocket connections
+  // noServer + explicit routing: `new WebSocketServer({ server, path })` answers
+  // EVERY other upgrade on this http server with 400, which killed Vite's dev
+  // HMR socket (client then fell back to wss://localhost:undefined). Only /ws
+  // is handled here; other upgrades (Vite HMR at /vite-hmr) are left alone.
+  const wss = new WebSocketServer({ noServer: true });
+  httpServer.on("upgrade", (req, socket, head) => {
+    let pathname = "";
+    try { pathname = new URL(req.url ?? "", "http://localhost").pathname; } catch { /* malformed */ }
+    if (pathname !== "/ws") return;
+    wss.handleUpgrade(req, socket, head, ws => wss.emit("connection", ws, req));
   });
   
   console.log("WebSocket server initialized on path: /ws");
