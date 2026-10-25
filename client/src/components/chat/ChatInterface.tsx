@@ -10,6 +10,7 @@ import { format } from "date-fns";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { markdownTableComponents } from "./markdown-table";
+import { normalizeMarkdownTablesInText } from "@shared/markdown-table-normalize";
 import { formatMessageDate } from "@/lib/file-utils";
 import ModelBadge from "../roundtable/ModelBadge";
 import ConversationSidebar from "../roundtable/ConversationSidebar";
@@ -553,7 +554,7 @@ export default function ChatInterface({
         remarkPlugins={[remarkGfm]}
         components={isSynthesis ? synthesisMarkdownComponents : markdownComponents}
       >
-        {prepared}
+        {normalizeMarkdownTablesInText(prepared)}
       </ReactMarkdown>
     );
   };

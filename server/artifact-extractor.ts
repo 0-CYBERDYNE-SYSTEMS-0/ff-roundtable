@@ -1,3 +1,4 @@
+import { normalizeMarkdownTable } from "@shared/markdown-table-normalize";
 import { Artifact } from "@shared/schema";
 import { truncateChars } from "@shared/ics";
 import { stripMarkdownToText } from "@shared/markdown";
@@ -133,7 +134,7 @@ export function extractArtifacts(content: string): { artifacts: Artifact[]; clea
     artifacts.push({
       type: "table",
       title,
-      content: tableContent,
+      content: normalizeMarkdownTable(tableContent),
       language: "markdown"
     });
     
