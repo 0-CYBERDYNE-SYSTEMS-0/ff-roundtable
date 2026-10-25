@@ -10,5 +10,7 @@ it("verdict tables scroll instead of wrapping letter by letter", () => {
     createElement(ReactMarkdown, { remarkPlugins: [remarkGfm], components: markdownTableComponents }, md)));
   expect(html).toContain("overflow-x-auto");
   expect(html).toMatch(/<th class="[^"]*\[overflow-wrap:normal\][^"]*min-w-\[5\.5rem\]/);
+  expect(html).toContain("px-3");
+  expect(html).toContain("border-spacing-x-1");
   expect(html).toContain("<strong>agree</strong>");
 });
