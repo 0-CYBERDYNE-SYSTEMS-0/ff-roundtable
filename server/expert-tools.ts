@@ -16,7 +16,7 @@ import net from "net";
 import { compile, type TopLevelSpec } from "vega-lite";
 import { premiumChartsEnabled } from "./chart-picker";
 import { parseChartJsonWithRepair, fallbackSpecFromRows, hoistNestedData } from "./chart-repair";
-import { parseVegaChart, themedVegaSpec, chartHasPlottableSeries, stripDualAxis, asksForDualAxis, filterRelevantSources, tidySourceList, applyFacetScales, rankSource, ensureFacetWhenAsked } from "@shared/chart-artifact";
+import { parseVegaChart, themedVegaSpec, chartHasPlottableSeries, stripDualAxis, asksForDualAxis, filterRelevantSources, tidySourceList, applyFacetScales, rankSource, ensureFacetWhenAsked, readableSourceTitle } from "@shared/chart-artifact";
 
 export const MAX_TOOL_CALLS_PER_TURN = 3;
 export const TOOL_TIMEOUT_MS = 10_000;
@@ -162,7 +162,7 @@ export async function runToolCalls(calls: ToolCall[], fetchImpl: FetchLike = fet
           if (!relevant(r.url)) { notes.push(`Search result ${r.url} skipped: not relevant to the farmer's crop/region.`); continue; }
           try {
             const page = await fetchPage(r.url, fetchImpl);
-            sources.push({ id: `S${sources.length + 1}`, title: page.title || r.title, url: page.url, snippet: page.text });
+            sources.push({ id: `S${sources.length + 1}`, title: readableSourceTitle(page.title, page.url, r.title), url: page.url, snippet: page.text });
             verified = true;
             break;
           } catch (error) {
@@ -173,13 +173,15 @@ export async function runToolCalls(calls: ToolCall[], fetchImpl: FetchLike = fet
       } else {
         if (!relevant(call.url)) { notes.push(`Fetch ${call.url} skipped: not relevant to the farmer's crop/region.`); continue; }
         const page = await fetchPage(call.url, fetchImpl);
-        sources.push({ id: `S${sources.length + 1}`, title: page.title, url: page.url, snippet: page.text });
+        sources.push({ id: `S${sources.length + 1}`, title: readableSourceTitle(page.title, page.url), url: page.url, snippet: page.text });
       }
     } catch (error) {
       notes.push(`${call.tool === "search" ? `Search "${call.query}"` : `Fetch ${call.url}`} failed: ${(error as Error).message}`);
     }
   }
-  return { calls, sources, notes };
+  // Authoritative first across calls (OSU/USDA/NOAA before app frost sites); ids follow the new order.
+  const ranked = sources.map((s, i) => ({ s, i })).sort((a, b) => rankSource(a.s.url, questionText) - rankSource(b.s.url, questionText) || a.i - b.i).map(({ s }, i) => ({ ...s, id: `S${i + 1}` }));
+  return { calls, sources: ranked, notes };
 }
 
 export function formatToolResultsForPrompt(run: ToolRun): string {

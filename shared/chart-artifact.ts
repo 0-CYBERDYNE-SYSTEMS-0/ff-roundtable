@@ -323,6 +323,7 @@ export function filterRelevantSources(sources: string[], questionText: string | 
 }
 
 const FIELD_CROP_QUESTION = /\b(field|acres?|ac\b|farm|grass seed|fescue|ryegrass|wheat|barley|oats|hay|alfalfa|clover|hazelnuts?|filberts?|corn|soybeans?|canola|meadowfoam|hops|mint|row crops?|cover crops?|pasture|tons?\/ac|lb\/ac|bu\/ac)\b/i;
+const FROST_CLIMATE_QUESTION = /\b(frost|freeze|freezing|last frost|first frost|growing degree|gdd|climate|normals?|hardiness|chill hours|temperature)\b/i;
 const HOME_GARDEN_URL = /(garden(ing)?[-_/]|home[-_]?garden|master[-_]?gardener|vegetable[-_]garden|backyard|yard[-_]and[-_]garden|monthly[-_]garden|garden[-_]calendar|\/gardening\b|\/garden\b)/i;
 const FIELD_CROP_URL = /(crop[-_]production|field[-_]crops?|cropandsoil|agsci|grass[-_]seed|seed[-_]crops|hazelnut|wheat|cereal|forage|catalog\/(?:em|pnw|ec)[-_]?\d)/i;
 
@@ -335,11 +336,40 @@ export function rankSource(url: string, questionText?: string): number {
   const h = hostOf(url);
   const fieldCrop = FIELD_CROP_QUESTION.test(questionText ?? "");
   let r = /oregonstate\.edu$/.test(h) ? 0 : /(wsu\.edu|uidaho\.edu|usda\.gov|\.gov)$/.test(h) ? 1 : 2;
+  // Frost / climate questions: OSU, USDA and NOAA (and other .gov/.edu) outrank app and blog frost-date sites.
+  if (FROST_CLIMATE_QUESTION.test(questionText ?? "")) {
+    if (/(oregonstate\.edu|usda\.gov|noaa\.gov|weather\.gov|climate\.gov|prism\.oregonstate\.edu)$/.test(h)) r = Math.min(r, 0);
+    else if (!/\.(gov|edu)$/.test(h)) r += 1.5;
+  }
   if (fieldCrop) {
     if (HOME_GARDEN_URL.test(url)) r += 2.5;
     else if (FIELD_CROP_URL.test(url)) r -= 0.5;
   }
   return r;
+}
+
+/** True when a title is really a file name (151_strik_davis_legacy_pruning.pdf) or a bare host. */
+export function looksLikeFileName(title: string): boolean {
+  const t = (title ?? "").trim();
+  return !t || /\.(pdf|docx?|xlsx?|pptx?|html?|aspx|php)$/i.test(t) || (/[_]/.test(t) && !/\s/.test(t)) || /^[\w.-]+\.[a-z]{2,}$/i.test(t);
+}
+
+function humanize(seg: string): string {
+  const words = decodeURIComponent(seg).replace(/\.[a-z0-9]{2,5}$/i, "").replace(/[_\-+]+/g, " ").replace(/^\s*\d+\s+/, "").trim();
+  return words.replace(/\b([a-z])/g, (c) => c.toUpperCase());
+}
+
+/**
+ * Readable source name: the page or PDF title when it is a real title, else a
+ * search-result title, else "host — Path Title". Never a raw file name.
+ */
+export function readableSourceTitle(title: string | undefined, url: string, fallbackTitle?: string): string {
+  if (title && !looksLikeFileName(title)) return title.trim();
+  if (fallbackTitle && !looksLikeFileName(fallbackTitle)) return fallbackTitle.trim();
+  let host = "", segs: string[] = [];
+  try { const u = new URL(url); host = u.hostname.replace(/^www\./, ""); segs = u.pathname.split("/").filter(Boolean); } catch { return title || url; }
+  const last = segs.length ? humanize(segs[segs.length - 1]) : "";
+  return last ? `${host} — ${last}` : host;
 }
 
 /** Footer: "assumptions" only when no real source remains. */

@@ -1,3 +1,4 @@
+import { readableSourceTitle } from "@shared/chart-artifact";
 import { buildInlineCalendarArtifact, wantsCalendar } from "@shared/schedule-extract";
 import { CALENDAR_TABLE_RULE } from "./calendar-notes-prompt";
 import { storage } from "./storage";
@@ -142,7 +143,7 @@ async function finalizeExpertTools(
   if (toolRun?.sources.length) {
     const cited = toolRun.sources.filter(s => text.includes(`[${s.id.toUpperCase()}]`) || text.includes(s.url));
     if (cited.length) {
-      const block = `\n\n**Verified sources:**\n${cited.map(s => `- [${s.id}] [${s.title || s.url}](${s.url})`).join("\n")}`;
+      const block = `\n\n**Verified sources:**\n${cited.map(s => `- [${s.id}] [${readableSourceTitle(s.title, s.url)}](${s.url})`).join("\n")}`;
       text += block; addition += block;
     }
   }
