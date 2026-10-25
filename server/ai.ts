@@ -21,7 +21,7 @@ export { commitPendingDeliverable, discardPendingDeliverable } from "./pending-d
 import { enforceCitationIntegrity, removeUnsupportedCitedSentences, stripMetaLines, undecorate, mergeDuplicateFarmerQuestions, removeRepeatedExpertSentences } from "./response-hygiene";
 import {
   buildToolUsePrompt, buildToolPlanningPrompt, parseToolPlan, runToolCalls, formatToolResultsForPrompt,
-  toolCallLimitForTier, rememberSharedResearch, getSharedResearch, formatSharedResearchForPrompt, extractDeliverable, saveExpertDeliverable, filterChartArtifacts, type ChartArtifactRejectionReason, type ChartEvidence, type ToolRun,
+  toolCallLimitForTier, rememberSharedResearch, getSharedResearch, formatSharedResearchForPrompt, extractDeliverable, saveExpertDeliverable, filterChartArtifacts, chartResearchUrls, type ChartArtifactRejectionReason, type ChartEvidence, type ToolRun,
 } from "./expert-tools";
 
 /** Expert tools are on by default; EXPERT_TOOLS=off disables them. Unit tests never hit the network. */
@@ -1308,6 +1308,7 @@ export async function getExpertResponseStream(
     const chartEvidence: ChartEvidence = {
       farmerText: history.filter(message => message.role === "user").map(message => message.content).join("\n"),
       weatherText: weatherContext,
+      researchUrls: chartResearchUrls(response.message.content, [...(toolRun?.sources ?? []), ...getSharedResearch(expert.conversationId)]),
     };
     const { kept: artifacts, dropped: droppedCharts, droppedReasons } = filterChartArtifacts(extracted.artifacts, allowedChartUrls, chartEvidence);
     logRejectedCharts(expert.role, droppedReasons);
@@ -1466,6 +1467,7 @@ export async function getExpertResponse(
     const extractedNonStream = extractArtifacts(response.message.content);
     const chartEvidence: ChartEvidence = {
       farmerText: history.filter(message => message.role === "user").map(message => message.content).join("\n"),
+      researchUrls: chartResearchUrls(response.message.content, [...(toolRunNs?.sources ?? []), ...getSharedResearch(expert.conversationId)]),
     };
     const { kept: artifacts, dropped: droppedCharts, droppedReasons } = filterChartArtifacts(extractedNonStream.artifacts, [...(toolRunNs?.sources.map(src => src.url) ?? []), ...getSharedResearch(expert.conversationId).map(src => src.url)], chartEvidence);
     logRejectedCharts(expert.role, droppedReasons);

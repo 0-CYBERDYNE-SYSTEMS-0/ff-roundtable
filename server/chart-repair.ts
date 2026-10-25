@@ -31,9 +31,50 @@ function stripComments(text: string): string {
   return out;
 }
 
+/** Curly quotes → straight; single-quoted strings → double-quoted (outside double-quoted strings). */
+function normalizeQuotes(text: string): string {
+  const t = text.replace(/[\u201C\u201D\u201E]/g, '"').replace(/[\u2018\u2019]/g, "'");
+  let out = "", inDouble = false;
+  for (let i = 0; i < t.length; i++) {
+    const c = t[i];
+    if (inDouble) { out += c; if (c === "\\") out += t[++i] ?? ""; else if (c === '"') inDouble = false; continue; }
+    if (c === '"') { inDouble = true; out += c; continue; }
+    if (c === "'" && /[\s{\[,:]/.test(t[i - 1] ?? " ")) {
+      const end = t.indexOf("'", i + 1);
+      if (end > i && !t.slice(i + 1, end).includes("\n")) { out += JSON.stringify(t.slice(i + 1, end)); i = end; continue; }
+    }
+    out += c;
+  }
+  return out;
+}
+
+/** Left-to-right with * and / precedence; only digits and + - * / reach here. */
+function evalArithmetic(expr: string): number {
+  const tokens = expr.replace(/\s+/g, "").match(/^-?\d+(?:\.\d+)?|[-+*/]|\d+(?:\.\d+)?/g) ?? [];
+  const terms: number[] = []; let op = "+"; let i = 0;
+  const num = () => Number(tokens[i++]);
+  let cur = num();
+  while (i < tokens.length) {
+    const o = tokens[i++]; const n = num();
+    if (o === "*") cur *= n; else if (o === "/") cur /= n;
+    else { terms.push(op === "-" ? -cur : cur); op = o; cur = n; }
+  }
+  terms.push(op === "-" ? -cur : cur);
+  const total = terms.reduce((a, b) => a + b, 0);
+  return Number.isFinite(total) ? Math.round(total * 1e6) / 1e6 : 0;
+}
+
 /** Lenient fixes for typical cheap-model slips: unquoted keys, trailing commas, comments, NaN. */
 export function lenientJson(text: string): string {
-  return stripComments(text)
+  return stripComments(normalizeQuotes(text))
+    // Thousands separators in bare numbers: "hours": 1,800 → 1800 (only after a key).
+    .replace(/(:\s*-?)(\d{1,3}(?:,\d{3})+)(?=\s*[,}\]\n])/g, (_m, p, n) => p + n.replace(/,/g, ""))
+    // Simple arithmetic models leave in values: "net": 6500 - 6300 → 200.
+    .replace(/(:\s*)(-?\d+(?:\.\d+)?(?:\s*[-+*/]\s*\d+(?:\.\d+)?)+)(?=\s*[,}\]])/g, (_m, p, expr) => p + String(evalArithmetic(expr)))
+    // Missing commas between array items / properties.
+    .replace(/}(\s*){/g, "},$1{")
+    .replace(/](\s*)\[/g, "],$1[")
+    .replace(/"(\s*\n\s*)"/g, '",$1"')
     .replace(/([{,]\s*)"?([A-Za-z_$][\w$]*)"?(\s*):/g, '$1"$2"$3:')
     .replace(/:\s*(NaN|undefined|Infinity|-Infinity)\b/g, ": null")
     .replace(/,(\s*[}\]])/g, "$1");

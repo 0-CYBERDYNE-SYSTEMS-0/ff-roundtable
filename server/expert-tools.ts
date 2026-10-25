@@ -361,7 +361,14 @@ export type ChartArtifactRejectionReason =
   | "unverified-source"
   | "missing-data";
 
-export type ChartEvidence = { farmerText?: string; weatherText?: string };
+export type ChartEvidence = { farmerText?: string; weatherText?: string; researchUrls?: string[] };
+
+/** Research URLs this turn's text actually cites (by [S1]/[R1] id or URL); all fetched URLs if none are cited explicitly. */
+export function chartResearchUrls(text: string, sources: Array<Pick<ToolSource, "id" | "url">>): string[] {
+  const cited = sources.filter(s => s.url && (text.includes(s.url) || (s.id && text.toUpperCase().includes(`[${s.id.toUpperCase()}]`))));
+  const picked = (cited.length ? cited : sources).map(s => s.url).filter(Boolean);
+  return Array.from(new Set(picked)).slice(0, 5);
+}
 
 type ChartValidationResult =
   | { ok: true; json: string; title: string }
@@ -440,8 +447,23 @@ export function validateChartArtifactDetailed(
     chart = parsed;
   }
   const allowed = new Set(allowedUrls);
-  const ok = sources.every(s => typeof s === "string" && (allowed.has(s.trim()) || /^(farmer|weather)$/i.test(s.trim()) || (illustrative && /^(assumptions?|illustrative)$/i.test(s.trim()))));
+  const isAssumption = (s: unknown) => typeof s === "string" && /^(assumptions?|illustrative)$/i.test(s.trim());
+  const accepted = (s: unknown) => typeof s === "string" && (allowed.has(s.trim()) || /^(farmer|weather)$/i.test(s.trim()) || (illustrative && isAssumption(s)));
+  let ok = sources.every(accepted);
+  if (!ok && premium) {
+    // Models often name a fetched page by title ("OSU EM 8538") or tweak its URL.
+    // Map URL variants onto the fetched URL and drop unverifiable labels; keep the
+    // chart only if a verified/assumption source remains.
+    const norm = (u: string) => u.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/[#?].*$/, "").replace(/\/+$/, "");
+    const byNorm = new Map(Array.from(allowed).map(u => [norm(u), u]));
+    const mapped = sources.map(s => typeof s === "string" && !accepted(s) && /^https?:\/\//i.test(s.trim()) ? byNorm.get(norm(s)) ?? s : s).filter(accepted);
+    if (mapped.length) { sources = Array.from(new Set(mapped)); ok = true; }
+  }
   if (!ok) return { ok: false, reason: "unverified-source" };
+  // The footer lists the real research behind the turn, not just "assumptions".
+  const research = (evidence.researchUrls ?? []).filter(u => allowed.has(u));
+  if (research.length && sources.every(isAssumption)) sources = [...research, ...sources];
+  if (chart && typeof chart === "object") chart.sources = sources;
   return { ok: true, json: JSON.stringify(chart, null, 2), title };
 }
 
