@@ -20,7 +20,7 @@ import { extractMentions } from "@shared/mentions";
 import { buildVCalendar } from "@shared/ics";
 import { calendarEventsSchema, type CalendarDraft } from "@shared/calendar-draft";
 import { inspectCalendar } from "./calendar-files";
-import { extractScheduleRows, parseIsoDate, nextMondayFrom, resolveRowStartDate, buildRowSummary } from "@shared/schedule-extract";
+import { extractScheduleRows, parseIsoDate, nextMondayFrom, resolveRowStartDate, buildRowSummary, resolveScheduleAnchor, findConversationAnchor } from "@shared/schedule-extract";
 import { generateComprehensiveMarkdown } from './export-utils';
 import { getWeatherForFarm, formatWeatherContext } from './weather';
 import { isDuplicateUserSubmission } from './text-similarity';
@@ -1906,9 +1906,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
         const draft: CalendarDraft = { ...inspected, calendarName: conversation.title ?? "Roundtable", currentFileId: current?.id ?? null, sourceFileId, version: current?.version ?? null };
         return res.json(draft);
       }
-      const anchor = typeof req.query.start === "string" ? parseIsoDate(req.query.start) : nextMondayFrom(new Date());
+      const todayIso = new Date().toISOString().slice(0, 10);
+      const planMessages = await storage.getConversationMessages(conversationId);
+      // Week 1: the farmer's chosen start, else the plan's stated anchor (next occurrence), else today.
+      const anchor = typeof req.query.start === "string" && req.query.start ? parseIsoDate(req.query.start) : resolveScheduleAnchor(findConversationAnchor(planMessages, todayIso), todayIso);
       if (!anchor) return res.status(422).json({ message: "Invalid start date" });
-      const rows = extractScheduleRows(await storage.getConversationMessages(conversationId), await storage.getConversationFiles(conversationId));
+      const rows = extractScheduleRows(planMessages, await storage.getConversationFiles(conversationId), undefined, todayIso);
       // An empty schedule is a normal state, not an error: 200 keeps the sidebar's
       // background preview from logging a 422 for every plan-less conversation.
       if (!rows.length) return res.json({ events: [], empty: true, calendarName: conversation.title ?? "Roundtable", currentFileId: null, version: null, message: "No schedulable items found. Ask the council for a dated plan first." });
@@ -1970,18 +1973,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // Anchor date: ?start=YYYY-MM-DD (validated) or the next Monday, strictly
       // after today's UTC date (a Monday anchors to the following Monday).
       const startParam = typeof req.query.start === "string" ? req.query.start : "";
-      let anchor: string;
+      let anchor = "";
       if (startParam) {
         const parsed = parseIsoDate(startParam);
         if (!parsed) {
           return res.status(422).json({ error: "Invalid start date. Use YYYY-MM-DD." });
         }
         anchor = parsed;
-      } else {
-        anchor = nextMondayFrom(new Date());
       }
 
       const messages = await storage.getConversationMessages(conversationId);
+      if (!startParam) {
+        const todayIso = new Date().toISOString().slice(0, 10);
+        anchor = resolveScheduleAnchor(findConversationAnchor(messages, todayIso), todayIso);
+      }
       const files = await storage.getConversationFiles(conversationId);
 
       const rows = extractScheduleRows(messages, files);

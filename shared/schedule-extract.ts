@@ -21,6 +21,8 @@ export interface ScheduleRow {
   date?: string;
   /** Source title: artifact title or generated-file title. */
   title: string;
+  /** Task text from the row ("Soil sampling"); preferred over the file slug for event titles. */
+  task?: string;
   description: string;
 }
 
@@ -95,6 +97,7 @@ const GENERIC_TABLE_TITLE_RE = /^Data Table \d+$/;
  * Week 1" reads like an event, "Data Table 1 — Week 1" does not.
  */
 export function buildRowSummary(row: ScheduleRow): string {
+  if (row.task) return row.weekIndex !== undefined && !row.date ? `${row.task} — Week ${row.weekIndex}` : row.task;
   if (GENERIC_TABLE_TITLE_RE.test(row.title.trim())) {
     const firstCell = row.description
       .split(" — ")
@@ -150,12 +153,73 @@ export function parseMonthDay(text: string, todayIso: string): string | undefine
   return isoOf(ty + 1, m, d);
 }
 
+
+const SEASONS: Record<string, [number, number]> = { spring: [3, 20], summer: [6, 21], fall: [9, 22], autumn: [9, 22], winter: [12, 21] };
+const SEASON_PART: Record<string, number> = { early: 0, mid: 30, late: 60 };
+
+/**
+ * "this spring", "next fall", "early spring", "late summer 2027" → ISO start of
+ * that season, never in the past: from Oct 2026, "this spring" is spring 2027.
+ */
+export function parseSeason(text: string, todayIso: string): string | undefined {
+  const m = text.match(/\b(?:(this|next|coming)\s+)?(?:(early|mid|late)[- ]?)?(spring|summer|fall|autumn|winter)\b(?:\s+(\d{4}))?/i);
+  if (!m) return undefined;
+  const [mm, dd] = SEASONS[m[3].toLowerCase()];
+  const offset = SEASON_PART[(m[2] ?? "early").toLowerCase()] ?? 0;
+  const at = (y: number) => addDaysIso(isoOf(y, mm, dd)!, offset);
+  if (m[4]) return at(Number(m[4]));
+  const ty = Number(todayIso.slice(0, 4));
+  let candidate = at(ty);
+  if (candidate < todayIso) candidate = at(ty + 1);
+  if (m[1]?.toLowerCase() === "next" && candidate === at(ty) && m[3].toLowerCase() !== "winter") {
+    // "next spring" in February still means the coming one; only skip a season already under way.
+  }
+  return candidate;
+}
+
+/** "April", "early May" → the 1st/15th of the next occurrence of that month. */
+export function parseMonthOnly(text: string, todayIso: string): string | undefined {
+  const m = text.match(new RegExp(`\\b(?:(early|mid|late)[- ]?)?${MONTH_RE}\\b(?:\\s+(\\d{4}))?`, "i"));
+  if (!m) return undefined;
+  const month = MONTHS.indexOf(m[2].slice(0, 3).toLowerCase()) + 1;
+  const day = ({ early: 1, mid: 15, late: 22 } as Record<string, number>)[(m[1] ?? "early").toLowerCase()] ?? 1;
+  if (m[3]) return isoOf(Number(m[3]), month, day);
+  const ty = Number(todayIso.slice(0, 4));
+  const c = isoOf(ty, month, day)!;
+  return c >= todayIso ? c : isoOf(ty + 1, month, day);
+}
+
+/** Future plans never land in the past: roll a stale year forward until it is on/after today. */
+export function rollForwardIso(iso: string, todayIso: string): string {
+  let out = iso;
+  for (let i = 0; i < 5 && out < todayIso; i++) {
+    const [y, m, d] = out.split("-").map(Number);
+    out = isoOf(y + 1, m, d) ?? isoOf(y + 1, m, d - 1)!;
+  }
+  return out;
+}
+
+/** Event notes are plain text: no table pipes, separator runs or markdown leftovers. */
+export function cleanEventNotes(text: string): string {
+  return text
+    .replace(/\s*\|\s*(\|\s*)*/g, " — ")
+    .replace(/(?:\s*—\s*){2,}/g, " — ")
+    .replace(/^[\s—–|]+|[\s—–|]+$/g, "")
+    .replace(/\*\*|__|`/g, "")
+    .trim();
+}
+
+/** Week 1 anchor: the next occurrence of the stated anchor, else today. */
+export function resolveScheduleAnchor(statedIso: string | undefined, todayIso: string): string {
+  return statedIso ? rollForwardIso(statedIso, todayIso) : todayIso;
+}
+
 /** Finds the plan's stated anchor: "T = 2027-04-15", "T is April 25", "target planting date: May 1". */
 export function findTimingAnchor(text: string, todayIso: string): string | undefined {
   const m = text.match(/\b(?:T\s*(?:=|:|is)|target (?:planting |seeding |start )?date\s*(?:=|:|is|of)?|planting date\s*(?:=|:|is))\s*([^\n|;.()]{3,40})/i);
   if (!m) return undefined;
   const iso = m[1].match(/\d{4}-\d{2}-\d{2}/);
-  return iso ? parseIsoDate(iso[0]) : parseMonthDay(m[1], todayIso);
+  return iso ? parseIsoDate(iso[0]) : parseMonthDay(m[1], todayIso) ?? parseSeason(m[1], todayIso) ?? parseMonthOnly(m[1], todayIso);
 }
 
 /** One timing cell → an ISO date or week number; undefined when it is a condition ("when soil is fit"). */
@@ -172,7 +236,7 @@ export function parseTimingCell(cell: string, ctx: TimingContext): { date?: stri
   if (/^T$|\bT\s*(?:=|0)\b/.test(text) && ctx.anchorIso) return { date: ctx.anchorIso };
   const week = text.match(/\b(?:week|wk|w)\.?\s*(\d{1,2})\b/i);
   if (week) { const n = parseWeekCell(week[1]); if (n) return { weekIndex: n }; }
-  const md = parseMonthDay(text, ctx.todayIso);
+  const md = parseMonthDay(text, ctx.todayIso) ?? parseSeason(text, ctx.todayIso) ?? parseMonthOnly(text, ctx.todayIso);
   return md ? { date: md } : undefined;
 }
 
@@ -221,8 +285,10 @@ function extractFromTable(artifact: Pick<Artifact, "content" | "title">, rows: S
       if (!row[timingCol] || /^[-:\s]+$/.test(row[timingCol])) continue;
       const parsed = parseTimingCell(row[timingCol], ctx);
       if (!parsed) continue;
-      const description = row.map((cell, i) => (i === timingCol ? `When: ${calendarNotesText(cell)}` : calendarNotesText(cell))).filter(Boolean).join(" — ");
-      rows.push({ ...parsed, title, description });
+      const taskIdx = row.findIndex((cell, i) => i !== timingCol && calendarNotesText(cell).length > 0);
+      const task = taskIdx === -1 ? undefined : cleanEventNotes(calendarNotesText(row[taskIdx])).split(" — ")[0].trim() || undefined;
+      const description = cleanEventNotes(row.map((cell, i) => (i === taskIdx ? "" : i === timingCol ? `When: ${calendarNotesText(cell)}` : calendarNotesText(cell))).filter(Boolean).join(" — "));
+      rows.push({ ...parsed, title, task, description });
     }
     return;
   }
@@ -230,17 +296,18 @@ function extractFromTable(artifact: Pick<Artifact, "content" | "title">, rows: S
   for (const row of table.slice(1)) {
     const dateCell = dateCol !== -1 ? stripCellDecorations(row[dateCol]) : undefined;
     const weekCell = weekCol !== -1 ? stripCellDecorations(row[weekCol]) : undefined;
-    const date = dateCell ? parseIsoDate(dateCell) : undefined;
+    const date = dateCell ? parseIsoDate(dateCell) ?? (ctx ? parseTimingCell(dateCell, ctx)?.date : undefined) : undefined;
     const weekIndex = weekCell ? parseWeekCell(weekCell) : undefined;
     if (date === undefined && weekIndex === undefined) continue;
     // .ics DESCRIPTION is plain text: strip markdown from each cell (the chat
     // UI renders the artifact itself — this is the export path only).
-    const description = row
+    const cells = row
       .filter((_, i) => i !== weekCol && i !== dateCol)
-      .map((cell) => calendarNotesText(cell))
-      .filter((cell) => cell.length > 0)
-      .join(" — ");
-    rows.push({ weekIndex, date, title, description });
+      .map((cell) => cleanEventNotes(calendarNotesText(cell)))
+      .filter((cell) => cell.length > 0);
+    const task = cells.length > 1 || ctx ? cells[0]?.split(" — ")[0].trim() || undefined : undefined;
+    const description = cleanEventNotes(cells.join(" — "));
+    rows.push({ weekIndex, date, title, task, description });
   }
 }
 
@@ -362,6 +429,16 @@ function readGeneratedFile(file: File, readFile: (p: string) => string | null): 
   }
 }
 
+/** Latest anchor the conversation states ("Target planting date: April 25", "T = …"). */
+export function findConversationAnchor(messages: Message[], todayIso: string): string | undefined {
+  let anchor: string | undefined;
+  for (const m of messages ?? []) {
+    anchor = findTimingAnchor(String((m as { content?: unknown }).content ?? ""), todayIso) ?? anchor;
+    for (const a of m.artifacts ?? []) if (a.type === "table") anchor = findTimingAnchor(a.content, todayIso) ?? anchor;
+  }
+  return anchor;
+}
+
 // ── entry point ──────────────────────────────────────────────────────────────
 
 /**
@@ -407,16 +484,50 @@ export function extractScheduleRows(
     const content = readGeneratedFile(file, readFile);
     if (!content) continue;
     const sourceTitle = file.filename.replace(/\.md$/i, "") || file.filename;
-    const before = rows.length;
-    extractFromMarkdown(content, sourceTitle, rows);
-    if (rows.length === before) {
-      // Calendar deliverables are often a markdown table with a timing column.
-      const ctx = { anchorIso: findTimingAnchor(content, todayIso) ?? anchorIso, todayIso };
-      for (const block of markdownTableBlocks(content)) {
-        extractFromTable({ content: block, title: sourceTitle }, rows, ctx);
-      }
+    // Calendar deliverables are usually a markdown table: read it as a table
+    // (task text → title, cells → notes), then the prose "Week N" / date lines.
+    const ctx = { anchorIso: findTimingAnchor(content, todayIso) ?? anchorIso, todayIso };
+    for (const block of markdownTableBlocks(content)) {
+      extractFromTable({ content: block, title: sourceTitle }, rows, ctx);
     }
+    extractFromMarkdown(content.split(/\r?\n/).filter((l) => !l.trim().startsWith("|")).join("\n"), sourceTitle, rows);
   }
 
-  return rows.slice(0, MAX_SCHEDULE_ROWS);
+  // Plans are forward-looking: a stale year (2026-02-15 written in Oct 2026) rolls to its next occurrence.
+  return rows.slice(0, MAX_SCHEDULE_ROWS).map((row) => (row.date ? { ...row, date: rollForwardIso(row.date, todayIso), description: cleanEventNotes(row.description) } : { ...row, description: cleanEventNotes(row.description) }));
+}
+
+// ── inline calendar (gate C r5) ──────────────────────────────────────────────
+
+export interface InlineCalendarEvent { summary: string; startDate: string; description: string }
+
+/** The farmer asked for something calendar-shaped. */
+export function wantsCalendar(text: string): boolean {
+  return /\b(calendar|schedule|dated plan|timeline|task plan|when should i)\b/i.test(text);
+}
+
+/**
+ * Builds the compact calendar shown inside the chat message from this reply's
+ * table artifacts and deliverable markdown. Same extraction, anchoring and
+ * clock as the Calendar plan, so the inline list and the export agree.
+ */
+export function buildInlineCalendarArtifact(opts: {
+  artifacts: Artifact[];
+  deliverableMarkdown?: string;
+  deliverableTitle?: string;
+  contextText: string;
+  todayIso: string;
+}): Artifact | null {
+  const messages = [{ content: opts.contextText, artifacts: opts.artifacts }] as unknown as Message[];
+  const files = opts.deliverableMarkdown
+    ? ([{ filename: `${opts.deliverableTitle ?? "Calendar"}.md`, uploadedBy: "Expert:inline", fileUrl: "/inline.md" }] as unknown as File[])
+    : [];
+  const rows = extractScheduleRows(messages, files, () => opts.deliverableMarkdown ?? null, opts.todayIso);
+  if (!rows.length) return null;
+  const stated = findConversationAnchor(messages, opts.todayIso) ?? (opts.deliverableMarkdown ? findTimingAnchor(opts.deliverableMarkdown, opts.todayIso) : undefined);
+  const anchor = resolveScheduleAnchor(stated, opts.todayIso);
+  const events: InlineCalendarEvent[] = rows
+    .map((row) => ({ summary: buildRowSummary(row), startDate: resolveRowStartDate(row, anchor), description: row.description }))
+    .sort((a, b) => a.startDate.localeCompare(b.startDate));
+  return { type: "calendar", title: opts.deliverableTitle ?? "Calendar", content: JSON.stringify({ anchor, events }), language: "json" } as Artifact;
 }

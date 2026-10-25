@@ -53,8 +53,8 @@ describe("(5) calendar: timing columns become real events", () => {
     const table = "| Task | Why it matters | Trigger / timing |\n|---|---|---|\n| Soil sampling | pH | As soon as fields are fit (early spring) |\n| Corn planting | window | April 20 – May 20 S1 |\n| Soybean planting | window | May 1 – June 5 S1 |\n| Side-dress N | uptake | ~V4–V6 growth stage |";
     const art = extractArtifacts(`Plan:\n\n${table}\n`).artifacts.find(a => a.type === "table")!;
     const rows = extractScheduleRows([{ content: "", artifacts: [art] }] as any, [], undefined, today);
-    expect(rows.map(r => r.date)).toEqual(["2027-04-20", "2027-05-01"]);
-    expect(rows[0].description).toMatch(/Corn planting/);
+    expect(rows.map(r => r.date)).toEqual(["2027-03-20", "2027-04-20", "2027-05-01"]);
+    expect(rows[1].task).toBe("Corn planting");
   });
   it("T-n rows resolve against the anchor stated in the message", () => {
     const table = "| Task | Timing |\n|---|---|\n| Soil test | T-28 |\n| Plant | T |";

@@ -65,6 +65,12 @@ vi.mock("../server/ai", () => ({
 import { registerRoutes } from "../server/routes";
 import { storage } from "../server/storage";
 
+// Injectable clock: fixtures use spring-2026 dates, so "today" is pinned before them
+// (future plans roll past dates forward; see validator-gate-c-r5 tests).
+beforeEach(() => { vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(new Date("2026-01-15T12:00:00Z")); });
+import { afterEach as _afterEachClock } from "vitest";
+_afterEachClock(() => { vi.useRealTimers(); });
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 function makeMessage(artifacts: Artifact[]): Message {
@@ -978,7 +984,7 @@ describe("GET /api/protected/conversations/:id/export.ics", () => {
     }
   });
 
-  it("defaults the anchor to the next Monday (strictly after today)", async () => {
+  it("defaults Week 1 to today when the plan states no anchor (gate C r5)", async () => {
     const agent = request.agent(app);
     await registerAndLogin(agent, "icsMonday");
     const convo = await createConversation(agent, "Next Monday");
@@ -990,7 +996,7 @@ describe("GET /api/protected/conversations/:id/export.ics", () => {
       artifacts: [tableArtifact()],
     } as any);
 
-    const expectedAnchor = nextMondayFrom(new Date());
+    const expectedAnchor = new Date().toISOString().slice(0, 10);
     const res = await agent.get(`/api/protected/conversations/${convo.id}/export.ics`);
     expect(res.status).toBe(200);
     expect(res.text).toContain(`DTSTART;VALUE=DATE:${expectedAnchor.replace(/-/g, "")}\r\n`);

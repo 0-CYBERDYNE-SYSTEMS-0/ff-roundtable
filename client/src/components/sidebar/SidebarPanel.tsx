@@ -28,10 +28,6 @@ type CalendarPreview = {
   scheduleVersion: string;
 };
 
-function nextMondayDate(): string {
-  const today = new Date();
-  return format(addDays(today, ((8 - today.getDay()) % 7) || 7), "yyyy-MM-dd");
-}
 
 function readCalendarStart(conversationId: number | null): string | null {
   if (!conversationId) return null;
@@ -89,7 +85,7 @@ export default function SidebarPanel({
   const [editingConversationId, setEditingConversationId] = useState<number | null>(null);
   const [editingTitle, setEditingTitle] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<ConversationSummary | null>(null);
-  const [calendarStart, setCalendarStart] = useState(() => readCalendarStart(activeConversationId) ?? nextMondayDate());
+  const [calendarStart, setCalendarStart] = useState(() => readCalendarStart(activeConversationId) ?? '');
   const [calendarPreview, setCalendarPreview] = useState<CalendarPreview | null>(null);
   const [isLoadingCalendarPreview, setIsLoadingCalendarPreview] = useState(false);
   const [calendarPreviewError, setCalendarPreviewError] = useState<"empty" | "unavailable" | null>(null);
@@ -98,7 +94,7 @@ export default function SidebarPanel({
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    setCalendarStart(readCalendarStart(activeConversationId) ?? nextMondayDate());
+    setCalendarStart(readCalendarStart(activeConversationId) ?? '');
     setCalendarPreview(null);
     setIsLoadingCalendarPreview(false);
     setCalendarPreviewError(null);
@@ -115,7 +111,8 @@ export default function SidebarPanel({
   }, [canExportIcs]);
 
   useEffect(() => {
-    if (!activeConversationId || !calendarStart) {
+    // Empty start = auto: the plan's stated anchor (next occurrence) or today, resolved server-side.
+    if (!activeConversationId) {
       setCalendarPreview(null);
       setIsLoadingCalendarPreview(false);
       setCalendarPreviewError(null);
