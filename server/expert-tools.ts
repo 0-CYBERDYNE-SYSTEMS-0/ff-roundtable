@@ -16,7 +16,7 @@ import net from "net";
 import { compile, type TopLevelSpec } from "vega-lite";
 import { premiumChartsEnabled } from "./chart-picker";
 import { parseChartJsonWithRepair, fallbackSpecFromRows, hoistNestedData } from "./chart-repair";
-import { parseVegaChart, themedVegaSpec, chartHasPlottableSeries, stripDualAxis, asksForDualAxis, filterRelevantSources, tidySourceList, applyFacetScales } from "@shared/chart-artifact";
+import { parseVegaChart, themedVegaSpec, chartHasPlottableSeries, stripDualAxis, asksForDualAxis, filterRelevantSources, tidySourceList, applyFacetScales, rankSource, ensureFacetWhenAsked } from "@shared/chart-artifact";
 
 export const MAX_TOOL_CALLS_PER_TURN = 3;
 export const TOOL_TIMEOUT_MS = 10_000;
@@ -41,6 +41,7 @@ or reply with the single word NONE if the farmer's facts and your expertise are 
 When the farmer asks for numbers, a chart, a table, a budget, prices, yields, rates or a comparison, SEARCH for real current data (e.g. USDA NASS, university extension, market reports) so the roundtable can chart real figures.
 Prefer SEARCH when you need a source but are unsure the exact URL is reachable; search results are fetched before they can be cited. Use FETCH only for a stable URL you know is relevant.
 For decisions involving marketing or hedging, loan or insurance obligations, veterinary or health risks, safety, or regulation, do not reply NONE merely because you know the general advice: SEARCH for at least one relevant authoritative public-agency or university source. For soil-fertility, liming, fertilizer/nutrient-application, conservation-practice, or crop-production recommendations—especially numeric rates, thresholds, or yield claims—also SEARCH for at least one relevant authoritative public-agency or university source. Never search for or contradict a price or condition supplied by the farmer; use it as given. Use farmer-provided soil tests, acres, yields, prices, and field conditions exactly as supplied; never invent missing measurements or a source. If no source can be fetched, say that you could not verify the source-dependent claim and do not invent a citation.
+For field-crop calendars, schedules or timing (grass seed, wheat, hazelnuts, hay, row crops), SEARCH the farmer's state extension crop-production or field-crop guides (e.g. "OSU Extension <crop> production guide Willamette Valley"), not home-garden or backyard calendars.
 No other text.
 
 Farmer's question / latest discussion:
@@ -152,7 +153,8 @@ export async function runToolCalls(calls: ToolCall[], fetchImpl: FetchLike = fet
   for (const call of calls.slice(0, MAX_TOOL_CALLS_PER_TURN)) {
     try {
       if (call.tool === "search") {
-        const results = await webSearch(call.query, fetchImpl);
+        // Best-fitting source first (OSU field-crop guides before home-garden calendars for farm questions).
+        const results = (await webSearch(call.query, fetchImpl)).map((r, i) => ({ r, i })).sort((a, b) => rankSource(a.r.url, questionText) - rankSource(b.r.url, questionText) || a.i - b.i).map(({ r }) => r);
         if (!results.length) notes.push(`Search "${call.query}" returned no results.`);
         let verified = results.some(r => sources.some(s => s.url === r.url));
         for (const r of results) {
@@ -452,6 +454,7 @@ export function validateChartArtifactDetailed(
     if (!compiles(parsed)) return { ok: false, reason: "invalid-vega-spec" };
     if (premium) {
       if (!asksForDualAxis(evidence.farmerText)) parsed = { ...parsed, spec: stripDualAxis(parsed.spec as Record<string, unknown>) as typeof parsed.spec };
+      parsed = { ...parsed, spec: ensureFacetWhenAsked(parsed.spec as Record<string, unknown>, evidence.farmerText ?? "") as typeof parsed.spec };
       { const f = applyFacetScales(parsed as any); parsed = { ...parsed, spec: f.spec as typeof parsed.spec, ...(f.description ? { description: f.description } : {}) }; }
       if (!chartHasPlottableSeries(parsed)) {
         // Axes with no series: rebuild from the rows, or drop the chart.

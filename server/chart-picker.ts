@@ -23,7 +23,7 @@ const INTENT_CUES: Record<ChartIntent, RegExp> = {
 const NAMED: Record<string, string[]> = {
   gantt: ["timeline", "time ?line"], "scatter-trend": ["scatter ?plot", "scatter"], donut: ["pie"], boxplot: ["box ?plot", "box and whisker"],
   "ranked-lollipop": ["lollipop"], "heatmap": ["heat ?map"], "field-grid-map": ["farm map", "field map", "grid map"], "range-band": ["fan chart", "confidence band"],
-  bullet: ["bullet chart", "progress bar"], "small-multiples": ["facet(ed)?"], "stacked-area": ["stacked area"], "multi-area": ["multi[ -]?area", "area chart"],
+  bullet: ["bullet chart", "progress bar"], "small-multiples": ["facet(ed)?", "small[ -]multiples?", "one panel per", "panel per", "trellis"], "stacked-area": ["stacked area"], "multi-area": ["multi[ -]?area", "area chart"],
   "line-multi": ["line chart", "line graph"], "grouped-bar": ["grouped bars?", "clustered bars?"], "stacked-bar": ["stacked bars?"], "dual-axis": ["two axes", "dual[ -]axis", "combo chart"],
   "calendar-heatmap": ["calendar heat ?map", "calendar view"], "normalized-area": ["100% (stacked )?area", "share over time"],
 };
@@ -68,5 +68,5 @@ export function buildChartPickerPrompt(request: string): string {
 3. Envelope rules: {"type":"vega-lite","title","description","theme":"farmfriend","sources","data":[flat rows],"spec":{…}}. Data as long-format rows with numbers as numbers; spec has NO data, datasets, url, config, $schema or width/height for single views. Use "datum" for constant reference lines. Every brace closed; strict JSON (double-quoted keys, no comments, no trailing commas). Put it in ONE \`\`\`chart fence.
 4. Real numbers first (farmer, weather, research sources). If none exist, start the title "Illustrative:" with sources ["assumptions"] and list assumptions in description.
 
-${picks.map(e => `FIT: ${e.name} [${e.id}] — ${e.when} Avoid: ${e.avoid}\n${JSON.stringify(e.example)}`).join("\n\n")}`;
+${/\b(small[ -]multiples?|facet(ed|s)?|one panel per|panel per|trellis)\b/i.test(request) ? "REQUIRED: the farmer asked for small multiples — the spec MUST be a faceted view ({\"facet\":{\"field\":…},\"spec\":{…}}), one panel per group; when units differ between groups set \"resolve\":{\"scale\":{\"y\":\"independent\"}} and put each unit in the panel/axis title.\n\n" : ""}${picks.map(e => `FIT: ${e.name} [${e.id}] — ${e.when} Avoid: ${e.avoid}\n${JSON.stringify(e.example)}`).join("\n\n")}`;
 }

@@ -319,8 +319,27 @@ export function filterRelevantSources(sources: string[], questionText: string | 
     if (pnw && OTHER_STATE_PATH.test(s) && !OTHER_STATE_PATH.test(q)) return false;
     return true;
   });
-  const rank = (s: string) => { const h = hostOf(s); return /oregonstate\.edu$/.test(h) ? 0 : /(wsu\.edu|uidaho\.edu|usda\.gov|\.gov)$/.test(h) ? 1 : /^https?:/i.test(s) ? 2 : 3; };
-  return kept.map((s, i) => [s, i] as const).sort((a, b) => rank(a[0]) - rank(b[0]) || a[1] - b[1]).map(([s]) => s);
+  return kept.map((s, i) => [s, i] as const).sort((a, b) => rankSource(a[0], q) - rankSource(b[0], q) || a[1] - b[1]).map(([s]) => s);
+}
+
+const FIELD_CROP_QUESTION = /\b(field|acres?|ac\b|farm|grass seed|fescue|ryegrass|wheat|barley|oats|hay|alfalfa|clover|hazelnuts?|filberts?|corn|soybeans?|canola|meadowfoam|hops|mint|row crops?|cover crops?|pasture|tons?\/ac|lb\/ac|bu\/ac)\b/i;
+const HOME_GARDEN_URL = /(garden(ing)?[-_/]|home[-_]?garden|master[-_]?gardener|vegetable[-_]garden|backyard|yard[-_]and[-_]garden|monthly[-_]garden|garden[-_]calendar|\/gardening\b|\/garden\b)/i;
+const FIELD_CROP_URL = /(crop[-_]production|field[-_]crops?|cropandsoil|agsci|grass[-_]seed|seed[-_]crops|hazelnut|wheat|cereal|forage|catalog\/(?:em|pnw|ec)[-_]?\d)/i;
+
+/**
+ * Lower is better. OSU first; for field-crop questions OSU / regional crop-
+ * production and field-crop guides outrank home-garden calendars.
+ */
+export function rankSource(url: string, questionText?: string): number {
+  if (!/^https?:/i.test(url)) return 4;
+  const h = hostOf(url);
+  const fieldCrop = FIELD_CROP_QUESTION.test(questionText ?? "");
+  let r = /oregonstate\.edu$/.test(h) ? 0 : /(wsu\.edu|uidaho\.edu|usda\.gov|\.gov)$/.test(h) ? 1 : 2;
+  if (fieldCrop) {
+    if (HOME_GARDEN_URL.test(url)) r += 2.5;
+    else if (FIELD_CROP_URL.test(url)) r -= 0.5;
+  }
+  return r;
 }
 
 /** Footer: "assumptions" only when no real source remains. */
@@ -357,6 +376,26 @@ const UNIT_RE = /\(([^)]*\/[^)]*)\)|\b(tons?\/ac|lb\/ac|lbs\/ac|bu\/ac|kg\/ha|t\
  * magnitudes (>10x) get independent y scales, and the caption is made to match
  * what is drawn.
  */
+export function asksForSmallMultiples(text: string): boolean {
+  return /\b(small[ -]multiples?|facet(ed|s)?|one (panel|chart|mini[ -]chart) (per|for each)|panel per|side[- ]by[- ]side panels|trellis)\b/i.test(text ?? "");
+}
+
+/**
+ * When the farmer explicitly asked for small multiples but the model returned a
+ * single view with a nominal colour/series field, wrap it in a column facet on
+ * that field (one panel per series). Non-matching specs are returned unchanged.
+ */
+export function ensureFacetWhenAsked(spec: Record<string, unknown>, farmerText: string): Record<string, unknown> {
+  const s = spec as Record<string, any>;
+  if (!asksForSmallMultiples(farmerText) || isFacetedSpec(s)) return spec;
+  if (s.layer || s.hconcat || s.vconcat || s.concat || s.repeat || !s.encoding) return spec;
+  const enc = s.encoding as Record<string, any>;
+  const series = [enc.color, enc.column, enc.row, enc.xOffset, enc.detail].find(c => c && typeof c.field === "string" && (c.type === "nominal" || c.type === "ordinal"));
+  if (!series) return spec;
+  const { width: _w, height: _h, ...inner } = s;
+  return { facet: { field: series.field, type: "nominal", title: null }, columns: 2, spec: { ...inner, width: 220, height: 140 } };
+}
+
 export function applyFacetScales(chart: { data: Record<string, unknown>[]; spec: Record<string, unknown>; description?: string }): { spec: Record<string, unknown>; description?: string } {
   const spec = chart.spec as Record<string, any>;
   if (!isFacetedSpec(spec)) return { spec, description: chart.description };
