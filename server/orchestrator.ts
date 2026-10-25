@@ -558,6 +558,16 @@ function classifyFarmerFileIntent(content: string | null | undefined): FarmerFil
         return null;
     }
 
+    // "Give me a table … plus a calendar" asks for new work: an indefinite
+    // article (or new/fresh) before the noun is generation, not retrieval,
+    // unless the farmer also points at something saved or asks for a link.
+    if (
+        new RegExp(`\\b(?:get|send|give|show|provide|share)\\s+(?:me|us)?\\s*(?:a|an|some|new|fresh)\\b.{0,80}\\b(?:tables?|charts?|${fileNoun.slice(3, -1)})\\b`).test(text) &&
+        !/\b(?:existing|saved|current|latest|previous|already|link|download)\b/.test(text)
+    ) {
+        return null;
+    }
+
     if (
         /\b(?:just|only)\s+(?:(?:want|need)\s+)?(?:(?:send|give|share|show|provide)\s+)?(?:me\s+)?(?:the\s+)?(?:download\s+)?link\b/.test(text) ||
         new RegExp(`\\b(?:get|retrieve|download|open|find|share|send|give|show|provide)\\b.{0,60}\\b(?:existing|saved|current|latest)?\\s*${fileNoun}\\b`).test(text) ||
