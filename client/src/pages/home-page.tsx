@@ -306,6 +306,8 @@ export default function HomePage() {
     isError: messagesError,
   } = useQuery<Message[]>({
     queryKey: [`/api/protected/conversations/${activeConversation}/messages`],
+    // Fallback while /ws is down: poll so replies appear without a manual reload.
+    refetchInterval: socketStatus === "connected" ? false : 4000,
     enabled: !!activeConversation,
   });
 
