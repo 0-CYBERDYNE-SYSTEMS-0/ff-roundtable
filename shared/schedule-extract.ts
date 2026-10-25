@@ -116,6 +116,78 @@ export function buildRowSummary(row: ScheduleRow): string {
   return row.title;
 }
 
+
+// ── timing cells (gate C r4) ─────────────────────────────────────────────────
+
+/** Headers like "Trigger / timing", "When", "Window", "Target date". */
+const TIMING_HEADER_RE = /(timing|when|window|schedule|timeframe|targetdate|duedate|dates?$)/;
+const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+const MONTH_RE = "(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)";
+
+export interface TimingContext {
+  /** ISO date that "T" refers to (e.g. the stated target planting date). */
+  anchorIso?: string;
+  /** Today's date; month-day dates without a year resolve to their next occurrence. */
+  todayIso: string;
+}
+
+function isoOf(y: number, m: number, d: number): string | undefined {
+  return parseIsoDate(`${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`);
+}
+
+/** "April 20", "Apr 20, 2027", "20 April" → ISO; no year → next occurrence on/after today. */
+export function parseMonthDay(text: string, todayIso: string): string | undefined {
+  const a = text.match(new RegExp(`\\b${MONTH_RE}\\.?\\s+(\\d{1,2})(?:st|nd|rd|th)?\\b(?:,?\\s*(\\d{4}))?`, "i"));
+  const b = a ? null : text.match(new RegExp(`\\b(\\d{1,2})(?:st|nd|rd|th)?\\s+${MONTH_RE}\\b(?:,?\\s*(\\d{4}))?`, "i"));
+  const [monthName, day, year] = a ? [a[1], a[2], a[3]] : b ? [b[2], b[1], b[3]] : [];
+  if (!monthName) return undefined;
+  const m = MONTHS.indexOf(monthName.slice(0, 3).toLowerCase()) + 1;
+  const d = Number(day);
+  if (year) return isoOf(Number(year), m, d);
+  const ty = Number(todayIso.slice(0, 4));
+  const thisYear = isoOf(ty, m, d);
+  if (thisYear && thisYear >= todayIso) return thisYear;
+  return isoOf(ty + 1, m, d);
+}
+
+/** Finds the plan's stated anchor: "T = 2027-04-15", "T is April 25", "target planting date: May 1". */
+export function findTimingAnchor(text: string, todayIso: string): string | undefined {
+  const m = text.match(/\b(?:T\s*(?:=|:|is)|target (?:planting |seeding |start )?date\s*(?:=|:|is|of)?|planting date\s*(?:=|:|is))\s*([^\n|;.()]{3,40})/i);
+  if (!m) return undefined;
+  const iso = m[1].match(/\d{4}-\d{2}-\d{2}/);
+  return iso ? parseIsoDate(iso[0]) : parseMonthDay(m[1], todayIso);
+}
+
+/** One timing cell → an ISO date or week number; undefined when it is a condition ("when soil is fit"). */
+export function parseTimingCell(cell: string, ctx: TimingContext): { date?: string; weekIndex?: number } | undefined {
+  const text = stripCellDecorations(cell);
+  const iso = text.match(/\d{4}-\d{2}-\d{2}/);
+  if (iso && parseIsoDate(iso[0])) return { date: iso[0] };
+  const rel = text.match(/\bT\s*([-+−–])\s*(\d{1,3})\s*(d|days?|w|wks?|weeks?)?\b/i);
+  if (rel) {
+    if (!ctx.anchorIso) return undefined;
+    const n = Number(rel[2]) * (/^w/i.test(rel[3] ?? "") ? 7 : 1);
+    return { date: addDaysIso(ctx.anchorIso, rel[1] === "+" ? n : -n) };
+  }
+  if (/^T$|\bT\s*(?:=|0)\b/.test(text) && ctx.anchorIso) return { date: ctx.anchorIso };
+  const week = text.match(/\b(?:week|wk|w)\.?\s*(\d{1,2})\b/i);
+  if (week) { const n = parseWeekCell(week[1]); if (n) return { weekIndex: n }; }
+  const md = parseMonthDay(text, ctx.todayIso);
+  return md ? { date: md } : undefined;
+}
+
+/** Contiguous "|"-led line groups in markdown text. */
+function markdownTableBlocks(content: string): string[] {
+  const blocks: string[] = [];
+  let cur: string[] = [];
+  for (const line of content.split(/\r?\n/)) {
+    if (line.trim().startsWith("|")) cur.push(line);
+    else if (cur.length) { blocks.push(cur.join("\n")); cur = []; }
+  }
+  if (cur.length) blocks.push(cur.join("\n"));
+  return blocks;
+}
+
 // ── table artifacts ──────────────────────────────────────────────────────────
 
 /**
@@ -134,13 +206,26 @@ function splitMarkdownTable(content: string): string[][] {
     );
 }
 
-function extractFromTable(artifact: Artifact, rows: ScheduleRow[]): void {
+function extractFromTable(artifact: Pick<Artifact, "content" | "title">, rows: ScheduleRow[], ctx?: TimingContext): void {
   const table = splitMarkdownTable(artifact.content);
   if (table.length < 2) return;
   const header = table[0];
   const weekCol = header.findIndex((cell) => WEEK_HEADER_KEYS.has(normalizeHeader(cell)));
   const dateCol = header.findIndex((cell) => DATE_HEADER_KEYS.has(normalizeHeader(cell)));
-  if (weekCol === -1 && dateCol === -1) return;
+  if (weekCol === -1 && dateCol === -1) {
+    // No Week/Date column: parse a timing column ("April 20 – May 20", "T-14", "Week 3").
+    const timingCol = header.findIndex((cell) => TIMING_HEADER_RE.test(normalizeHeader(cell)));
+    if (timingCol === -1 || !ctx) return;
+    const title = artifact.title || "Schedule";
+    for (const row of table.slice(1)) {
+      if (!row[timingCol] || /^[-:\s]+$/.test(row[timingCol])) continue;
+      const parsed = parseTimingCell(row[timingCol], ctx);
+      if (!parsed) continue;
+      const description = row.map((cell, i) => (i === timingCol ? `When: ${calendarNotesText(cell)}` : calendarNotesText(cell))).filter(Boolean).join(" — ");
+      rows.push({ ...parsed, title, description });
+    }
+    return;
+  }
   const title = artifact.title || "Schedule";
   for (const row of table.slice(1)) {
     const dateCell = dateCol !== -1 ? stripCellDecorations(row[dateCol]) : undefined;
@@ -290,13 +375,17 @@ export function extractScheduleRows(
   messages: Message[],
   files: File[],
   readFile: (absolutePath: string) => string | null = readLocalFile,
+  todayIso: string = new Date().toISOString().slice(0, 10),
 ): ScheduleRow[] {
   const rows: ScheduleRow[] = [];
+  let anchorIso: string | undefined;
 
   for (const message of messages ?? []) {
+    anchorIso = findTimingAnchor(String((message as { content?: unknown }).content ?? ""), todayIso) ?? anchorIso;
     for (const artifact of message.artifacts ?? []) {
       if (artifact.type === "table") {
-        extractFromTable(artifact, rows);
+        const ctx = { anchorIso: findTimingAnchor(artifact.content, todayIso) ?? anchorIso, todayIso };
+        extractFromTable(artifact, rows, ctx);
       } else if (artifact.type === "chart" || artifact.type === "json") {
         try {
           const parsed = JSON.parse(artifact.content);
@@ -318,7 +407,15 @@ export function extractScheduleRows(
     const content = readGeneratedFile(file, readFile);
     if (!content) continue;
     const sourceTitle = file.filename.replace(/\.md$/i, "") || file.filename;
+    const before = rows.length;
     extractFromMarkdown(content, sourceTitle, rows);
+    if (rows.length === before) {
+      // Calendar deliverables are often a markdown table with a timing column.
+      const ctx = { anchorIso: findTimingAnchor(content, todayIso) ?? anchorIso, todayIso };
+      for (const block of markdownTableBlocks(content)) {
+        extractFromTable({ content: block, title: sourceTitle }, rows, ctx);
+      }
+    }
   }
 
   return rows.slice(0, MAX_SCHEDULE_ROWS);
