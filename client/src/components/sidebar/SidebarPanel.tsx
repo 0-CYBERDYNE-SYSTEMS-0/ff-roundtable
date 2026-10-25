@@ -86,6 +86,8 @@ export default function SidebarPanel({
   const [editingTitle, setEditingTitle] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<ConversationSummary | null>(null);
   const [calendarStart, setCalendarStart] = useState(() => readCalendarStart(activeConversationId) ?? '');
+  // Plan-derived Week 1 (frost date / requested season / today) shown when the farmer has not picked one.
+  const [autoAnchor, setAutoAnchor] = useState('');
   const [calendarPreview, setCalendarPreview] = useState<CalendarPreview | null>(null);
   const [isLoadingCalendarPreview, setIsLoadingCalendarPreview] = useState(false);
   const [calendarPreviewError, setCalendarPreviewError] = useState<"empty" | "unavailable" | null>(null);
@@ -95,6 +97,7 @@ export default function SidebarPanel({
 
   useEffect(() => {
     setCalendarStart(readCalendarStart(activeConversationId) ?? '');
+    setAutoAnchor('');
     setCalendarPreview(null);
     setIsLoadingCalendarPreview(false);
     setCalendarPreviewError(null);
@@ -139,7 +142,8 @@ export default function SidebarPanel({
           }
           throw new Error("Schedule preview unavailable");
         }
-        const draft = await response.json() as CalendarDraft & { empty?: boolean };
+        const draft = await response.json() as CalendarDraft & { empty?: boolean; autoAnchor?: string };
+        if (!cancelled && draft.autoAnchor) setAutoAnchor(draft.autoAnchor);
         if (draft.empty || draft.events.length === 0) {
           if (!cancelled) {
             setCalendarPreview(null);
@@ -246,7 +250,7 @@ export default function SidebarPanel({
               Week 1 starts
               <input
                 type="date"
-                value={calendarStart}
+                value={calendarStart || autoAnchor}
                 onChange={(event) => {
                   const value = event.target.value;
                   setCalendarStart(value);
@@ -278,7 +282,7 @@ export default function SidebarPanel({
               variant="outline"
               className="w-full mt-2 border-2 border-farm-dark-green text-farm-dark-green hover:bg-farm-dark-green hover:text-white rounded-lg px-4 py-2.5 flex items-center justify-center transition-all duration-200 font-medium"
               onClick={() => setOpenCalendar({})}
-              disabled={!activeConversationId || !calendarStart}
+              disabled={!activeConversationId || !calendarPreview?.eventCount}
               title="Review and edit your calendar before exporting (.ics)"
             >
               <CalendarDays className="mr-2 h-4 w-4" />
@@ -513,7 +517,7 @@ export default function SidebarPanel({
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-      {openCalendar && activeConversationId && <CalendarPreviewDialog key={`${activeConversationId}:${openCalendar.fileId ?? "plan"}`} conversationId={activeConversationId} start={calendarStart} fileId={openCalendar.fileId} onClose={() => setOpenCalendar(null)} />}
+      {openCalendar && activeConversationId && <CalendarPreviewDialog key={`${activeConversationId}:${openCalendar.fileId ?? "plan"}`} conversationId={activeConversationId} start={calendarStart || autoAnchor} fileId={openCalendar.fileId} onClose={() => setOpenCalendar(null)} />}
     </aside>
   );
 }

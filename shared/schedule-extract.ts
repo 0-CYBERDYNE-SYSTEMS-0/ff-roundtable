@@ -430,13 +430,60 @@ function readGeneratedFile(file: File, readFile: (p: string) => string | null): 
 }
 
 /** Latest anchor the conversation states ("Target planting date: April 25", "T = …"). */
-export function findConversationAnchor(messages: Message[], todayIso: string): string | undefined {
-  let anchor: string | undefined;
-  for (const m of messages ?? []) {
-    anchor = findTimingAnchor(String((m as { content?: unknown }).content ?? ""), todayIso) ?? anchor;
-    for (const a of m.artifacts ?? []) if (a.type === "table") anchor = findTimingAnchor(a.content, todayIso) ?? anchor;
+/** "last frost Mar 25", "Mar 25 at 32°F (average last frost)" → next future occurrence of that date. */
+export function findFrostAnchor(text: string, todayIso: string): string | undefined {
+  for (const line of String(text ?? "").split(/\r?\n/)) {
+    if (!/\bfrost|freeze|32\s*°?\s*F\b/i.test(line)) continue;
+    // Prefer the date nearest the frost word within the same cell/sentence.
+    for (const seg of line.split(/\||;|\. /)) {
+      if (!/\bfrost|freeze|32\s*°?\s*F\b/i.test(seg)) continue;
+      const iso = seg.match(/\d{4}-\d{2}-\d{2}/);
+      const d = iso ? parseIsoDate(iso[0]) : parseMonthDay(seg, todayIso);
+      if (d) return rollForwardIso(d, todayIso);
+    }
   }
-  return anchor;
+  return undefined;
+}
+
+/**
+ * Week 1 anchor, in priority order (gate C r6):
+ * 1) an explicit anchor or frost date in any text (next future occurrence);
+ * 2) a season word ("this spring" → spring 2027 when asked in autumn);
+ * 3) undefined → caller falls back to today.
+ */
+export function findPlanAnchor(texts: string[], todayIso: string): string | undefined {
+  for (const t of texts) { const a = findTimingAnchor(t, todayIso); if (a) return rollForwardIso(a, todayIso); }
+  for (const t of texts) { const a = findFrostAnchor(t, todayIso); if (a) return a; }
+  for (const t of texts) {
+    // Season words only (not "Week N" rows): the plan's seasonal start.
+    const m = String(t ?? "").match(/\b(?:(?:this|next|coming)\s+)?(?:(?:early|mid|late)[- ]?)?(spring|summer|fall|autumn|winter)\b(?:\s+\d{4})?/i);
+    if (m) { const a = parseSeason(m[0], todayIso); if (a) return a; }
+  }
+  return undefined;
+}
+
+function messageTexts(messages: Message[]): string[] {
+  const out: string[] = [];
+  for (const m of messages ?? []) {
+    out.push(String((m as { content?: unknown }).content ?? ""));
+    for (const a of m.artifacts ?? []) if (a.type === "table") out.push(a.content);
+  }
+  return out;
+}
+
+/** Markdown plan files (Expert-generated) as text, for anchoring. */
+export function planFileTexts(files: File[], readFile: (absolutePath: string) => string | null = readLocalFile): string[] {
+  const out: string[] = [];
+  for (const file of files ?? []) {
+    if (file.supersededAt || !file.uploadedBy?.startsWith("Expert:") || !file.filename.toLowerCase().endsWith(".md")) continue;
+    const c = readGeneratedFile(file, readFile);
+    if (c) out.push(c);
+  }
+  return out;
+}
+
+export function findConversationAnchor(messages: Message[], todayIso: string, extraTexts: string[] = []): string | undefined {
+  return findPlanAnchor([...messageTexts(messages), ...extraTexts], todayIso);
 }
 
 // ── entry point ──────────────────────────────────────────────────────────────
@@ -455,7 +502,7 @@ export function extractScheduleRows(
   todayIso: string = new Date().toISOString().slice(0, 10),
 ): ScheduleRow[] {
   const rows: ScheduleRow[] = [];
-  let anchorIso: string | undefined;
+  let anchorIso: string | undefined = findPlanAnchor([...messageTexts(messages), ...planFileTexts(files, readFile)], todayIso);
 
   for (const message of messages ?? []) {
     anchorIso = findTimingAnchor(String((message as { content?: unknown }).content ?? ""), todayIso) ?? anchorIso;
@@ -524,7 +571,7 @@ export function buildInlineCalendarArtifact(opts: {
     : [];
   const rows = extractScheduleRows(messages, files, () => opts.deliverableMarkdown ?? null, opts.todayIso);
   if (!rows.length) return null;
-  const stated = findConversationAnchor(messages, opts.todayIso) ?? (opts.deliverableMarkdown ? findTimingAnchor(opts.deliverableMarkdown, opts.todayIso) : undefined);
+  const stated = findConversationAnchor(messages, opts.todayIso, opts.deliverableMarkdown ? [opts.deliverableMarkdown] : []);
   const anchor = resolveScheduleAnchor(stated, opts.todayIso);
   const events: InlineCalendarEvent[] = rows
     .map((row) => ({ summary: buildRowSummary(row), startDate: resolveRowStartDate(row, anchor), description: row.description }))
