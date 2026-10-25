@@ -45,3 +45,8 @@ externalPort = 3000
 
 [agent]
 integrations = ["javascript_stripe:1.0.0"]
+
+[userenv]
+
+[userenv.development]
+FF_PREMIUM_CHARTS = "1"
