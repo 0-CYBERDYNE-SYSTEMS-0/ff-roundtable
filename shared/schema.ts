@@ -213,7 +213,7 @@ export const weatherCache = pgTable("weather_cache", {
 
 // Artifact type definition
 export const artifactSchema = z.object({
-  type: z.enum(["html", "json", "table", "chart", "code"]),
+  type: z.enum(["html", "json", "table", "chart", "code", "calendar"]),
   title: z.string(),
   content: z.string(),
   language: z.string().optional(),

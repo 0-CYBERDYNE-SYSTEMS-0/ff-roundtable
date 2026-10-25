@@ -1,3 +1,4 @@
+import { buildInlineCalendarArtifact, wantsCalendar } from "@shared/schedule-extract";
 import { CALENDAR_TABLE_RULE } from "./calendar-notes-prompt";
 import { storage } from "./storage";
 import { ARTIFACT_DESIGN_PROMPT } from "./artifact-design";
@@ -80,6 +81,17 @@ async function runExpertToolPhase(expert: Expert, question: string, userId?: num
 /** Farmer question + farm profile + farmer turns: what research must be relevant to (crop/region). */
 function researchRelevanceText(question: string, farmContext: string, history: Message[]): string {
   return [question, farmContext, ...history.filter(m => m.role === "user").map(m => m.content)].join("\n");
+}
+
+/** Calendar requests get a compact dated event list inside the message itself (not only a Files-tab deliverable). */
+function attachInlineCalendar(artifacts: Artifact[], question: string, farmerText: string | undefined, reply: string, deliverable: { title: string; content: string } | null): void {
+  if (!wantsCalendar(`${question}\n${farmerText ?? ""}`)) return;
+  try {
+    const cal = buildInlineCalendarArtifact({ artifacts, deliverableMarkdown: deliverable?.content, deliverableTitle: deliverable?.title, contextText: reply, todayIso: new Date().toISOString().slice(0, 10) });
+    if (cal) artifacts.push(cal);
+  } catch (error) {
+    console.warn(`[CALENDAR] inline calendar skipped: ${(error as Error).message}`);
+  }
 }
 
 function stripModelSourcesSection(content: string): string {
@@ -1319,6 +1331,7 @@ export async function getExpertResponseStream(
     };
     const { kept: artifacts, dropped: droppedCharts, droppedReasons } = filterChartArtifacts(extracted.artifacts, allowedChartUrls, chartEvidence);
     logRejectedCharts(expert.role, droppedReasons);
+    attachInlineCalendar(artifacts, referenceMessageContent, chartEvidence.farmerText, response.message.content, deliverableSplit.deliverable);
     const finalized = expert.role === "File Creator" || expert.role === "Moderator"
       ? { content: extracted.cleanContent, addition: "" }
       : await finalizeExpertTools(expert, extracted.cleanContent, toolRun, deliverableSplit.deliverable, history);
@@ -1478,6 +1491,7 @@ export async function getExpertResponse(
     };
     const { kept: artifacts, dropped: droppedCharts, droppedReasons } = filterChartArtifacts(extractedNonStream.artifacts, [...(toolRunNs?.sources.map(src => src.url) ?? []), ...getSharedResearch(expert.conversationId).map(src => src.url)], chartEvidence);
     logRejectedCharts(expert.role, droppedReasons);
+    attachInlineCalendar(artifacts, referenceMessageContent, chartEvidence.farmerText, response.message.content, null);
     const cleanContent = extractedNonStream.cleanContent + (droppedCharts ? CHART_REJECTION_NOTICE : "");
     const researchAnswer = expert.role === "Research Analyst"
       ? appendRetrievedCitationUrls(cleanContent, response.citations)

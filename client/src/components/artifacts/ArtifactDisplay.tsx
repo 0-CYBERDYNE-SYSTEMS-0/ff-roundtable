@@ -1,6 +1,7 @@
+import InlineCalendar from "./InlineCalendar";
 import { useState, useMemo } from "react";
 import { Artifact } from "@shared/schema";
-import { Copy, Download, Maximize2, Code, Table, BarChart3, FileJson } from "lucide-react";
+import { Copy, Download, Maximize2, Code, Table, BarChart3, FileJson, CalendarDays } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { LineChart, Line, BarChart, Bar, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from "recharts";
@@ -56,6 +57,8 @@ export default function ArtifactDisplay({ artifact }: ArtifactDisplayProps) {
         return <Table className="w-4 h-4" />;
       case "chart":
         return <BarChart3 className="w-4 h-4" />;
+      case "calendar":
+        return <CalendarDays className="w-4 h-4" />;
       default:
         return <FileJson className="w-4 h-4" />;
     }
@@ -175,6 +178,9 @@ export default function ArtifactDisplay({ artifact }: ArtifactDisplayProps) {
         }
         const tableRender2 = tryParseAndRenderTable(artifact.content);
         return tableRender2 || <div className="text-sm text-neutral-600">Invalid table data</div>;
+
+      case "calendar":
+        return <InlineCalendar content={artifact.content} />;
 
       case "chart":
         try {
