@@ -54,7 +54,7 @@ function toolPlanningModel(): string {
 /** Expert reply calls see the last N transcript messages (was 15). */
 const EXPERT_HISTORY_MESSAGES = 8;
 
-async function runExpertToolPhase(expert: Expert, question: string, userId?: number): Promise<ToolRun | null> {
+async function runExpertToolPhase(expert: Expert, question: string, userId?: number, relevanceText?: string): Promise<ToolRun | null> {
   if (!expertToolsEnabled() || expert.role === "Moderator" || expert.role === "File Creator") return null;
   let tier: string | undefined;
   try { tier = userId ? (await storage.getUser(userId))?.tier ?? undefined : undefined; } catch { tier = undefined; }
@@ -72,9 +72,14 @@ async function runExpertToolPhase(expert: Expert, question: string, userId?: num
   }
   const calls = parseToolPlan(plan, limit);
   if (!calls.length) return null;
-  const run = await runToolCalls(calls);
+  const run = await runToolCalls(calls, fetch, relevanceText ?? question);
   console.log(`[TOOLS] ${expert.role}: ${calls.length} call(s), ${run.sources.length} source(s)${run.notes.length ? `, notes: ${run.notes.join("; ")}` : ""}`);
   return run;
+}
+
+/** Farmer question + farm profile + farmer turns: what research must be relevant to (crop/region). */
+function researchRelevanceText(question: string, farmContext: string, history: Message[]): string {
+  return [question, farmContext, ...history.filter(m => m.role === "user").map(m => m.content)].join("\n");
 }
 
 function stripModelSourcesSection(content: string): string {
@@ -1229,7 +1234,7 @@ export async function getExpertResponseStream(
    // array. The 12k-char truncation applies to the TEXT part only — the
    // base64 image parts are appended verbatim, never truncated.
    // Core tools: optional research phase (search / fetch) before answering.
-   const toolRun = await runExpertToolPhase(expert, referenceMessageContent, conversation?.userId);
+   const toolRun = await runExpertToolPhase(expert, referenceMessageContent, conversation?.userId, researchRelevanceText(referenceMessageContent, farmContext, history));
    if (toolRun) messages.push({ role: "system", content: formatToolResultsForPrompt(toolRun) });
    rememberSharedResearch(expert.conversationId, toolRun?.sources ?? []);
    const sharedResearch = getSharedResearch(expert.conversationId);
@@ -1430,7 +1435,7 @@ export async function getExpertResponse(
         : { role: "user", content: userText }
    );
 
-   const toolRunNs = await runExpertToolPhase(expert, referenceMessageContent, conversation?.userId);
+   const toolRunNs = await runExpertToolPhase(expert, referenceMessageContent, conversation?.userId, researchRelevanceText(referenceMessageContent, "", history));
    if (toolRunNs) messages.push({ role: "system", content: formatToolResultsForPrompt(toolRunNs) });
    rememberSharedResearch(expert.conversationId, toolRunNs?.sources ?? []);
    const sharedBlockNs = formatSharedResearchForPrompt(getSharedResearch(expert.conversationId), toolRunNs?.sources.map(s => s.url) ?? []);

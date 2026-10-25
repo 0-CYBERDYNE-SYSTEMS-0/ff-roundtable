@@ -262,6 +262,8 @@ export function asksForDualAxis(text: string | undefined): boolean {
 
 /** Removes independent y scales/axes and right-oriented y axes (no dual axis unless asked). */
 export function stripDualAxis(spec: Record<string, unknown>): Record<string, unknown> {
+  // Small multiples legitimately need per-panel y scales (units differ); that is not a dual axis.
+  if (isFacetedSpec(spec)) return spec;
   const strip = (node: unknown): unknown => {
     if (Array.isArray(node)) return node.map(strip);
     if (!node || typeof node !== "object") return node;
@@ -288,9 +290,10 @@ export function stripDualAxis(spec: Record<string, unknown>): Record<string, unk
   return strip(spec) as Record<string, unknown>;
 }
 
-const OUT_OF_REGION_DOMAINS = /(^|\.)(iastate\.edu|purdue\.edu|illinois\.edu|umn\.edu|unl\.edu|k-state\.edu|ksu\.edu|osu\.edu|psu\.edu|cornell\.edu|wisc\.edu|msu\.edu|uky\.edu|ufl\.edu|tamu\.edu|uga\.edu|ncsu\.edu|missouri\.edu|ohio-state\.edu)$/i;
-const LOW_QUALITY_DOMAINS = /(^|\.)(shuncy\.com|gardeningknowhow\.com|thespruce\.com|wikihow\.com|hunker\.com|homesandgardens\.com|reddit\.com|quora\.com|pinterest\.com)$/i;
+const OUT_OF_REGION_DOMAINS = /(^|\.)(iastate\.edu|purdue\.edu|illinois\.edu|umn\.edu|unl\.edu|k-state\.edu|ksu\.edu|osu\.edu|psu\.edu|cornell\.edu|wisc\.edu|msu\.edu|uky\.edu|ufl\.edu|tamu\.edu|uga\.edu|ncsu\.edu|missouri\.edu|ohio-state\.edu|montana\.edu|ndsu\.edu|sdstate\.edu|umd\.edu|vt\.edu|clemson\.edu|auburn\.edu|lsu\.edu|okstate\.edu|arkansas\.edu|uark\.edu|iowa\.gov|purdue\.extension\.org)$/i;
+const LOW_QUALITY_DOMAINS = /(^|\.)(shuncy\.com|gardeningknowhow\.com|thespruce\.com|wikihow\.com|hunker\.com|homesandgardens\.com|reddit\.com|quora\.com|pinterest\.com|cropple\.ai|farmhq\.com|gardenerspath\.com|plantcaretoday\.com|bloomingbackyard\.com|ehow\.com)$/i;
 const PNW_QUESTION = /\b(oregon|willamette|eugene|corvallis|salem|portland|pacific northwest|pnw|western oregon|washington state|idaho)\b/i;
+const OTHER_STATE_PATH = /\b(iowa|illinois|indiana|nebraska|kansas|minnesota|montana|dakota|missouri|ohio|kentucky|texas|georgia|florida|alabama|arkansas)\b/i;
 const MIDWEST_CROP = /\b(corn|soybeans?|maize)\b/i;
 
 function hostOf(url: string): string {
@@ -313,6 +316,7 @@ export function filterRelevantSources(sources: string[], questionText: string | 
     if (LOW_QUALITY_DOMAINS.test(host)) return false;
     if (pnw && OUT_OF_REGION_DOMAINS.test(host)) return false;
     if (pnw && !askedMidwestCrop && MIDWEST_CROP.test(s)) return false;
+    if (pnw && OTHER_STATE_PATH.test(s) && !OTHER_STATE_PATH.test(q)) return false;
     return true;
   });
   const rank = (s: string) => { const h = hostOf(s); return /oregonstate\.edu$/.test(h) ? 0 : /(wsu\.edu|uidaho\.edu|usda\.gov|\.gov)$/.test(h) ? 1 : /^https?:/i.test(s) ? 2 : 3; };
@@ -324,4 +328,63 @@ export function tidySourceList(sources: string[]): string[] {
   const isAssumption = (s: string) => /^(assumptions?|illustrative)$/i.test(s.trim());
   const real = sources.filter(s => !isAssumption(s));
   return real.length ? Array.from(new Set(real)) : sources.length ? ["assumptions"] : [];
+}
+
+/** Faceted (small-multiples) spec: top-level facet, or row/column/facet encodings. */
+export function isFacetedSpec(spec: Record<string, unknown>): boolean {
+  if ("facet" in spec) return true;
+  const enc = (spec.encoding ?? {}) as Record<string, unknown>;
+  return ["row", "column", "facet"].some(k => k in enc);
+}
+
+function facetField(spec: Record<string, any>): string | undefined {
+  if (spec.facet) return spec.facet.field ?? spec.facet.row?.field ?? spec.facet.column?.field;
+  const enc = spec.encoding ?? {};
+  return enc.facet?.field ?? enc.column?.field ?? enc.row?.field;
+}
+
+function yField(spec: Record<string, any>): string | undefined {
+  const inner = spec.spec ?? spec;
+  if (inner.encoding?.y?.field) return inner.encoding.y.field;
+  for (const l of inner.layer ?? []) if (l?.encoding?.y?.field) return l.encoding.y.field;
+  return undefined;
+}
+
+const UNIT_RE = /\(([^)]*\/[^)]*)\)|\b(tons?\/ac|lb\/ac|lbs\/ac|bu\/ac|kg\/ha|t\/ha|cwt\/ac)\b/i;
+
+/**
+ * Small multiples whose panels carry different units (tons/ac vs lb/ac) or
+ * magnitudes (>10x) get independent y scales, and the caption is made to match
+ * what is drawn.
+ */
+export function applyFacetScales(chart: { data: Record<string, unknown>[]; spec: Record<string, unknown>; description?: string }): { spec: Record<string, unknown>; description?: string } {
+  const spec = chart.spec as Record<string, any>;
+  if (!isFacetedSpec(spec)) return { spec, description: chart.description };
+  const ff = facetField(spec);
+  const yf = yField(spec);
+  let independent = spec.resolve?.scale?.y === "independent";
+  if (!independent && ff && yf) {
+    const groups = new Map<string, number[]>();
+    for (const row of chart.data) {
+      const v = Number(row[yf]);
+      if (!Number.isFinite(v)) continue;
+      const k = String(row[ff]);
+      groups.set(k, [...(groups.get(k) ?? []), Math.abs(v)]);
+    }
+    const units = new Set(Array.from(groups.keys()).map(k => (k.match(UNIT_RE)?.[0] ?? "").toLowerCase()).filter(Boolean));
+    const unitField = Object.keys(chart.data[0] ?? {}).find(k => /^units?$/i.test(k));
+    if (unitField) for (const r of chart.data) units.add(String(r[unitField]).toLowerCase());
+    const maxes = Array.from(groups.values()).map(v => Math.max(...v)).filter(m => m > 0);
+    const spread = maxes.length > 1 ? Math.max(...maxes) / Math.min(...maxes) : 1;
+    independent = units.size > 1 || spread > 10;
+  }
+  let description = chart.description;
+  if (independent) {
+    const out = { ...spec, resolve: { ...(spec.resolve ?? {}), scale: { ...(spec.resolve?.scale ?? {}), y: "independent" } } };
+    if (description && /(same|shared|common|single) (y[- ]?)?(axis|scale)/i.test(description)) description = description.replace(/[^.]*\b(same|shared|common|single) (y[- ]?)?(axis|scale)[^.]*\.?\s*/gi, "").trim();
+    if (!description || !/independent|own (y[- ]?)?(axis|scale)/i.test(description)) description = `${description ? description + " " : ""}Each panel has its own y-axis scale; compare shapes, not bar heights, across panels.`;
+    return { spec: out, description };
+  }
+  if (description && /independent (y[- ]?)?(axis|axes|scales?)|own (y[- ]?)?(axis|scale)/i.test(description)) description = description.replace(/[^.]*\b(independent|own) (y[- ]?)?(axis|axes|scales?)[^.]*\.?\s*/gi, "").trim() + " All panels share one y-axis scale.";
+  return { spec, description };
 }

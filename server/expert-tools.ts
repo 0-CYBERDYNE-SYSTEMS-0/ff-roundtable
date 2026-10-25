@@ -16,7 +16,7 @@ import net from "net";
 import { compile, type TopLevelSpec } from "vega-lite";
 import { premiumChartsEnabled } from "./chart-picker";
 import { parseChartJsonWithRepair, fallbackSpecFromRows, hoistNestedData } from "./chart-repair";
-import { parseVegaChart, themedVegaSpec, chartHasPlottableSeries, stripDualAxis, asksForDualAxis, filterRelevantSources, tidySourceList } from "@shared/chart-artifact";
+import { parseVegaChart, themedVegaSpec, chartHasPlottableSeries, stripDualAxis, asksForDualAxis, filterRelevantSources, tidySourceList, applyFacetScales } from "@shared/chart-artifact";
 
 export const MAX_TOOL_CALLS_PER_TURN = 3;
 export const TOOL_TIMEOUT_MS = 10_000;
@@ -143,9 +143,12 @@ export async function fetchPage(rawUrl: string, fetchImpl: FetchLike = fetch): P
 }
 
 /** Executes planned calls; never throws (failures become notes). */
-export async function runToolCalls(calls: ToolCall[], fetchImpl: FetchLike = fetch): Promise<ToolRun> {
+export async function runToolCalls(calls: ToolCall[], fetchImpl: FetchLike = fetch, questionText?: string): Promise<ToolRun> {
   const sources: ToolSource[] = [];
   const notes: string[] = [];
+  // Every prompt type (charts, calendars, tables, prose): skip content farms and
+  // out-of-region pages (Iowa corn for a Eugene question) before they are fetched.
+  const relevant = (url: string) => filterRelevantSources([url], questionText).length > 0;
   for (const call of calls.slice(0, MAX_TOOL_CALLS_PER_TURN)) {
     try {
       if (call.tool === "search") {
@@ -154,6 +157,7 @@ export async function runToolCalls(calls: ToolCall[], fetchImpl: FetchLike = fet
         let verified = results.some(r => sources.some(s => s.url === r.url));
         for (const r of results) {
           if (sources.some(s => s.url === r.url)) { verified = true; break; }
+          if (!relevant(r.url)) { notes.push(`Search result ${r.url} skipped: not relevant to the farmer's crop/region.`); continue; }
           try {
             const page = await fetchPage(r.url, fetchImpl);
             sources.push({ id: `S${sources.length + 1}`, title: page.title || r.title, url: page.url, snippet: page.text });
@@ -165,6 +169,7 @@ export async function runToolCalls(calls: ToolCall[], fetchImpl: FetchLike = fet
         }
         if (results.length && !verified) notes.push(`Search "${call.query}" returned no fetchable source; do not cite its snippets.`);
       } else {
+        if (!relevant(call.url)) { notes.push(`Fetch ${call.url} skipped: not relevant to the farmer's crop/region.`); continue; }
         const page = await fetchPage(call.url, fetchImpl);
         sources.push({ id: `S${sources.length + 1}`, title: page.title, url: page.url, snippet: page.text });
       }
@@ -447,6 +452,7 @@ export function validateChartArtifactDetailed(
     if (!compiles(parsed)) return { ok: false, reason: "invalid-vega-spec" };
     if (premium) {
       if (!asksForDualAxis(evidence.farmerText)) parsed = { ...parsed, spec: stripDualAxis(parsed.spec as Record<string, unknown>) as typeof parsed.spec };
+      { const f = applyFacetScales(parsed as any); parsed = { ...parsed, spec: f.spec as typeof parsed.spec, ...(f.description ? { description: f.description } : {}) }; }
       if (!chartHasPlottableSeries(parsed)) {
         // Axes with no series: rebuild from the rows, or drop the chart.
         const spec = fallbackSpecFromRows(parsed.data as Record<string, unknown>[]);
