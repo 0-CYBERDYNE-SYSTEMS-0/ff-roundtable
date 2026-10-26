@@ -24,7 +24,7 @@ export { commitPendingDeliverable, discardPendingDeliverable } from "./pending-d
 import { enforceCitationIntegrity, removeUnsupportedCitedSentences, stripMetaLines, undecorate, mergeDuplicateFarmerQuestions, removeRepeatedExpertSentences } from "./response-hygiene";
 import {
   buildToolUsePrompt, buildToolPlanningPrompt, parseToolPlan, runToolCalls, formatToolResultsForPrompt,
-  toolCallLimitForTier, rememberSharedResearch, getSharedResearch, formatSharedResearchForPrompt, extractDeliverable, saveExpertDeliverable, filterChartArtifacts, chartResearchUrls, type ChartArtifactRejectionReason, type ChartEvidence, type ToolRun,
+  toolCallLimitForTier, rememberSharedResearch, getSharedResearch, formatSharedResearchForPrompt, rememberCanonicalFrost, getCanonicalFrost, extractDeliverable, saveExpertDeliverable, filterChartArtifacts, chartResearchUrls, type ChartArtifactRejectionReason, type ChartEvidence, type ToolRun,
 } from "./expert-tools";
 
 /** Expert tools are on by default; EXPERT_TOOLS=off disables them. Unit tests never hit the network. */
@@ -1253,7 +1253,7 @@ export async function getExpertResponseStream(
    if (toolRun) messages.push({ role: "system", content: formatToolResultsForPrompt(toolRun) });
    rememberSharedResearch(expert.conversationId, toolRun?.sources ?? []);
    const sharedResearch = getSharedResearch(expert.conversationId);
-   const sharedBlock = formatSharedResearchForPrompt(sharedResearch, toolRun?.sources.map(s => s.url) ?? []);
+   const sharedBlock = formatSharedResearchForPrompt(sharedResearch, toolRun?.sources.map(s => s.url) ?? [], getCanonicalFrost(expert.conversationId));
    if (sharedBlock) messages.push({ role: "system", content: sharedBlock });
    if (retryInstruction?.trim()) messages.push({ role: "system", content: retryInstruction.trim() });
 
@@ -1350,6 +1350,7 @@ export async function getExpertResponseStream(
     if (researchAnswer.addition) onToken(researchAnswer.addition);
     const frostRef = expert.role === "Moderator" || expert.role === "File Creator" ? { content: researchAnswer.content, addition: "" } : ensureAuthoritativeFrostCitation(researchAnswer.content, referenceMessageContent, [...(toolRun?.sources ?? []), ...getSharedResearch(expert.conversationId)]);
     if (frostRef.addition) { onToken(frostRef.addition); researchAnswer.content = frostRef.content; }
+    rememberCanonicalFrost(expert.conversationId, researchAnswer.content, [...(toolRun?.sources ?? []), ...getSharedResearch(expert.conversationId)]);
 
     const streamedMessage: InsertMessage = {
       conversationId: expert.conversationId,
@@ -1456,7 +1457,7 @@ export async function getExpertResponse(
    const toolRunNs = await runExpertToolPhase(expert, referenceMessageContent, conversation?.userId, researchRelevanceText(referenceMessageContent, "", history));
    if (toolRunNs) messages.push({ role: "system", content: formatToolResultsForPrompt(toolRunNs) });
    rememberSharedResearch(expert.conversationId, toolRunNs?.sources ?? []);
-   const sharedBlockNs = formatSharedResearchForPrompt(getSharedResearch(expert.conversationId), toolRunNs?.sources.map(s => s.url) ?? []);
+   const sharedBlockNs = formatSharedResearchForPrompt(getSharedResearch(expert.conversationId), toolRunNs?.sources.map(s => s.url) ?? [], getCanonicalFrost(expert.conversationId));
    if (sharedBlockNs) messages.push({ role: "system", content: sharedBlockNs });
    console.log(`[DEBUG] Sending ${messages.length} messages to LLM for ${expert.role}${imageParts.length > 0 ? ` (with ${imageParts.length} image part${imageParts.length > 1 ? "s" : ""})` : ""}.`);
 
@@ -1502,6 +1503,7 @@ export async function getExpertResponse(
       ? appendRetrievedCitationUrls(cleanContent, response.citations)
       : { content: cleanContent, addition: "" };
     if (expert.role !== "Moderator" && expert.role !== "File Creator") researchAnswer.content = ensureAuthoritativeFrostCitation(researchAnswer.content, referenceMessageContent, [...(toolRunNs?.sources ?? []), ...getSharedResearch(expert.conversationId)]).content;
+    rememberCanonicalFrost(expert.conversationId, researchAnswer.content, [...(toolRunNs?.sources ?? []), ...getSharedResearch(expert.conversationId)]);
 
     return {
       conversationId: expert.conversationId,

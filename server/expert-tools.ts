@@ -16,7 +16,8 @@ import net from "net";
 import { compile, type TopLevelSpec } from "vega-lite";
 import { premiumChartsEnabled } from "./chart-picker";
 import { parseChartJsonWithRepair, fallbackSpecFromRows, hoistNestedData } from "./chart-repair";
-import { parseVegaChart, themedVegaSpec, chartHasPlottableSeries, stripDualAxis, asksForDualAxis, filterRelevantSources, tidySourceList, applyFacetScales, rankSource, ensureFacetWhenAsked, readableSourceTitle, isFrostClimateQuestion, isAuthoritativeClimateHost } from "@shared/chart-artifact";
+import { parseVegaChart, themedVegaSpec, chartHasPlottableSeries, stripDualAxis, asksForDualAxis, filterRelevantSources, tidySourceList, applyFacetScales, rankSource, ensureFacetWhenAsked, normalizeMixedUnitChart, readableSourceTitle, isFrostClimateQuestion, isAuthoritativeClimateHost } from "@shared/chart-artifact";
+import { extractCanonicalFrost, type CanonicalFrost } from "@shared/frost-canonical";
 
 export const MAX_TOOL_CALLS_PER_TURN = 3;
 export const TOOL_TIMEOUT_MS = 10_000;
@@ -488,11 +489,12 @@ export function validateChartArtifactDetailed(
     if (premium) {
       if (!asksForDualAxis(evidence.farmerText)) parsed = { ...parsed, spec: stripDualAxis(parsed.spec as Record<string, unknown>) as typeof parsed.spec };
       parsed = { ...parsed, spec: ensureFacetWhenAsked(parsed.spec as Record<string, unknown>, evidence.farmerText ?? "") as typeof parsed.spec };
-      { const f = applyFacetScales(parsed as any); parsed = { ...parsed, spec: f.spec as typeof parsed.spec, ...(f.description ? { description: f.description } : {}) }; }
-      if (!chartHasPlottableSeries(parsed)) {
+      { const mixed = normalizeMixedUnitChart(parsed as any); parsed = { ...(parsed as any), data: mixed.data, spec: mixed.spec as typeof parsed.spec }; }
+      { const f = applyFacetScales(parsed as any); parsed = { ...(parsed as any), spec: f.spec, ...(f.description ? { description: f.description } : {}) }; }
+      if (!chartHasPlottableSeries(parsed as any)) {
         // Axes with no series: rebuild from the rows, or drop the chart.
-        const spec = fallbackSpecFromRows(parsed.data as Record<string, unknown>[]);
-        const rebuilt = spec ? parseVegaChart({ ...chart, data: parsed.data, spec }) : null;
+        const spec = fallbackSpecFromRows((parsed as any).data as Record<string, unknown>[]);
+        const rebuilt = spec ? parseVegaChart({ ...chart, data: (parsed as any).data, spec }) : null;
         if (!rebuilt || !compiles(rebuilt) || !chartHasPlottableSeries(rebuilt)) return { ok: false, reason: "empty-series" };
         parsed = rebuilt;
       }
@@ -562,6 +564,20 @@ export function filterChartArtifacts<T extends { type: string; content: string; 
 const SHARED_RESEARCH_TTL_MS = 6 * 60 * 60 * 1000;
 const SHARED_RESEARCH_MAX = 8;
 const sharedResearchStore = new Map<number, { at: number; sources: ToolSource[] }>();
+const canonicalFrostStore = new Map<number, CanonicalFrost[]>();
+
+export function rememberCanonicalFrost(conversationId: number | undefined, text: string, sources: ToolSource[]): CanonicalFrost | null {
+  if (!conversationId) return null;
+  const value = extractCanonicalFrost(text, sources);
+  if (!value) return null;
+  const existing = canonicalFrostStore.get(conversationId) ?? [];
+  if (!existing.some(item => item.location.toLowerCase() === value.location.toLowerCase())) canonicalFrostStore.set(conversationId, [...existing, value]);
+  return existing.find(item => item.location.toLowerCase() === value.location.toLowerCase()) ?? value;
+}
+
+export function getCanonicalFrost(conversationId: number | undefined): CanonicalFrost[] {
+  return conversationId ? canonicalFrostStore.get(conversationId) ?? [] : [];
+}
 
 export function rememberSharedResearch(conversationId: number | undefined, sources: Array<Pick<ToolSource, "title" | "url" | "snippet">>, now = Date.now()): void {
   if (!conversationId || !sources.length) return;
@@ -580,9 +596,9 @@ export function getSharedResearch(conversationId: number | undefined, now = Date
   return entry.sources;
 }
 
-export function formatSharedResearchForPrompt(sources: ToolSource[], excludeUrls: string[] = []): string {
+export function formatSharedResearchForPrompt(sources: ToolSource[], excludeUrls: string[] = [], frost: CanonicalFrost[] = []): string {
   const shown = sources.filter(s => !excludeUrls.includes(s.url));
-  if (!shown.length) return "";
-  return ["📚 SHARED RESEARCH from other experts in this roundtable (fetched pages; cite as [R1](URL); usable as chart sources by URL):",
-    ...shown.map(s => `[${s.id}] ${s.title} — ${s.url}\n${s.snippet.slice(0, 1200)}`)].join("\n");
+  const frostLines = frost.map(f => `CANONICAL FROST (use this value, do not contradict it): last spring frost for ${f.location} ≈ ${f.lastFrost}${f.threshold ? ` [${f.threshold}]` : ""} per ${f.sourceTitle} (${f.sourceUrl}).`);
+  if (!shown.length && !frostLines.length) return "";
+  return [...frostLines, ...(shown.length ? ["📚 SHARED RESEARCH from other experts in this roundtable (fetched pages; cite as [R1](URL); usable as chart sources by URL):", ...shown.map(s => `[${s.id}] ${s.title} — ${s.url}\n${s.snippet.slice(0, 1200)}`)] : [])].join("\n");
 }
