@@ -163,6 +163,8 @@ export function themedVegaSpec(chart: VegaChart, width = 600): Record<string, un
   const normalized = normalizeChartData(chart);
   const info = profileFields(normalized.data, normalized.numeric);
   chart = { ...chart, data: normalized.data, spec: fixEncodings(chart.spec, info) as VegaChart["spec"] };
+  const mixed = normalizeMixedUnitChart(chart);
+  chart = { ...chart, data: mixed.data, spec: mixed.spec as VegaChart["spec"] };
   const { config: _config, $schema: _schema, ...rawSpec } = chart.spec;
   const composed = ["facet", "repeat", "concat", "hconcat", "vconcat"].some(key => key in rawSpec);
   const spec = dedupeConstantTextLayers(composed ? rawSpec : addSparseLabels(rawSpec, chart.data.length));
@@ -405,6 +407,32 @@ function yField(spec: Record<string, any>): string | undefined {
 }
 
 const UNIT_RE = /\(([^)]*\/[^)]*)\)|\b(tons?\/ac|lb\/ac|lbs\/ac|bu\/ac|kg\/ha|t\/ha|cwt\/ac)\b/i;
+const LABEL_UNIT_RE = /\b(tons?\/ac|lb(?:s)?\/ac|bu\/ac|kg\/ha|t\/ac|t\/ha|tons?|lbs?|kg)\b/i;
+
+/** Wrap a single-view mixed-unit chart in facets with independent y scales. */
+export function normalizeMixedUnitChart(chart: { data: VegaChart["data"]; spec: Record<string, unknown> }): { data: VegaChart["data"]; spec: Record<string, unknown> } {
+  const spec = chart.spec as Record<string, any>;
+  if (isFacetedSpec(spec) || ["layer", "repeat", "concat", "hconcat", "vconcat"].some(k => k in spec)) return chart;
+  const unitField = Object.keys(chart.data[0] ?? {}).find(k => /^units?$/i.test(k));
+  let field = unitField;
+  const units = unitField ? chart.data.map(row => String(row[unitField] ?? "").trim().toLowerCase()).filter(Boolean) : [];
+  if (!field) {
+    const enc = (spec.encoding ?? {}) as Record<string, any>;
+    const candidates = [enc.color, enc.series, enc.x, enc.category, enc.name, enc.detail].filter(Boolean);
+    const candidate = candidates.find((e: any) => typeof e.field === "string" && chart.data.some(row => LABEL_UNIT_RE.test(String(row[e.field] ?? ""))));
+    if (candidate) {
+      field = "__ff_unit";
+      const tagged = chart.data.map(row => ({ ...row, __ff_unit: String(row[candidate.field] ?? "").match(LABEL_UNIT_RE)?.[1]?.toLowerCase() ?? "" }));
+      units.push(...tagged.map(row => row.__ff_unit).filter(Boolean));
+      if (new Set(units).size < 2) return chart;
+      chart = { ...chart, data: tagged as VegaChart["data"] };
+    }
+  }
+  if (!field || new Set(units).size < 2) return chart;
+  const facetFieldName = field;
+  const { width: _width, height: _height, ...inner } = spec;
+  return { data: chart.data, spec: { facet: { field: facetFieldName, type: "nominal", title: facetFieldName === "__ff_unit" ? "Unit" : null }, columns: 2, spec: { ...inner, width: 220, height: 220 }, resolve: { scale: { y: "independent" } } } };
+}
 
 /**
  * Small multiples whose panels carry different units (tons/ac vs lb/ac) or
