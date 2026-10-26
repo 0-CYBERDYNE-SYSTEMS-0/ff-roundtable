@@ -4,13 +4,14 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { AtSign, Bot, Paperclip, Send, Loader2, Users, ScrollText, PanelRight, ChevronLeft, ChevronDown, ChevronUp, X } from "lucide-react";
+import { AtSign, Bot, Paperclip, Send, Loader2, Users, ScrollText, PanelRight, ChevronLeft, ChevronDown, ChevronUp, X, Download } from "lucide-react";
 import { Message, Expert, User, OpenQuestion } from "@shared/schema";
 import { format } from "date-fns";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { markdownTableComponents } from "./markdown-table";
 import { normalizeMarkdownTablesInText } from "@shared/markdown-table-normalize";
+import { splitIcsBlocks } from "@shared/ics";
 import { formatMessageDate } from "@/lib/file-utils";
 import ModelBadge from "../roundtable/ModelBadge";
 import ConversationSidebar from "../roundtable/ConversationSidebar";
@@ -547,17 +548,33 @@ export default function ChatInterface({
     }),
     [markdownComponents]
   );
-  const renderMessageBody = (content: string, isSynthesis = false) => {
-    const prepared = content.replace(/@\[([^\]]+)\]/g, (tag) => `\`${tag}\``);
-    return (
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        components={isSynthesis ? synthesisMarkdownComponents : markdownComponents}
-      >
-        {normalizeMarkdownTablesInText(prepared)}
-      </ReactMarkdown>
-    );
+  const downloadIcs = (ics: string) => {
+    const url = URL.createObjectURL(new Blob([ics], { type: "text/calendar" }));
+    const link = document.createElement("a");
+    link.href = url; link.download = "calendar.ics"; link.click();
+    URL.revokeObjectURL(url);
   };
+  const renderMessageBody = (content: string, isSynthesis = false) =>
+    splitIcsBlocks(content).map((segment, i) => {
+      if (segment.type === "ics") {
+        return (
+          <Button key={i} type="button" size="sm" variant="outline" className="my-2" onClick={() => downloadIcs(segment.ics)}>
+            <Download className="h-4 w-4 mr-2" />
+            Download calendar (.ics){segment.events ? ` · ${segment.events} event${segment.events === 1 ? "" : "s"}` : ""}
+          </Button>
+        );
+      }
+      const prepared = segment.text.replace(/@\[([^\]]+)\]/g, (tag) => `\`${tag}\``);
+      return (
+        <ReactMarkdown
+          key={i}
+          remarkPlugins={[remarkGfm]}
+          components={isSynthesis ? synthesisMarkdownComponents : markdownComponents}
+        >
+          {normalizeMarkdownTablesInText(prepared)}
+        </ReactMarkdown>
+      );
+    });
 
   const getExpertBubbleColor = (expertId: number) => {
     const borderColors = [
