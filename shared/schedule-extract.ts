@@ -130,26 +130,46 @@ export function afterLastFrost(summary: string, startDate: string, frostIso: str
   return startDate < min ? min : startDate;
 }
 
+/** Shift expert week windows to the same anchor used by event dates. */
+function alignNoteRanges(notes: string, startDate: string): string {
+  const range = new RegExp(`\\b${MONTH_RE}\\.?\\s+(\\d{1,2})\\s*[–—-]\\s*(?:${MONTH_RE}\\.?\\s+)?(\\d{1,2})`, "gi");
+  return notes.replace(range, (_text, month, first, endMonth, last) => {
+    const year = Number(startDate.slice(0, 4));
+    const m = MONTHS.indexOf(month.slice(0, 3).toLowerCase());
+    const em = endMonth ? MONTHS.indexOf(endMonth.slice(0, 3).toLowerCase()) : m;
+    const from = Date.UTC(year, m, Number(first));
+    let to = Date.UTC(year, em, Number(last));
+    if (to < from) to = Date.UTC(year + (em < m ? 1 : 0), em + (em === m ? 1 : 0), Number(last));
+    const end = new Date(`${addDaysIso(startDate, Math.round((to - from) / 86400000))}T00:00:00Z`);
+    const start = new Date(`${startDate}T00:00:00Z`);
+    const monthLabel = (d: Date) => d.toLocaleString("en-US", { month: "short", timeZone: "UTC" });
+    return `${monthLabel(start)} ${start.getUTCDate()}–${end.getUTCMonth() === start.getUTCMonth() ? "" : monthLabel(end) + " "}${end.getUTCDate()}`;
+  });
+}
+
 /** Final event list for any calendar surface: dates, frost rule, clean de-duplicated notes. */
 export function finalizeCalendarEvents<T extends { summary: string; startDate: string; description: string }>(events: T[], frostIso: string | undefined): T[] {
   return events
     .map(e => {
       const startDate = afterLastFrost(e.summary, e.startDate, frostIso);
       const week = e.summary.match(/\bWeek\s+(\d+)\b/i)?.[1];
-      const hasApproximateDate = /~?\b(?:early|mid|late)\s+(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)|~?\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2}|\(\s*last frost\s*\)/i.test(e.summary);
+      const hasApproximateDate = /^\s*(?:\d{1,2}\s*)?[—–-]\s*Week/i.test(e.summary) || /~?\b(?:early|mid|late)\s+(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)|~?\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2}|\(\s*last frost\s*\)/i.test(e.summary);
       let summary = e.summary;
       if (hasApproximateDate) {
         summary = summary
+          .replace(new RegExp(`\\b${MONTH_RE}\\.?\\s+\\d{1,2}\\s*[–—-]\\s*(?:${MONTH_RE}\\.?\\s+)?\\d{1,2}`, "gi"), "")
+          .replace(/^\s*(?:\d{1,2}\s*)?[—–-]\s*/, "")
           .replace(/~?\b(?:early|mid|late)\s+(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)(?:\s+\d{1,2})?/gi, "")
           .replace(/~?\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2}/gi, "")
           .replace(/\(\s*last frost\s*\)/gi, "")
-          .replace(/\s*[—–-]\s*Week\s+\d+\b/gi, "")
+          .replace(/(?:\s*[—–-]\s*)?\bWeek\s+\d+\b/gi, "")
           .replace(/\s{2,}/g, " ").replace(/^\s*[—–-]\s*|\s*[—–-]\s*$/g, "").trim();
+        if (!summary) summary = e.description.replace(new RegExp(`^\\s*${MONTH_RE}\\.?\\s+\\d{1,2}\\s*[–—-]\\s*(?:${MONTH_RE}\\.?\\s+)?\\d{1,2}\\s*[—–-]?\\s*`, "i"), "").split(/\n/)[0].trim();
         const date = new Date(`${startDate}T00:00:00Z`);
         const label = `${date.toLocaleString("en-US", { month: "short", timeZone: "UTC" })} ${date.getUTCDate()}`;
         summary = `${summary}${week ? ` — Week ${week}` : ""} (${label})`;
       }
-      return { ...e, summary: capEventTitle(summary), startDate, description: notesWithoutTitle(e.description, summary) };
+      return { ...e, summary: capEventTitle(summary), startDate, description: notesWithoutTitle(alignNoteRanges(e.description, startDate), summary) };
     })
     .sort((a, b) => a.startDate.localeCompare(b.startDate));
 }
@@ -363,7 +383,9 @@ function extractFromTable(artifact: Pick<Artifact, "content" | "title">, rows: S
       .filter((_, i) => i !== weekCol && i !== dateCol)
       .map((cell) => cleanEventNotes(calendarNotesText(cell)))
       .filter((cell) => cell.length > 0);
-    const task = cells.length > 1 || ctx ? cells[0]?.split(" — ")[0].trim() || undefined : undefined;
+    // A separate week-window cell is timing metadata, not the task name.
+    const taskCell = cells.find(cell => !new RegExp(`^${MONTH_RE}\\.?\\s+\\d{1,2}\\s*[–—-]`, "i").test(cell)) ?? cells[0];
+    const task = cells.length > 1 || ctx ? taskCell?.split(" — ")[0].trim() || undefined : undefined;
     const description = cleanEventNotes(cells.join(" — "));
     rows.push({ weekIndex, date, title, task, description });
   }

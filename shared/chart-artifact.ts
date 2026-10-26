@@ -407,31 +407,75 @@ function yField(spec: Record<string, any>): string | undefined {
 }
 
 const UNIT_RE = /\(([^)]*\/[^)]*)\)|\b(tons?\/ac|lb\/ac|lbs\/ac|bu\/ac|kg\/ha|t\/ha|cwt\/ac)\b/i;
-const LABEL_UNIT_RE = /\b(tons?\/ac|lb(?:s)?\/ac|bu\/ac|kg\/ha|t\/ac|t\/ha|tons?|lbs?|kg)\b/i;
 
 /** Wrap a single-view mixed-unit chart in facets with independent y scales. */
 export function normalizeMixedUnitChart(chart: { data: VegaChart["data"]; spec: Record<string, unknown> }): { data: VegaChart["data"]; spec: Record<string, unknown> } {
   const spec = chart.spec as Record<string, any>;
-  if (isFacetedSpec(spec) || ["layer", "repeat", "concat", "hconcat", "vconcat"].some(k => k in spec)) return chart;
-  const unitField = Object.keys(chart.data[0] ?? {}).find(k => /^units?$/i.test(k));
-  let field = unitField;
-  const units = unitField ? chart.data.map(row => String(row[unitField] ?? "").trim().toLowerCase()).filter(Boolean) : [];
-  if (!field) {
-    const enc = (spec.encoding ?? {}) as Record<string, any>;
-    const candidates = [enc.color, enc.series, enc.x, enc.category, enc.name, enc.detail].filter(Boolean);
-    const candidate = candidates.find((e: any) => typeof e.field === "string" && chart.data.some(row => LABEL_UNIT_RE.test(String(row[e.field] ?? ""))));
-    if (candidate) {
-      field = "__ff_unit";
-      const tagged = chart.data.map(row => ({ ...row, __ff_unit: String(row[candidate.field] ?? "").match(LABEL_UNIT_RE)?.[1]?.toLowerCase() ?? "" }));
-      units.push(...tagged.map(row => row.__ff_unit).filter(Boolean));
-      if (new Set(units).size < 2) return chart;
-      chart = { ...chart, data: tagged as VegaChart["data"] };
-    }
+  const unitOf = (value: unknown): string | undefined => {
+    const text = String(value ?? "").toLowerCase().replace(/_/g, "/");
+    const match = text.match(/\b(tons?\/ac|lbs?\/ac|bu\/ac|kg\/ha|t\/ha|cwt\/ac|mm|cm|kg|lbs?|tons?)\b|%(?![a-z])|°[fc]/i);
+    const parenthesized = text.match(/\(([^()]+)\)/)?.[1];
+    const unit = match?.[0] ?? (parenthesized && /[/%°$]|\b(?:usd|eur|liters?|gallons?|hours?|acres?)\b/.test(parenthesized) ? parenthesized.trim() : undefined);
+    return unit?.replace(/^tons?\/ac$/, "tons/ac").replace(/^lbs?\/ac$/, "lb/ac");
+  };
+  const allUnits = new Set<string>();
+  const unitLabels: string[] = [];
+  const scan = (node: any): void => {
+    if (typeof node === "string") {
+      for (const part of node.split(/[,;]|(?<=\))\s*/)) { const unit = unitOf(part); if (unit) { allUnits.add(unit); unitLabels.push(part); } }
+    } else if (Array.isArray(node)) node.forEach(scan);
+    else if (node && typeof node === "object") Object.entries(node).forEach(([key, value]) => { scan(key); scan(value); });
+  };
+  scan(spec); scan(chart.data);
+  const unitKey = Object.keys(chart.data[0] ?? {}).find(k => /^units?$/i.test(k));
+  if (unitKey) chart.data.forEach(row => { if (row[unitKey]) allUnits.add(String(row[unitKey]).toLowerCase()); });
+  if (isFacetedSpec(spec) && (spec.facet as any)?.field === "__ff_unit") {
+    return { ...chart, spec: { ...spec, resolve: { ...spec.resolve, scale: { ...spec.resolve?.scale, y: "independent" } } } };
   }
-  if (!field || new Set(units).size < 2) return chart;
-  const facetFieldName = field;
-  const { width: _width, height: _height, ...inner } = spec;
-  return { data: chart.data, spec: { facet: { field: facetFieldName, type: "nominal", title: facetFieldName === "__ff_unit" ? "Unit" : null }, columns: 2, spec: { ...inner, width: 220, height: 220 }, resolve: { scale: { y: "independent" } } } };
+  if (allUnits.size < 2) return chart;
+  // Materialize each encoded series into long rows before faceting. This also
+  // handles wide data, repeats and folds without putting two measures in a panel.
+  const rows: VegaChart["data"] = [];
+  const layers: any[] = [];
+  const visit = (node: any, inherited: any = {}, transforms: any[] = [], repeat?: string): void => {
+    const encoding = { ...inherited, ...node.encoding };
+    const ts = [...transforms, ...(node.transform ?? [])];
+    if (node.repeat) {
+      const fields = Array.isArray(node.repeat) ? node.repeat : Object.values(node.repeat).flat();
+      fields.forEach((field: any) => visit(node.spec, encoding, ts, field)); return;
+    }
+    if (node.spec) { visit(node.spec, encoding, ts, repeat); return; }
+    const children = node.layer ?? node.concat ?? node.hconcat ?? node.vconcat;
+    if (children) { children.forEach((child: any) => visit(child, encoding, ts, repeat)); return; }
+    const y = encoding.y;
+    if (!y?.field) return;
+    const field = typeof y.field === "object" ? repeat : y.field;
+    const fold = ts.find((t: any) => t.fold);
+    const fields = fold && field === (fold.as?.[1] ?? "value") ? fold.fold : [field];
+    fields.forEach((source: string) => {
+      const id = String(layers.length);
+      const title = y.axis?.title ?? y.title;
+      const titleParts = String(title ?? "").split(",");
+      const matchingTitle = titleParts.find(part => part.toLowerCase().includes(source.toLowerCase().replace(/[_ ]/g, " ")));
+      const unit = unitOf(source) ?? unitOf(matchingTitle) ?? (titleParts.length === 1 ? unitOf(title) : undefined);
+      for (const row of chart.data) {
+        const label = Object.values(row).map(unitOf).find(Boolean)
+          ?? Object.values(row).filter(value => typeof value === "string" && value.length > 1)
+            .map(value => unitLabels.find(label => label.toLowerCase().includes(String(value).toLowerCase())))
+            .map(unitOf).find(Boolean);
+        const panel = unitKey ? String(row[unitKey]) : label ?? unit ?? source;
+        rows.push({ ...row, ...(fold ? { [fold.as?.[0] ?? "key"]: source } : {}), __ff_value: row[source], __ff_unit: panel, __ff_series: id });
+      }
+      const { domain: _domain, ...scale } = y.scale ?? {};
+      layers.push({ mark: node.mark ?? "line", transform: [
+        ...ts, ...(fold ? [{ filter: { field: fold.as?.[0] ?? "key", equal: source } }] : []), { filter: { field: "__ff_series", equal: id } },
+      ], encoding: { ...encoding, y: { ...y, field: !fold && chart.data.some(row => source in row) ? "__ff_value" : field, title: "Value (unit in panel)", axis: { ...y.axis, title: "Value (unit in panel)", orient: "left" }, scale } } });
+    });
+  };
+  visit(spec);
+  if (!layers.length) return { ...chart, spec: { ...spec, resolve: { scale: { y: "independent" } } } };
+  return { data: rows, spec: { facet: { field: "__ff_unit", type: "nominal", title: "Unit" }, columns: 2,
+    spec: { width: 220, height: 220, layer: layers }, resolve: { scale: { y: "independent" } } } };
 }
 
 /**
