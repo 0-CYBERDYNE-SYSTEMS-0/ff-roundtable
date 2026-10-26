@@ -267,16 +267,6 @@ export function parseMonthOnly(text: string, todayIso: string): string | undefin
   return c >= todayIso ? c : isoOf(ty + 1, month, day);
 }
 
-/** Future plans never land in the past: roll a stale year forward until it is on/after today. */
-export function rollForwardIso(iso: string, todayIso: string): string {
-  let out = iso;
-  for (let i = 0; i < 5 && out < todayIso; i++) {
-    const [y, m, d] = out.split("-").map(Number);
-    out = isoOf(y + 1, m, d) ?? isoOf(y + 1, m, d - 1)!;
-  }
-  return out;
-}
-
 /** Event notes are plain text: no table pipes, separator runs or markdown leftovers. */
 export function cleanEventNotes(text: string): string {
   return text
@@ -287,14 +277,15 @@ export function cleanEventNotes(text: string): string {
     .trim();
 }
 
-/** Week 1 anchor: the next occurrence of the stated anchor, else today. */
+/** Week 1 anchor: the stated date, else today. Yearless dates are inferred by the parsers. */
 export function resolveScheduleAnchor(statedIso: string | undefined, todayIso: string): string {
-  return statedIso ? rollForwardIso(statedIso, todayIso) : todayIso;
+  return statedIso ?? todayIso;
 }
 
 /** Finds the plan's stated anchor: "T = 2027-04-15", "T is April 25", "target planting date: May 1". */
 export function findTimingAnchor(text: string, todayIso: string): string | undefined {
-  const m = text.match(/\b(?:T\s*(?:=|:|is)|target (?:planting |seeding |start )?date\s*(?:=|:|is|of)?|planting date\s*(?:=|:|is))\s*([^\n|;.()]{3,40})/i);
+  const plainText = stripIcsBlocks(stripFencedCodeBlocks(String(text ?? "")));
+  const m = plainText.match(/\b(?:T\s*(?:=|:|is)|target (?:planting |seeding |start )?date\s*(?:=|:|is|of)?|planting date\s*(?:=|:|is))\s*([^\n|;.()]{3,40})/i);
   if (!m) return undefined;
   const iso = m[1].match(/\d{4}-\d{2}-\d{2}/);
   return iso ? parseIsoDate(iso[0]) : parseMonthDay(m[1], todayIso) ?? parseSeason(m[1], todayIso) ?? parseMonthOnly(m[1], todayIso);
@@ -330,6 +321,55 @@ function markdownTableBlocks(content: string): string[] {
   return blocks;
 }
 
+/** Markdown code fences contain examples/data, not schedule prose. */
+function stripFencedCodeBlocks(content: string): string {
+  const lines: string[] = [];
+  let fenceChar: "`" | "~" | undefined;
+  let fenceLength = 0;
+
+  for (const line of content.split(/\r?\n/)) {
+    const marker = line.match(/^\s*(`{3,}|~{3,})/);
+    if (!fenceChar) {
+      if (marker) {
+        fenceChar = marker[1][0] as "`" | "~";
+        fenceLength = marker[1].length;
+      } else {
+        lines.push(line);
+      }
+      continue;
+    }
+
+    if (marker && marker[1][0] === fenceChar && marker[1].length >= fenceLength && /^\s*$/.test(line.slice(marker[0].length))) {
+      fenceChar = undefined;
+      fenceLength = 0;
+    }
+  }
+  return lines.join("\n");
+}
+
+/** Remove raw, unfenced iCalendar components and properties from markdown prose. */
+function stripIcsBlocks(content: string): string {
+  const lines: string[] = [];
+  let componentDepth = 0;
+  const property = /^\s*(?:BEGIN|END|VERSION|PRODID|CALSCALE|METHOD|UID|DTSTAMP|DTSTART|DTEND|SUMMARY|DESCRIPTION|LOCATION|STATUS|SEQUENCE|TRANSP|ORGANIZER|ATTENDEE|URL|CREATED|LAST-MODIFIED|RRULE|EXDATE|RDATE|CLASS|CATEGORIES|GEO|PRIORITY|PERCENT-COMPLETE|RELATED-TO|RECURRENCE-ID)(?:[;:])/i;
+
+  for (const line of content.split(/\r?\n/)) {
+    const begin = /^\s*BEGIN:(?:VCALENDAR|VEVENT)\s*$/i.test(line);
+    const end = /^\s*END:(?:VCALENDAR|VEVENT)\s*$/i.test(line);
+    if (begin) {
+      componentDepth++;
+      continue;
+    }
+    if (componentDepth) {
+      if (end) componentDepth--;
+      continue;
+    }
+    if (property.test(line)) continue;
+    lines.push(line);
+  }
+  return lines.join("\n");
+}
+
 // ── table artifacts ──────────────────────────────────────────────────────────
 
 /**
@@ -348,8 +388,30 @@ function splitMarkdownTable(content: string): string[][] {
     );
 }
 
+/** First explicit date event in a plan; headings, code and ICS are not dates. */
+function findFirstScheduleDate(text: string, todayIso: string): string | undefined {
+  const markdown = stripIcsBlocks(stripFencedCodeBlocks(text));
+  for (const block of markdownTableBlocks(markdown)) {
+    const table = splitMarkdownTable(block);
+    const dateCol = table[0]?.findIndex((cell) => DATE_HEADER_KEYS.has(normalizeHeader(cell))) ?? -1;
+    if (dateCol < 0) continue;
+    for (const row of table.slice(1)) {
+      const date = parseTimingCell(row[dateCol] ?? "", { todayIso })?.date;
+      if (date) return date;
+    }
+  }
+  for (const line of markdown.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (/^#{1,6}\s/.test(trimmed)) continue;
+    const match = trimmed.match(/^(?:[-*]\s*)?(\d{4}-\d{2}-\d{2})(?=$|[\s—–:])/);
+    const date = match ? parseIsoDate(match[1]) : undefined;
+    if (date) return date;
+  }
+  return undefined;
+}
+
 function extractFromTable(artifact: Pick<Artifact, "content" | "title">, rows: ScheduleRow[], ctx?: TimingContext): void {
-  const table = splitMarkdownTable(artifact.content);
+  const table = splitMarkdownTable(stripFencedCodeBlocks(artifact.content));
   if (table.length < 2) return;
   const header = table[0];
   const weekCol = header.findIndex((cell) => WEEK_HEADER_KEYS.has(normalizeHeader(cell)));
@@ -445,10 +507,12 @@ function extractFromMarkdown(content: string, sourceTitle: string, rows: Schedul
     current = null;
   };
 
-  for (const line of content.split(/\r?\n/)) {
+  const markdown = stripIcsBlocks(stripFencedCodeBlocks(content));
+  for (const line of markdown.split(/\r?\n/)) {
     const trimmed = line.trim();
     const weekMatch = trimmed.match(MD_WEEK_LINE_RE);
-    const dateMatch = weekMatch ? null : trimmed.match(ISO_DATE_RE);
+    const isHeading = /^#{1,6}\s/.test(trimmed);
+    const dateMatch = weekMatch || isHeading ? null : trimmed.match(/^(?:[-*]\s*)?(\d{4}-\d{2}-\d{2})(?=$|[\s—–:])/);
 
     if (weekMatch || dateMatch) {
       flush();
@@ -464,7 +528,7 @@ function extractFromMarkdown(content: string, sourceTitle: string, rows: Schedul
       if (rest) descriptionParts.push(rest);
       const row: ScheduleRow = {
         weekIndex: weekMatch ? parseWeekCell(weekMatch[1]) : undefined,
-        date: dateMatch ? parseIsoDate(dateMatch[0]) : undefined,
+        date: dateMatch ? parseIsoDate(dateMatch[1]) : undefined,
         title: sourceTitle,
         description: descriptionParts.join(" "),
       };
@@ -510,16 +574,17 @@ function readGeneratedFile(file: File, readFile: (p: string) => string | null): 
 }
 
 /** Latest anchor the conversation states ("Target planting date: April 25", "T = …"). */
-/** "last frost Mar 25", "Mar 25 at 32°F (average last frost)" → next future occurrence of that date. */
+/** "last frost Mar 25" infers the next occurrence; explicit years stay exact. */
 export function findFrostAnchor(text: string, todayIso: string): string | undefined {
-  for (const line of String(text ?? "").split(/\r?\n/)) {
+  const plainText = stripIcsBlocks(stripFencedCodeBlocks(String(text ?? "")));
+  for (const line of plainText.split(/\r?\n/)) {
     if (!/\bfrost|freeze|32\s*°?\s*F\b/i.test(line)) continue;
     // Prefer the date nearest the frost word within the same cell/sentence.
     for (const seg of line.split(/\||;|\. /)) {
       if (!/\bfrost|freeze|32\s*°?\s*F\b/i.test(seg)) continue;
       const iso = seg.match(/\d{4}-\d{2}-\d{2}/);
       const d = iso ? parseIsoDate(iso[0]) : parseMonthDay(seg, todayIso);
-      if (d) return rollForwardIso(d, todayIso);
+      if (d) return d;
     }
   }
   return undefined;
@@ -527,14 +592,16 @@ export function findFrostAnchor(text: string, todayIso: string): string | undefi
 
 /**
  * Week 1 anchor, in priority order (gate C r6):
- * 1) an explicit anchor or frost date in any text (next future occurrence);
+ * 1) an explicit anchor or frost date in any text (explicit years stay exact);
  * 2) a season word ("this spring" → spring 2027 when asked in autumn);
  * 3) undefined → caller falls back to today.
  */
 export function findPlanAnchor(texts: string[], todayIso: string): string | undefined {
-  for (const t of texts) { const a = findTimingAnchor(t, todayIso); if (a) return rollForwardIso(a, todayIso); }
-  for (const t of texts) { const a = findFrostAnchor(t, todayIso); if (a) return a; }
-  for (const t of texts) {
+  const plainTexts = texts.map((text) => stripIcsBlocks(stripFencedCodeBlocks(String(text ?? ""))));
+  for (const t of plainTexts) { const a = findTimingAnchor(t, todayIso); if (a) return a; }
+  for (const t of plainTexts) { const a = findFrostAnchor(t, todayIso); if (a) return a; }
+  for (const t of plainTexts) { const d = findFirstScheduleDate(t, todayIso); if (d) return d; }
+  for (const t of plainTexts) {
     // Season words only (not "Week N" rows): the plan's seasonal start.
     const m = String(t ?? "").match(/\b(?:(?:this|next|coming)\s+)?(?:(?:early|mid|late)[- ]?)?(spring|summer|fall|autumn|winter)\b(?:\s+\d{4})?/i);
     if (m) { const a = parseSeason(m[0], todayIso); if (a) return a; }
@@ -627,14 +694,25 @@ export function extractScheduleRows(
     // Calendar deliverables are usually a markdown table: read it as a table
     // (task text → title, cells → notes), then the prose "Week N" / date lines.
     const ctx = { anchorIso: findTimingAnchor(content, todayIso) ?? anchorIso, todayIso };
-    for (const block of markdownTableBlocks(content)) {
+    const markdown = stripFencedCodeBlocks(content);
+    for (const block of markdownTableBlocks(markdown)) {
       extractFromTable({ content: block, title: sourceTitle }, rows, ctx);
     }
-    extractFromMarkdown(content.split(/\r?\n/).filter((l) => !l.trim().startsWith("|")).join("\n"), sourceTitle, rows);
+    extractFromMarkdown(markdown.split(/\r?\n/).filter((l) => !l.trim().startsWith("|")).join("\n"), sourceTitle, rows);
   }
 
-  // Plans are forward-looking: a stale year (2026-02-15 written in Oct 2026) rolls to its next occurrence.
-  return rows.slice(0, MAX_SCHEDULE_ROWS).map((row) => (row.date ? { ...row, date: rollForwardIso(row.date, todayIso), description: cleanEventNotes(row.description) } : { ...row, description: cleanEventNotes(row.description) }));
+  // A repeated table can appear both as a message artifact and in its saved
+  // deliverable. Keep one copy per date/week and event task.
+  const seen = new Set<string>();
+  const uniqueRows = rows.filter((row) => {
+    const timing = row.date ? `date:${row.date}` : `week:${row.weekIndex ?? 1}`;
+    const event = (row.task || row.description || row.title).normalize("NFKC").toLowerCase().replace(/\s+/g, " ").trim();
+    const key = `${timing}:${event}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  return uniqueRows.slice(0, MAX_SCHEDULE_ROWS).map((row) => ({ ...row, description: cleanEventNotes(row.description) }));
 }
 
 // ── inline calendar (gate C r5) ──────────────────────────────────────────────

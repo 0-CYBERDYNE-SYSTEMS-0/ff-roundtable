@@ -40,10 +40,10 @@ describe("(1) calendar renders inline in the chat message", () => {
       expect(parseSeason("next fall", TODAY)).toBe("2027-09-22");
       expect(parseSeason("this spring", "2026-02-01")).toBe("2026-03-20");
     });
-    it("month-day rolls to next year; Week 1 = today with no stated anchor", () => {
+    it("yearless month-day rolls forward; explicit anchor years stay fixed", () => {
       expect(parseTimingCell("April 20", { todayIso: TODAY } as any)?.date).toBe("2027-04-20");
       expect(resolveScheduleAnchor(undefined, TODAY)).toBe(TODAY);
-      expect(resolveScheduleAnchor("2026-04-15", TODAY)).toBe("2027-04-15");
+      expect(resolveScheduleAnchor("2026-04-15", TODAY)).toBe("2026-04-15");
     });
     it("no inline event is before today", () => {
       const ev = parseInlineCalendar(art!.content)!.events;
