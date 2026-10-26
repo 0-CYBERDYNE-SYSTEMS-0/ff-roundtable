@@ -133,7 +133,7 @@ export function afterLastFrost(summary: string, startDate: string, frostIso: str
 /** Final event list for any calendar surface: dates, frost rule, clean de-duplicated notes. */
 export function finalizeCalendarEvents<T extends { summary: string; startDate: string; description: string }>(events: T[], frostIso: string | undefined): T[] {
   return events
-    .map(e => ({ ...e, startDate: afterLastFrost(e.summary, e.startDate, frostIso), description: notesWithoutTitle(e.description, e.summary) }))
+    .map(e => ({ ...e, summary: capEventTitle(e.summary), startDate: afterLastFrost(e.summary, e.startDate, frostIso), description: notesWithoutTitle(e.description, e.summary) }))
     .sort((a, b) => a.startDate.localeCompare(b.startDate));
 }
 
@@ -601,6 +601,29 @@ export function extractScheduleRows(
 // ── inline calendar (gate C r5) ──────────────────────────────────────────────
 
 export interface InlineCalendarEvent { summary: string; startDate: string; description: string }
+
+/** Event titles fit the 75-character calendar limit; longer ones end with an ellipsis. */
+export const EVENT_TITLE_MAX = 75;
+export function capEventTitle(title: string): string {
+  const t = title.trim();
+  if (t.length <= EVENT_TITLE_MAX) return t;
+  let cut = t.slice(0, EVENT_TITLE_MAX - 1);
+  const last = cut.charCodeAt(cut.length - 1);
+  if (last >= 0xd800 && last <= 0xdbff) cut = cut.slice(0, -1);
+  return cut.trimEnd() + "\u2026";
+}
+
+/** Bumps whenever any message gains artifacts (inline calendar, tables): drives Week-1 refresh. */
+export function planRevisionOf(messages: Array<{ id?: number; artifacts?: unknown[] | null }> | null | undefined): number {
+  let n = 0;
+  for (const m of messages ?? []) { const c = m.artifacts?.length ?? 0; if (c) n += c * 1000 + (m.id ?? 0); }
+  return n;
+}
+
+/** The reply itself is a week-by-week plan (e.g. "planting calendar", "W3–W4" rows) even if the farmer never said "calendar". */
+export function replyIsWeekPlan(reply: string): boolean {
+  return /\b(calendar|schedule|week[- ]by[- ]week)\b/i.test(reply) && /(\bW(?:ee)?k?\s?\d+\b|\bWeek\s\d+)/.test(reply);
+}
 
 /** The farmer asked for something calendar-shaped. */
 export function wantsCalendar(text: string): boolean {

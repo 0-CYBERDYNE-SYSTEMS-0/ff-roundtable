@@ -1,3 +1,4 @@
+import { planRevisionOf } from "@shared/schedule-extract";
 import { useState, useEffect, useRef } from "react";
 import { useAuth } from "@/hooks/use-auth";
 import { useIsMobile } from "@/hooks/use-mobile";
@@ -1236,6 +1237,7 @@ export default function HomePage() {
               onStartNewSession={handleStartNewSession}
               onExportMarkdown={exportMarkdown}
               canExportIcs={hasSchedulableSource}
+              planRevision={planRevisionOf(messages)}
               onFileUpload={handleFileUpload}
               onSelectConversation={handleSelectConversation}
               onRenameConversation={(conversationId, title) => renameConversationMutation.mutate({ conversationId, title })}

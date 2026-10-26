@@ -49,6 +49,8 @@ interface SidebarPanelProps {
   onExportMarkdown: () => void;
   onCollapse?: () => void;
   canExportIcs?: boolean;
+  /** Changes whenever a turn adds plan artifacts; refreshes Week 1 + preview without a reload. */
+  planRevision?: number;
   onFileUpload: (file: File) => void;
   onSelectConversation: (id: number) => void;
   onRenameConversation: (id: number, title: string) => void;
@@ -80,6 +82,7 @@ export default function SidebarPanel({
   filesError = false,
   isStartingNewSession = false,
   isUploading = false,
+  planRevision = 0,
 }: SidebarPanelProps) {
   const [conversationSearch, setConversationSearch] = useState("");
   const [editingConversationId, setEditingConversationId] = useState<number | null>(null);
@@ -174,7 +177,7 @@ export default function SidebarPanel({
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [activeConversationId, canExportIcs, calendarStart, files]);
+  }, [activeConversationId, canExportIcs, calendarStart, files, planRevision]);
 
   const handleFileUploadClick = () => {
     fileInputRef.current?.click();
