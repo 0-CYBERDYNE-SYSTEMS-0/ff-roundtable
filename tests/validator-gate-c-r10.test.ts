@@ -3,7 +3,7 @@ import { normalizeMixedUnitChart } from "../shared/chart-artifact";
 import { finalizeCalendarEvents } from "../shared/schedule-extract";
 import { buildVCalendar } from "../shared/ics";
 import { extractCanonicalFrost } from "../shared/frost-canonical";
-import { formatSharedResearchForPrompt, getCanonicalFrost, rememberCanonicalFrost } from "../server/expert-tools";
+import { formatSharedResearchForPrompt, getCanonicalFrost, rememberCanonicalFrost, restoreCanonicalFrost } from "../server/expert-tools";
 
 describe("validator gate C r10", () => {
   it("facets mixed units with independent y scales and leaves one unit alone", () => {
@@ -37,6 +37,14 @@ describe("validator gate C r10", () => {
     rememberCanonicalFrost(9910, second, [{ id: "S1", ...source, snippet: "" }]);
     expect(getCanonicalFrost(9910)[0].lastFrost).toBe("May 15");
     expect(rememberCanonicalFrost(9911, "Last spring frost for Eugene is May 15. https://www.almanac.com/frost", [{ id: "S1", title: "Almanac", url: "https://www.almanac.com/frost", snippet: "" }])).toBeNull();
+  });
+
+  it("rebuilds the canonical frost value from the conversation after a restart", () => {
+    const reply = "The last spring frost for Eugene is May 15 at 36°F. Sources: https://www.weather.gov/pqr";
+    expect(getCanonicalFrost(9920)).toEqual([]);
+    restoreCanonicalFrost(9920, [{ role: "user", content: "When is the last frost?" }, { role: "assistant", content: reply }, { role: "assistant", content: reply.replace("May 15", "May 20") }]);
+    expect(getCanonicalFrost(9920)).toHaveLength(1);
+    expect(getCanonicalFrost(9920)[0]).toMatchObject({ location: "Eugene", lastFrost: "May 15" });
   });
 
   it("puts the canonical value in the expert prompt", () => {

@@ -12,3 +12,20 @@ export function parseInlineCalendar(content: string): { anchor?: string; events:
     return null;
   }
 }
+
+const MAX_RECORD_EVENTS = 40;
+
+/** The newest calendar artifact in the conversation as a dated list the closing synthesis must agree with; "" when there is none. */
+export function calendarOfRecord(messages: Array<{ artifacts?: unknown }>): string {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const artifacts = Array.isArray(messages[i].artifacts) ? messages[i].artifacts as Array<{ type?: string; content?: string }> : [];
+    for (const a of artifacts) {
+      if (a?.type !== "calendar" || typeof a.content !== "string") continue;
+      const parsed = parseInlineCalendar(a.content);
+      if (!parsed) continue;
+      const events = [...parsed.events].sort((x, y) => x.startDate.localeCompare(y.startDate)).slice(0, MAX_RECORD_EVENTS);
+      return events.map(e => `- ${e.startDate}: ${e.summary}`).join("\n");
+    }
+  }
+  return "";
+}

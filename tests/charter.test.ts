@@ -20,6 +20,7 @@
  * exercised and their prompt payloads inspected.
  */
 
+import { calendarOfRecord } from "../shared/inline-calendar";
 import { afterEach, describe, it, expect, beforeAll, beforeEach, vi } from "vitest";
 import request from "supertest";
 import express from "express";
@@ -894,6 +895,21 @@ describe("generateClosingSynthesis charter awareness", () => {
     expect(prompt).toContain("The Verdict must be conditional or unresolved");
     expect(prompt).toContain("Do not invent consensus.");
     expect(prompt).toContain("In Dissent, name each expert role from the ledger");
+  });
+
+  it("pins closing-synthesis dates to the newest calendar in the conversation", () => {
+    const cal = (events: Array<{ summary: string; startDate: string }>) => ({ artifacts: [{ type: "calendar", content: JSON.stringify({ events }) }] });
+    const record = calendarOfRecord([
+      cal([{ summary: "Old", startDate: "2026-01-01" }]),
+      { artifacts: [] },
+      cal([{ summary: "Transplant", startDate: "2026-04-20" }, { summary: "Start seeds", startDate: "2026-02-15" }]),
+    ]);
+    expect(record).toBe("- 2026-02-15: Start seeds\n- 2026-04-20: Transplant");
+    const prompt = buildClosingSynthesisPrompt({ "Soil Scientist": null }, [], null, record);
+    expect(prompt).toContain("must match this list exactly");
+    expect(prompt).toContain("- 2026-02-15: Start seeds");
+    expect(buildClosingSynthesisPrompt({ "Soil Scientist": null })).not.toContain("calendar already shows");
+    expect(calendarOfRecord([{ artifacts: [{ type: "calendar", content: "not json" }] }])).toBe("");
   });
 });
 

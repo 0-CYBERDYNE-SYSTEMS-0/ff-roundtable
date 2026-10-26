@@ -1,5 +1,6 @@
 import { readableSourceTitle, ensureAuthoritativeFrostCitation } from "@shared/chart-artifact";
 import { buildInlineCalendarArtifact, wantsCalendar, findPersistedCalendarAnchor, replyIsWeekPlan } from "@shared/schedule-extract";
+import { calendarOfRecord } from "@shared/inline-calendar";
 import { CALENDAR_TABLE_RULE } from "./calendar-notes-prompt";
 import { storage } from "./storage";
 import { ARTIFACT_DESIGN_PROMPT } from "./artifact-design";
@@ -24,7 +25,7 @@ export { commitPendingDeliverable, discardPendingDeliverable } from "./pending-d
 import { enforceCitationIntegrity, removeUnsupportedCitedSentences, stripMetaLines, undecorate, mergeDuplicateFarmerQuestions, removeRepeatedExpertSentences } from "./response-hygiene";
 import {
   buildToolUsePrompt, buildToolPlanningPrompt, parseToolPlan, runToolCalls, formatToolResultsForPrompt,
-  toolCallLimitForTier, rememberSharedResearch, getSharedResearch, formatSharedResearchForPrompt, rememberCanonicalFrost, getCanonicalFrost, extractDeliverable, saveExpertDeliverable, filterChartArtifacts, chartResearchUrls, type ChartArtifactRejectionReason, type ChartEvidence, type ToolRun,
+  toolCallLimitForTier, rememberSharedResearch, getSharedResearch, formatSharedResearchForPrompt, rememberCanonicalFrost, restoreCanonicalFrost, getCanonicalFrost, extractDeliverable, saveExpertDeliverable, filterChartArtifacts, chartResearchUrls, type ChartArtifactRejectionReason, type ChartEvidence, type ToolRun,
 } from "./expert-tools";
 
 /** Expert tools are on by default; EXPERT_TOOLS=off disables them. Unit tests never hit the network. */
@@ -1271,6 +1272,7 @@ export async function getExpertResponseStream(
    if (toolRun) messages.push({ role: "system", content: formatToolResultsForPrompt(toolRun) });
    rememberSharedResearch(expert.conversationId, toolRun?.sources ?? []);
    const sharedResearch = getSharedResearch(expert.conversationId);
+   restoreCanonicalFrost(expert.conversationId, history);
    const sharedBlock = formatSharedResearchForPrompt(sharedResearch, toolRun?.sources.map(s => s.url) ?? [], getCanonicalFrost(expert.conversationId));
    if (sharedBlock) messages.push({ role: "system", content: sharedBlock });
    if (retryInstruction?.trim()) messages.push({ role: "system", content: retryInstruction.trim() });
@@ -1483,6 +1485,7 @@ export async function getExpertResponse(
    const toolRunNs = await runExpertToolPhase(expert, referenceMessageContent, conversation?.userId, researchRelevanceText(referenceMessageContent, "", history));
    if (toolRunNs) messages.push({ role: "system", content: formatToolResultsForPrompt(toolRunNs) });
    rememberSharedResearch(expert.conversationId, toolRunNs?.sources ?? []);
+   restoreCanonicalFrost(expert.conversationId, history);
    const sharedBlockNs = formatSharedResearchForPrompt(getSharedResearch(expert.conversationId), toolRunNs?.sources.map(s => s.url) ?? [], getCanonicalFrost(expert.conversationId));
    if (sharedBlockNs) messages.push({ role: "system", content: sharedBlockNs });
    console.log(`[DEBUG] Sending ${messages.length} messages to LLM for ${expert.role}${imageParts.length > 0 ? ` (with ${imageParts.length} image part${imageParts.length > 1 ? "s" : ""})` : ""}.`);
@@ -1594,6 +1597,7 @@ export function buildClosingSynthesisPrompt(
   stanceLedger: Record<string, MessageStance | null> = {},
   openQuestions: OpenQuestion[] = [],
   charter?: string | null,
+  calendarRecord = "",
 ): string {
   const stanceEntries = Object.entries(stanceLedger).map(([expertRole, stance]) => ({
     expertRole,
@@ -1634,6 +1638,9 @@ ${hasNonAbstainingStance
     : "No expert has a non-abstaining structured stance. The Verdict must be conditional or unresolved and explicitly state that there is no expert consensus. Do not invent consensus."}
 ${charter?.trim()
     ? `Measure the outcome against the council charter, including its goal and stop criteria:\n${charter.trim()}`
+    : ""}
+${calendarRecord
+    ? `The farmer's calendar already shows these dated events. Any date you give for these actions must match this list exactly. If an expert's text gave a different date, use the calendar's date and say the expert's date differs; never state a conflicting date:\n${calendarRecord}`
     : ""}
 
 Directly under “## Verdict”, include a markdown table summarizing the ledger with exactly these columns: | Expert | Stance | Confidence | Position |, one row per expert role (write "none recorded" for a null stance). Give the table a short bold caption line above it, not a heading.
@@ -1878,7 +1885,7 @@ export async function generateClosingSynthesis(
     const firstExpertModel = experts.find(expert => expert.role !== "Moderator")?.model ?? null;
     const closingModel = resolveAuxModel(moderatorExpert.model, firstExpertModel);
 
-    const closingPrompt = buildClosingSynthesisPrompt(stanceLedger, openQuestions, charter);
+    const closingPrompt = buildClosingSynthesisPrompt(stanceLedger, openQuestions, charter, calendarOfRecord(history));
 
     const messages: AIMessage[] = [
       { role: "system", content: systemPrompt },

@@ -575,6 +575,12 @@ export function rememberCanonicalFrost(conversationId: number | undefined, text:
   return existing.find(item => item.location.toLowerCase() === value.location.toLowerCase()) ?? value;
 }
 
+/** The store is in memory, so after a restart rebuild it from the conversation's own expert replies (first cited value per place wins, as live). */
+export function restoreCanonicalFrost(conversationId: number | undefined, history: Array<{ role: string; content: string }>): void {
+  if (!conversationId || canonicalFrostStore.has(conversationId)) return;
+  for (const m of history) if (m.role !== "user") rememberCanonicalFrost(conversationId, m.content, []);
+}
+
 export function getCanonicalFrost(conversationId: number | undefined): CanonicalFrost[] {
   return conversationId ? canonicalFrostStore.get(conversationId) ?? [] : [];
 }
