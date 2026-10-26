@@ -214,8 +214,13 @@ function getVerifiedSessionIdFromUpgradeRequest(req: { headers: { cookie?: strin
 export async function registerRoutes(app: Express): Promise<Server> {
   app.get("/api/models", async (_req, res) => {
     try {
-      const models = await getModelCatalog();
-      res.set("Cache-Control", "public, max-age=600").json(models);
+      const catalog = await getModelCatalog();
+      // Only what the expert picker reads, not the full OpenRouter record for every model.
+      const data = catalog.data.map((m: any) => ({
+        id: m.id, name: m.name, description: m.description, context_length: m.context_length,
+        pricing: { prompt: m.pricing?.prompt, completion: m.pricing?.completion },
+      }));
+      res.set("Cache-Control", "public, max-age=600").json({ data });
     } catch (error) {
       console.error("Model catalog fetch failed:", (error as Error).message);
       res.set("Cache-Control", "no-store").status(502).json({ message: "AI models are temporarily unavailable. Please try again shortly." });
@@ -1063,8 +1068,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
     const sig = req.headers["stripe-signature"];
     const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
     
-    if (!stripe || !endpointSecret || !sig) {
-      return res.status(400).json({ message: "Missing Stripe configuration" });
+    if (!stripe || !endpointSecret) {
+      console.warn("[STRIPE] Webhook received but STRIPE_SECRET_KEY / STRIPE_WEBHOOK_SECRET are not configured.");
+      return res.status(503).json({ message: "Stripe webhooks are not configured on this server" });
+    }
+    if (!sig) {
+      return res.status(400).json({ message: "Missing Stripe signature" });
     }
     
     let event;
