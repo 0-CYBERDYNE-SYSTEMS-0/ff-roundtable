@@ -37,3 +37,27 @@ What the **models** do contribute is inconsistency. Different experts in one con
 - Chart: "Chart Willamette Valley blueberry yield ranges (lb/acre) by year 2021-2025 as a table with low, mid and high, then chart it."
 - Mixed units: "Chart typical Willamette Valley hay yield in tons per acre and blueberry yield in pounds per acre for the last 5 years."
 - Calendar: "I'm in Eugene, Oregon. Make me a tomato planting calendar with events I can add to my calendar."
+
+## Local development without the database (recommended for these fixes)
+None of the open bugs need the real database. They are all in chart and calendar parsing and rendering, plus prompts. The production and Replit Postgres should stay untouched.
+
+- **No database needed.** When `DATABASE_URL` is empty, the server uses in-memory storage (`MemStorage`, see `server/storage.ts`). Nothing is written anywhere, and data resets on restart. The whole test suite already runs this way (`vitest.config.ts` sets `DATABASE_URL=""`).
+- **Minimal `.env`** in the repo root (the server loads it with `dotenv/config`). Copy `.env.example` and set:
+  ```
+  NODE_ENV=development
+  DATABASE_URL=
+  PORT=5001
+  OPENROUTER_API_KEY=<your key>   # needed only for live expert replies; tests don't need it
+  ```
+  Leave Stripe, OWM, Perplexity and ENCRYPTION_KEY unset. Those features switch off or warn, and nothing crashes. If SESSION_SECRET is unset, a random one is used and logins reset on every restart, which is fine for dev.
+- **Run it:**
+  - `npm install`. If install fails because `package-lock.json` points at Replit's internal npm mirror, delete the lockfile locally and don't commit that change.
+  - `npm run dev` serves at http://localhost:5001.
+  - Click **"Quick development login"**. It appears only when NODE_ENV isn't production.
+- **Fast loop without the UI:** run `npm test` (or `npx vitest run tests/chart-normalize.test.ts tests/ics.test.ts tests/charter.test.ts`). For the chart and calendar bugs, put a saved model reply into a test fixture and assert on the parser output. That needs no API key and no database, and it's deterministic.
+- **Optional local Postgres,** only if you change the schema (you shouldn't need to): `DATABASE_URL=postgresql://localhost:5432/farm_roundtable_dev`, then `npm run db:setup`. Never point local dev at the Replit or production database URL.
+
+## Getting it back to Replit for deploy
+1. Commit on `fix/charts-premium-2026-10-24`, or a branch off it, and push to GitHub. Don't commit `.env`, `.replit`, `.codex/` or `.tools/`, or a lockfile change.
+2. Make sure `npx tsc --noEmit` and `npm test` both pass.
+3. Hand back to the Replit agent with the HEAD sha. It will pull in the Replit project (`git fetch && git reset --hard origin/<branch>`), restart dev, check `/api/version`, smoke-test on dev, run the Validator, and only then ask you before publishing. Replit's secrets and its Postgres stay as they are.
