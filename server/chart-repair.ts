@@ -2,7 +2,7 @@
 // Order: strict parse → fence/outer-brace extraction → lenient JSON fixes → truncation close.
 // If the spec still will not compile, rebuild a plain themed chart from the rows.
 
-import { parseChartNumericValue } from "@shared/chart-artifact";
+import { parseChartNumericValue, findRangeGroups } from "@shared/chart-artifact";
 
 /** Close unbalanced braces/brackets of a truncated JSON document; null if not fixable. */
 export function closeTruncatedJson(text: string): string | null {
@@ -107,7 +107,9 @@ export function fallbackSpecFromRows(rows: Record<string, unknown>[]): Record<st
   const fields = Object.keys(rows[0]);
   const numeric = fields.filter(f => rows.every(r => r[f] === null || parseChartNumericValue(r[f]) !== undefined));
   const nominal = fields.filter(f => !numeric.includes(f));
-  const y = numeric.find(f => !/^(year|week|day|month|id)$/i.test(f)) ?? numeric[0];
+  const measures = numeric.filter(f => !/^(year|week|day|month|id)$/i.test(f));
+  const group = findRangeGroups(rows as never, new Set(measures))[0];
+  const y = group?.mid ?? group?.low ?? measures[0] ?? numeric[0];
   if (!y) return null;
   const x = nominal[0] ?? numeric.find(f => f !== y);
   if (!x) return null;

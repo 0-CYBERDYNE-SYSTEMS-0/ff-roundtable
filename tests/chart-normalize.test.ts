@@ -42,3 +42,44 @@ describe("chart normalization", () => {
     });
   });
 });
+
+describe("low/mid/high range charts", () => {
+  const rows = [2021, 2022, 2023].map((year, i) => ({ year, low: 8000 + i * 100, mid: 11000 + i * 100, high: 14000 + i * 100 }));
+  const chartOf = (y: string, mark: unknown = "line") => parseVegaChart({
+    type: "vega-lite", title: "Blueberry yield (lb/acre)", sources: ["assumptions"], data: rows,
+    spec: { mark, encoding: { x: { field: "year", type: "ordinal" }, y: { field: y, type: "quantitative", title: "low" } } },
+  })!;
+
+  it.each(["low", "mid", "high"])("draws mid as the line with a low-to-high band when the spec plots only %s", y => {
+    const spec: any = themedVegaSpec(chartOf(y));
+    const [band, line] = spec.layer;
+    expect(band.encoding.y.field).toBe("low");
+    expect(band.encoding.y2.field).toBe("high");
+    expect(line.encoding.y.field).toBe("mid");
+    expect(JSON.stringify(spec.layer)).not.toContain('"title":"low"');
+    expect(() => compile(spec as TopLevelSpec)).not.toThrow();
+  });
+
+  it("uses a floating bar and tick for categorical x", () => {
+    const chart = parseVegaChart({ type: "vega-lite", title: "Yield", sources: ["assumptions"],
+      data: [{ crop: "hay", low: 3, mid: 4, high: 5 }, { crop: "oats", low: 2, mid: 3, high: 4 }],
+      spec: { mark: "bar", encoding: { x: { field: "crop", type: "nominal" }, y: { field: "low", type: "quantitative" } } } })!;
+    const spec: any = themedVegaSpec(chart);
+    expect(spec.layer[0].mark.type).toBe("bar");
+    expect(spec.layer[1].mark.type).toBe("tick");
+    expect(() => compile(spec as TopLevelSpec)).not.toThrow();
+  });
+
+  it("leaves a spec that already plots the whole range alone", () => {
+    const chart = parseVegaChart({ type: "vega-lite", title: "Yield", sources: ["assumptions"], data: rows,
+      spec: { mark: "area", encoding: { x: { field: "year", type: "quantitative" }, y: { field: "low", type: "quantitative" }, y2: { field: "high" } } } })!;
+    expect((themedVegaSpec(chart) as any).layer).toBeUndefined();
+  });
+
+  it("fallback spec plots mid so the band expansion covers the rest", () => {
+    const fb: any = fallbackSpecFromRows(rows);
+    expect(fb.encoding.y.field).toBe("mid");
+    const spec: any = themedVegaSpec(parseVegaChart({ type: "vega-lite", title: "Yield", sources: ["assumptions"], data: rows, spec: fb })!);
+    expect(spec.layer[0].encoding.y2.field).toBe("high");
+  });
+});

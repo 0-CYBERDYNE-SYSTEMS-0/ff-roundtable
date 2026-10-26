@@ -104,6 +104,71 @@ export function profileFields(data: VegaChart["data"], numeric: Set<string>): Fi
   return { numeric, months, years };
 }
 
+type RangeGroup = { low: string; high: string; mid?: string; label: string };
+
+/** Low/mid/high (or min/avg/max) numeric column groups: a shared base name with one role word each. */
+export function findRangeGroups(data: VegaChart["data"], numeric: Set<string>): RangeGroup[] {
+  const roles: Array<[keyof RangeGroup, RegExp]> = [
+    ["low", /^(low|min|minimum|lower)$/], ["high", /^(high|max|maximum|upper)$/],
+    ["mid", /^(mid|midpoint|avg|average|mean|median|typical|expected)$/],
+  ];
+  const byBase = new Map<string, Partial<Record<"low" | "mid" | "high", string>>>();
+  for (const f of Array.from(numeric)) {
+    const tokens: string[] = f.replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase().split(/[\s_.\-]+/).filter(Boolean);
+    const idx = tokens.findIndex(t => roles.some(([, re]) => re.test(t)));
+    if (idx < 0) continue;
+    const role = roles.find(([, re]) => re.test(tokens[idx]))![0] as "low" | "mid" | "high";
+    const base = tokens.filter((_, i) => i !== idx).join(" ");
+    byBase.set(base, { ...byBase.get(base), [role]: f });
+  }
+  return Array.from(byBase.entries()).flatMap(([base, g]) => g.low && g.high ? [{ low: g.low, high: g.high, mid: g.mid, label: base }] : []);
+}
+
+const encodedFields = (node: unknown, out = new Set<string>()): Set<string> => {
+  if (Array.isArray(node)) node.forEach(n => encodedFields(n, out));
+  else if (node && typeof node === "object") for (const [k, v] of Object.entries(node as Record<string, any>)) {
+    if (k === "encoding" && v && typeof v === "object") {
+      for (const [ch, enc] of Object.entries(v as Record<string, any>)) {
+        if (ch === "tooltip" || ch === "detail") continue;
+        for (const e of [enc].flat()) if (e && typeof e.field === "string") out.add(e.field);
+      }
+    } else encodedFields(v, out);
+  }
+  return out;
+};
+
+/**
+ * A single-view chart that plots just one column of a low/mid/high group draws
+ * the mid (else low) as the main mark with a low-to-high band, so no numeric
+ * series is silently dropped.
+ */
+export function expandRangeBand(chart: VegaChart, numeric: Set<string>): VegaChart {
+  const spec = chart.spec as Record<string, any>;
+  if (["facet", "repeat", "concat", "hconcat", "vconcat", "layer", "spec"].some(k => k in spec)) return chart;
+  const enc = spec.encoding as Record<string, any> | undefined;
+  if (!enc?.y?.field || enc.y2 || enc.row || enc.column || enc.facet) return chart;
+  const fields = encodedFields(spec);
+  const group = findRangeGroups(chart.data, numeric).find(g => [g.low, g.mid, g.high].includes(enc.y.field)
+    && [g.low, g.mid, g.high].filter((f): f is string => !!f && fields.has(f)).length === 1);
+  if (!group) return chart;
+  const main = group.mid ?? enc.y.field;
+  const mark = typeof spec.mark === "string" ? spec.mark : spec.mark?.type;
+  const { y: _y, tooltip: _t, ...shared } = enc;
+  const continuousX = enc.x && (enc.x.type === "quantitative" || enc.x.type === "temporal");
+  const own = [enc.y.title, enc.y.axis?.title].find(t => typeof t === "string" && ![group.low, group.mid, group.high].includes(t));
+  const title = own ?? (group.label ? `${group.label} (line = ${group.mid ? "mid" : "low"}, band = low to high)` : `${group.mid ? "Mid" : "Low"} with low–high band`);
+  const tooltip = [group.low, group.mid, group.high].filter(Boolean).map(f => ({ field: f, type: "quantitative", format: ",.0f" }));
+  const bandMark = continuousX ? { type: "area", opacity: 0.22 } : { type: "bar", opacity: 0.28, cornerRadiusEnd: 3 };
+  const mainMark = mark === "bar" && !continuousX ? { type: "tick", thickness: 3, size: 28 } : { type: "line", point: true };
+  return { ...chart, spec: {
+    ...Object.fromEntries(Object.entries(spec).filter(([k]) => !["mark", "encoding"].includes(k))),
+    layer: [
+      { mark: bandMark, encoding: { ...shared, y: { field: group.low, type: "quantitative", title }, y2: { field: group.high }, tooltip } },
+      { mark: mainMark, encoding: { ...shared, y: { field: main, type: "quantitative", title }, tooltip } },
+    ],
+  } as VegaChart["spec"] };
+}
+
 function fixEncodings(node: unknown, info: FieldInfo | Set<string>): unknown {
   const fi: FieldInfo = info instanceof Set ? { numeric: info, months: new Map(), years: new Set() } : info;
   if (Array.isArray(node)) return node.map(n => fixEncodings(n, fi));
@@ -182,6 +247,7 @@ export function themedVegaSpec(chart: VegaChart, width = 600): Record<string, un
   const normalized = normalizeChartData(chart);
   const info = profileFields(normalized.data, normalized.numeric);
   chart = { ...chart, data: normalized.data, spec: fixEncodings(chart.spec, info) as VegaChart["spec"] };
+  chart = expandRangeBand(chart, normalized.numeric);
   const mixed = normalizeMixedUnitChart(chart);
   chart = { ...chart, data: mixed.data, spec: mixed.spec as VegaChart["spec"] };
   const { config: _config, $schema: _schema, ...rawSpec } = chart.spec;
