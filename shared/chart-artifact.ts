@@ -462,3 +462,26 @@ export function applyFacetScales(chart: { data: Record<string, unknown>[]; spec:
   if (description && /independent (y[- ]?)?(axis|axes|scales?)|own (y[- ]?)?(axis|scale)/i.test(description)) description = description.replace(/[^.]*\b(independent|own) (y[- ]?)?(axis|axes|scales?)[^.]*\.?\s*/gi, "").trim() + " All panels share one y-axis scale.";
   return { spec, description };
 }
+
+
+/** Known official frost / freeze references (used only when no fetched OSU, USDA or NOAA source was cited). */
+export const FROST_REFERENCE_SOURCES: Array<{ title: string; url: string }> = [
+  { title: "NOAA NCEI U.S. Climate Normals (freeze dates)", url: "https://www.ncei.noaa.gov/access/us-climate-normals/" },
+  { title: "OSU Extension Service", url: "https://extension.oregonstate.edu/" },
+  { title: "USDA Plant Hardiness Zone Map", url: "https://planthardiness.ars.usda.gov/" },
+];
+
+/**
+ * Deterministic: a frost / climate answer always carries at least one OSU, USDA or
+ * NOAA link. Prefers a fetched authoritative source; otherwise a known reference.
+ */
+export function ensureAuthoritativeFrostCitation(content: string, questionText: string | undefined, sources: Array<{ title?: string; url: string }> = []): { content: string; addition: string } {
+  if (!isFrostClimateQuestion(questionText)) return { content, addition: "" };
+  const urls = content.match(/https?:\/\/[^\s)\]>"']+/g) ?? [];
+  if (urls.some(u => isAuthoritativeClimateHost(u))) return { content, addition: "" };
+  const fetched = sources.find(s => isAuthoritativeClimateHost(s.url));
+  const ref = fetched ? { title: readableSourceTitle(fetched.title ?? "", fetched.url), url: fetched.url } : FROST_REFERENCE_SOURCES[0];
+  const sep = content.length === 0 ? "" : content.endsWith("\n\n") ? "" : content.endsWith("\n") ? "\n" : "\n\n";
+  const addition = sep + "**Official frost/climate reference:** [" + ref.title + "](" + ref.url + ")" + (fetched ? "" : " (verify local frost and freeze dates here)");
+  return { content: content + addition, addition };
+}

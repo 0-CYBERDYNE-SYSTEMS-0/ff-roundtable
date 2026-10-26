@@ -1,5 +1,5 @@
-import { readableSourceTitle } from "@shared/chart-artifact";
-import { buildInlineCalendarArtifact, wantsCalendar, findPersistedCalendarAnchor } from "@shared/schedule-extract";
+import { readableSourceTitle, ensureAuthoritativeFrostCitation } from "@shared/chart-artifact";
+import { buildInlineCalendarArtifact, wantsCalendar, findPersistedCalendarAnchor, replyIsWeekPlan } from "@shared/schedule-extract";
 import { CALENDAR_TABLE_RULE } from "./calendar-notes-prompt";
 import { storage } from "./storage";
 import { ARTIFACT_DESIGN_PROMPT } from "./artifact-design";
@@ -86,7 +86,7 @@ function researchRelevanceText(question: string, farmContext: string, history: M
 
 /** Calendar requests get a compact dated event list inside the message itself (not only a Files-tab deliverable). */
 function attachInlineCalendar(artifacts: Artifact[], question: string, farmerText: string | undefined, reply: string, deliverable: { title: string; content: string } | null, history: Array<{ artifacts?: unknown }> = []): void {
-  if (!wantsCalendar(question + "\n" + (farmerText ?? ""))) return;
+  if (!wantsCalendar(question + "\n" + (farmerText ?? "")) && !replyIsWeekPlan(reply)) return;
   try {
     // One Week-1 anchor per calendar: reuse the anchor persisted with the first calendar in this conversation.
     const persistedAnchor = findPersistedCalendarAnchor(history as any);
@@ -1348,6 +1348,8 @@ export async function getExpertResponseStream(
       ? appendRetrievedCitationUrls(cleanContent, response.citations)
       : { content: cleanContent, addition: "" };
     if (researchAnswer.addition) onToken(researchAnswer.addition);
+    const frostRef = expert.role === "Moderator" || expert.role === "File Creator" ? { content: researchAnswer.content, addition: "" } : ensureAuthoritativeFrostCitation(researchAnswer.content, referenceMessageContent, [...(toolRun?.sources ?? []), ...getSharedResearch(expert.conversationId)]);
+    if (frostRef.addition) { onToken(frostRef.addition); researchAnswer.content = frostRef.content; }
 
     const streamedMessage: InsertMessage = {
       conversationId: expert.conversationId,
@@ -1499,6 +1501,7 @@ export async function getExpertResponse(
     const researchAnswer = expert.role === "Research Analyst"
       ? appendRetrievedCitationUrls(cleanContent, response.citations)
       : { content: cleanContent, addition: "" };
+    if (expert.role !== "Moderator" && expert.role !== "File Creator") researchAnswer.content = ensureAuthoritativeFrostCitation(researchAnswer.content, referenceMessageContent, [...(toolRunNs?.sources ?? []), ...getSharedResearch(expert.conversationId)]).content;
 
     return {
       conversationId: expert.conversationId,
