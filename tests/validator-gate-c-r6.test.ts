@@ -45,12 +45,14 @@ describe("BLOCKER: Week 1 anchored to frost date / season, not today", () => {
   });
   it("server returns the auto anchor; UI fills Week 1 and enables Preview when events exist", () => {
     const routes = readFileSync("server/routes.ts", "utf8");
-    expect(routes).toMatch(/res\.json\(\{ \.\.\.draft, anchor, autoAnchor \}\)/);
-    expect(routes).toMatch(/findConversationAnchor\(messages, todayIso, planFileTexts\(files\)\)/);
+    expect(routes).toMatch(/res\.json\(\{ \.\.\.draft, anchor, autoAnchor: inputAutoAnchor, planKey \}\)/);
+    expect(routes).toMatch(/firstDatedScheduleAnchor\(rows\)/);
+    expect(routes).toMatch(/findConversationAnchor\(planMessages, todayIso, planFileTexts\(planFiles\)\)/);
     const ui = readFileSync("client/src/components/sidebar/SidebarPanel.tsx", "utf8");
-    expect(ui).toMatch(/value=\{calendarStart \|\| autoAnchor\}/);
+    expect(ui).toMatch(/value=\{selectedCalendarStart \|\| autoAnchor\}/);
+    expect(ui).toMatch(/readCalendarStart\(activeConversationId, draft\.planKey\)/);
     expect(ui).toMatch(/disabled=\{!activeConversationId \|\| !calendarPreview\?\.eventCount\}/);
-    expect(ui).toMatch(/start=\{calendarStart \|\| autoAnchor\}/);
+    expect(ui).toMatch(/start=\{selectedCalendarStart \|\| autoAnchor\}/);
   });
 });
 

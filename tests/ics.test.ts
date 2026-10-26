@@ -886,6 +886,33 @@ describe("GET /api/protected/conversations/:id/export.ics", () => {
     expect(res.body.message).toMatch(/No schedulable items/);
   });
 
+  it("uses the first explicit event date instead of a stale saved calendar anchor", async () => {
+    const agent = request.agent(app);
+    await registerAndLogin(agent, "calExplicitYear");
+    const convo = await createConversation(agent, "Tomato calendar");
+
+    await storage.createMessage({
+      conversationId: convo.id,
+      content: "",
+      role: "expert",
+      artifacts: [
+        { type: "calendar", title: "Older calendar", content: JSON.stringify({ anchor: "2027-05-07", events: [] }) },
+        {
+          type: "table",
+          title: "Tomato plan",
+          content: "| Date | Task |\n|---|---|\n| 2026-03-26 | Start tomato seeds |\n| 2026-04-02 | Harden seedlings |",
+        },
+      ],
+    } as any);
+
+    const res = await agent.get(`/api/protected/conversations/${convo.id}/calendar`);
+    expect(res.status).toBe(200);
+    expect(res.body.autoAnchor).toBe("2026-03-26");
+    expect(res.body.anchor).toBe("2026-03-26");
+    expect(res.body.events[0].startDate).toBe("2026-03-26");
+    expect(res.body.planKey).toMatch(/^[a-f0-9]{64}$/);
+  });
+
   it("returns 200 text/calendar starting with BEGIN:VCALENDAR for a table artifact", async () => {
     const agent = request.agent(app);
     await registerAndLogin(agent, "icsTable");

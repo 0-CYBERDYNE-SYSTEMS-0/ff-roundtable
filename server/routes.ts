@@ -12,7 +12,7 @@ import { encryptApiKey, decryptApiKey, maskApiKey } from "./crypto";
 import multer from "multer";
 import path from "path";
 import fs from "fs";
-import { createHmac, randomBytes, timingSafeEqual } from "crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "crypto";
 import Stripe from "stripe";
 import { WebSocketServer, type RawData } from "ws";
 import { InsertConversation, InsertExpert, InsertMessage, Message, type File, insertFarmProfileSchema } from "@shared/schema";
@@ -22,6 +22,7 @@ import { buildVCalendar, truncateIcsSummary } from "@shared/ics";
 import { calendarEventsSchema, type CalendarDraft } from "@shared/calendar-draft";
 import { inspectCalendar } from "./calendar-files";
 import { extractScheduleRows, parseIsoDate, nextMondayFrom, resolveRowStartDate, buildRowSummary, resolveScheduleAnchor, findConversationAnchor, planFileTexts, calendarDisplayName, finalizeCalendarEvents, findFrostAnchor } from "@shared/schedule-extract";
+import { firstDatedScheduleAnchor } from "@shared/calendar-anchor";
 import { generateComprehensiveMarkdown } from './export-utils';
 import { getWeatherForFarm, formatWeatherContext } from './weather';
 import { isDuplicateUserSubmission } from './text-similarity';
@@ -1925,21 +1926,29 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
       const todayIso = new Date().toISOString().slice(0, 10);
       const planMessages = await storage.getConversationMessages(conversationId);
-      // Week 1: the farmer's chosen start, else the plan's stated anchor (next occurrence), else today.
       const planFiles = await storage.getConversationFiles(conversationId);
-      // Week 1: explicit/frost anchor, else requested season, else today (gate C r6).
-      const autoAnchor = resolveScheduleAnchor(findConversationAnchor(planMessages, todayIso, planFileTexts(planFiles)), todayIso);
+      const rows = extractScheduleRows(planMessages, planFiles, undefined, todayIso);
+      // Explicitly dated plans set Week 1 from their first dated event. Saved
+      // calendar artifacts only anchor plans without dated rows.
+      const firstDatedAnchor = firstDatedScheduleAnchor(rows);
+      const autoAnchor = firstDatedAnchor
+        ?? resolveScheduleAnchor(findConversationAnchor(planMessages, todayIso, planFileTexts(planFiles)), todayIso);
       const anchor = typeof req.query.start === "string" && req.query.start ? parseIsoDate(req.query.start) : autoAnchor;
       if (!anchor) return res.status(422).json({ message: "Invalid start date" });
-      const rows = extractScheduleRows(planMessages, planFiles, undefined, todayIso);
       // An empty schedule is a normal state, not an error: 200 keeps the sidebar's
       // background preview from logging a 422 for every plan-less conversation.
       if (!rows.length) return res.json({ events: [], empty: true, calendarName: conversation.title ?? "Roundtable", currentFileId: null, version: null, message: "No schedulable items found. Ask the council for a dated plan first." });
+      const planKey = createHash("sha256")
+        .update(JSON.stringify(rows.map(({ date, weekIndex, title, task, description }) => ({ date, weekIndex, title, task, description }))))
+        .digest("hex");
       const draft: CalendarDraft = {
         events: finalizeCalendarEvents(rows.map((row, index) => ({ uid: `${conversationId}-${index}@farmfriend-roundtable`, summary: buildRowSummary(row), startDate: resolveRowStartDate(row, anchor), description: row.description })), [...planMessages.map(m => m.content), ...planFileTexts(planFiles)].map(t => findFrostAnchor(String(t ?? ""), todayIso)).find(Boolean)),
         calendarName: calendarDisplayName(conversation.title, planMessages, planFiles), currentFileId: null, version: null,
       };
-      return res.json({ ...draft, anchor, autoAnchor });
+      const inputAutoAnchor = firstDatedAnchor
+        ? draft.events.map(event => event.startDate).sort()[0] ?? autoAnchor
+        : autoAnchor;
+      return res.json({ ...draft, anchor, autoAnchor: inputAutoAnchor, planKey });
     } catch {
       return res.status(422).json({ message: "This calendar could not be opened. Check that it is a valid ICS file with event start dates." });
     }
