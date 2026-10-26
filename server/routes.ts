@@ -21,7 +21,7 @@ import { extractMentions } from "@shared/mentions";
 import { buildVCalendar, truncateIcsSummary } from "@shared/ics";
 import { calendarEventsSchema, type CalendarDraft } from "@shared/calendar-draft";
 import { inspectCalendar } from "./calendar-files";
-import { extractScheduleRows, parseIsoDate, nextMondayFrom, resolveRowStartDate, buildRowSummary, resolveScheduleAnchor, findConversationAnchor, planFileTexts, calendarDisplayName, finalizeCalendarEvents, findFrostAnchor } from "@shared/schedule-extract";
+import { extractScheduleRows, parseIsoDate, nextMondayFrom, resolveRowStartDate, buildRowSummary, resolveScheduleAnchor, findConversationAnchor, findPlanAnchor, planFileTexts, calendarDisplayName, finalizeCalendarEvents, findFrostAnchor } from "@shared/schedule-extract";
 import { firstDatedScheduleAnchor } from "@shared/calendar-anchor";
 import { generateComprehensiveMarkdown } from './export-utils';
 import { getWeatherForFarm, formatWeatherContext } from './weather';
@@ -1928,11 +1928,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const planMessages = await storage.getConversationMessages(conversationId);
       const planFiles = await storage.getConversationFiles(conversationId);
       const rows = extractScheduleRows(planMessages, planFiles, undefined, todayIso);
-      // Explicitly dated plans set Week 1 from their first dated event. Saved
-      // calendar artifacts only anchor plans without dated rows.
+      // Stated timing and frost dates outrank event dates; event/persisted anchors are fallbacks.
       const firstDatedAnchor = firstDatedScheduleAnchor(rows);
-      const autoAnchor = firstDatedAnchor
-        ?? resolveScheduleAnchor(findConversationAnchor(planMessages, todayIso, planFileTexts(planFiles)), todayIso);
+      const fileTexts = planFileTexts(planFiles);
+      const planTexts = planMessages.flatMap(message => [
+        String(message.content ?? ""),
+        ...(message.artifacts ?? []).filter(artifact => artifact.type === "table").map(artifact => artifact.content),
+      ]);
+      const planAnchor = findPlanAnchor([...planTexts, ...fileTexts], todayIso);
+      const conversationAnchor = findConversationAnchor(planMessages, todayIso, planFileTexts(planFiles));
+      const autoAnchor = resolveScheduleAnchor(planAnchor ?? firstDatedAnchor ?? conversationAnchor, todayIso);
       const anchor = typeof req.query.start === "string" && req.query.start ? parseIsoDate(req.query.start) : autoAnchor;
       if (!anchor) return res.status(422).json({ message: "Invalid start date" });
       // An empty schedule is a normal state, not an error: 200 keeps the sidebar's
@@ -1945,9 +1950,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         events: finalizeCalendarEvents(rows.map((row, index) => ({ uid: `${conversationId}-${index}@farmfriend-roundtable`, summary: buildRowSummary(row), startDate: resolveRowStartDate(row, anchor), description: row.description })), [...planMessages.map(m => m.content), ...planFileTexts(planFiles)].map(t => findFrostAnchor(String(t ?? ""), todayIso)).find(Boolean)),
         calendarName: calendarDisplayName(conversation.title, planMessages, planFiles), currentFileId: null, version: null,
       };
-      const inputAutoAnchor = firstDatedAnchor
-        ? draft.events.map(event => event.startDate).sort()[0] ?? autoAnchor
-        : autoAnchor;
+      const inputAutoAnchor = draft.events.map(event => event.startDate).sort()[0] ?? autoAnchor;
       return res.json({ ...draft, anchor, autoAnchor: inputAutoAnchor, planKey });
     } catch {
       return res.status(422).json({ message: "This calendar could not be opened. Check that it is a valid ICS file with event start dates." });

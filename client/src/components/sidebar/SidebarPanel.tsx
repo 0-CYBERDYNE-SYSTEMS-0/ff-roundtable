@@ -177,6 +177,15 @@ export default function SidebarPanel({
           return;
         }
         const startDate = draft.events.map(event => event.startDate).sort()[0];
+        if (selectedCalendarStart && selectedCalendarStart !== startDate && draft.planKey) {
+          setCalendarStart(startDate);
+          setCalendarStartPlanKey(draft.planKey);
+          try {
+            localStorage.setItem(`farmFriendCalendarStart:${activeConversationId}`, JSON.stringify({ startDate, planKey: draft.planKey }));
+          } catch {
+            // Keep the rendered plan's first date in the input for this session.
+          }
+        }
         const preview: CalendarPreview = {
           eventCount: draft.events.length, startDate, year: Number(startDate.slice(0, 4)),
           timeZone: "All-day dates (timezone-neutral)", scheduleVersion: draft.version ? `Calendar v${draft.version}` : "Current conversation schedule",

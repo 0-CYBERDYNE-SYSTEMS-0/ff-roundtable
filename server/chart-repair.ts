@@ -2,6 +2,8 @@
 // Order: strict parse → fence/outer-brace extraction → lenient JSON fixes → truncation close.
 // If the spec still will not compile, rebuild a plain themed chart from the rows.
 
+import { parseChartNumericValue } from "@shared/chart-artifact";
+
 /** Close unbalanced braces/brackets of a truncated JSON document; null if not fixable. */
 export function closeTruncatedJson(text: string): string | null {
   const closers: string[] = [];
@@ -103,7 +105,7 @@ const DATEISH = /^\d{4}-\d{2}(-\d{2})?/;
 export function fallbackSpecFromRows(rows: Record<string, unknown>[]): Record<string, unknown> | null {
   if (!rows.length) return null;
   const fields = Object.keys(rows[0]);
-  const numeric = fields.filter(f => rows.every(r => r[f] === null || typeof r[f] === "number" || (typeof r[f] === "string" && /^-?[\d,.]+$/.test(r[f] as string))));
+  const numeric = fields.filter(f => rows.every(r => r[f] === null || parseChartNumericValue(r[f]) !== undefined));
   const nominal = fields.filter(f => !numeric.includes(f));
   const y = numeric.find(f => !/^(year|week|day|month|id)$/i.test(f)) ?? numeric[0];
   if (!y) return null;

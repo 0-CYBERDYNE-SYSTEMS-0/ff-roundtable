@@ -73,6 +73,8 @@ import { registerRoutes } from "../server/routes";
 import { storage, MemStorage, PostgresStorage } from "../server/storage";
 import {
   generateSystemPrompt,
+  buildFarmContext,
+  extractFarmerLocation,
   getModeratorNextSpeakerSuggestion,
   generateClosingSynthesis,
   buildClosingSynthesisPrompt,
@@ -146,6 +148,32 @@ describe("generateSystemPrompt charter injection", () => {
     expect(prompt).toContain("🌾 FARMER CONTEXT");
     // Charter is a governing block: it must precede the per-farm context.
     expect(prompt.indexOf("📜 COUNCIL CHARTER")).toBeLessThan(prompt.indexOf("🌾 FARMER CONTEXT"));
+  });
+
+  it("uses the farmer's stated location or farm profile in expert context", () => {
+    expect(extractFarmerLocation(["We farm in Eugene, Oregon."])).toBe("Eugene, Oregon");
+    expect(buildFarmContext(undefined, ["We farm in Eugene, Oregon."])).toContain("Location: Eugene, Oregon");
+    expect(buildFarmContext({ location: "Corvallis, Oregon" } as any, [])).toContain("Location: Corvallis, Oregon");
+
+    const prompt = generateSystemPrompt(expert, roles, buildFarmContext(undefined, ["We farm in Eugene, Oregon."]));
+    expect(prompt).toContain("Location: Eugene, Oregon");
+    expect(prompt).toContain("Never substitute an unrelated example location or generic USDA zone");
+  });
+
+  it("passes message and profile locations through both response paths", async () => {
+    mockProviderChat.mockReset().mockResolvedValue({ message: { role: "assistant", content: "Localized answer." } });
+    mockProviderChatStream.mockReset().mockResolvedValue({ message: { role: "assistant", content: "Localized answer." } });
+    const conversation = await storage.createConversation({ userId: 1, title: "Location context" });
+    await storage.upsertFarmProfile(conversation.userId, { location: "Corvallis, Oregon" });
+    const locationExpert = createMockExpert(91, conversation.id, "Crop Expert", "Crop Specialist");
+
+    await getExpertResponseStream(locationExpert, [], "We farm in Eugene, Oregon.", [], [locationExpert.role], () => {});
+    const streamPrompt = mockProviderChatStream.mock.calls[0][0].find((message: any) => message.role === "system").content;
+    expect(streamPrompt).toContain("Location: Eugene, Oregon");
+
+    await getExpertResponse(locationExpert, [], "Use my saved farm location.", [], [locationExpert.role]);
+    const nonStreamPrompt = mockProviderChat.mock.calls[0][0].find((message: any) => message.role === "system").content;
+    expect(nonStreamPrompt).toContain("Location: Corvallis, Oregon");
   });
 
   it("requires named cross-talk to reuse two concrete domain terms without repeating a recommendation", () => {

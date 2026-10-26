@@ -732,6 +732,7 @@ You are part of a team of experts: [${availableRoles?.join(', ') || 'various rol
   // Inject farm profile context if available
   if (farmContext) {
     basePrompt += `\n🌾 FARMER CONTEXT — You are advising a REAL farmer with this operation:\n${farmContext}\n\nCRITICAL: Tailor ALL your advice to this specific farm. Reference their crops, acreage, soil type, location, and water situation directly. Do NOT give generic advice that ignores these details.\n`;
+    basePrompt += `Use the stated farm location for growing zones, frost dates, weather, and regional recommendations. Never substitute an unrelated example location or generic USDA zone; if a local value is uncertain, research it or state the uncertainty.\n`;
   }
 
   // Inject weather context if available
@@ -815,6 +816,24 @@ Uploaded images are delivered to you directly as native vision input — describ
     : `\n\nAt the very end of every response, add exactly one machine-readable stance line in this format:\nSTANCE: <agree|disagree|conditional|abstain> | <confidence 1-5> | <one-line position>\nUse one of the four stance values exactly (case-insensitive), an integer confidence from 1 to 5, and a concise one-line position. Put no text after this line. This line will be removed from the farmer-facing response.`;
 
   return basePrompt + interactionPrompt + roleInstructions + (expert.role === "Moderator" ? "" : ARTIFACT_DESIGN_PROMPT) + stanceInstruction;
+}
+
+/** Extract a location explicitly stated by the farmer (profile location takes lower priority). */
+export function extractFarmerLocation(texts: string[]): string | undefined {
+  const locationPattern = /\b(?:in|near|around|from|located(?:\s+in)?|based(?:\s+in)?|location(?:\s+is|\s*:)?)\s+([A-Z][A-Za-z.'’\-]*(?:\s+[A-Z][A-Za-z.'’\-]*){0,2})(?:,\s*|\s+)([A-Z]{2}|[A-Z][A-Za-z.'’\-]*(?:\s+[A-Z][A-Za-z.'’\-]*)?)/;
+  for (const text of [...texts].reverse()) {
+    const match = String(text ?? "").match(locationPattern);
+    if (match) return `${match[1].trim().replace(/[.,;:!?]+$/, "")}, ${match[2].trim().replace(/[.,;:!?]+$/, "")}`;
+  }
+  return undefined;
+}
+
+/** Shared farm context for both expert response paths. */
+export function buildFarmContext(profile: FarmProfile | null | undefined, userTexts: string[]): string {
+  const location = extractFarmerLocation(userTexts) || profile?.location?.trim() || "";
+  if (!profile && !location) return "";
+  if (profile && !(location || profile.crops?.length || profile.farmName || profile.acres)) return "";
+  return `Farm: ${profile?.farmName || "N/A"}\nLocation: ${location || "N/A"}\nAcres: ${profile?.acres || "N/A"}\nCrops: ${(profile?.crops || []).join(", ") || "N/A"}\nSoil Type: ${profile?.soilType || "N/A"}\nWater Source: ${profile?.waterSource || "N/A"}\nClimate Zone: ${profile?.climateZone || "N/A"}\nHardiness Zone: ${profile?.hardinessZone || "N/A"}`;
 }
 
 // Function to call AI API (routes through provider abstraction)
@@ -1192,21 +1211,20 @@ export async function getExpertResponseStream(
   
   // Fetch farm profile and weather for context
   const conversation = await storage.getConversation(expert.conversationId);
-  let farmContext = "";
+  const userTexts = [...history.filter(message => message.role === "user").map(message => message.content), referenceMessageContent];
+  let farmContext = buildFarmContext(undefined, userTexts);
   let weatherContext = "";
   if (conversation) {
     try {
       const profile = await storage.getFarmProfile(conversation.userId);
-      if (profile && (profile.location || profile.crops?.length)) {
-        farmContext = `Farm: ${profile.farmName}\nLocation: ${profile.location}\nAcres: ${profile.acres || 'N/A'}\nCrops: ${(profile.crops || []).join(', ') || 'N/A'}\nSoil Type: ${profile.soilType || 'N/A'}\nWater Source: ${profile.waterSource || 'N/A'}\nClimate Zone: ${profile.climateZone || 'N/A'}\nHardiness Zone: ${profile.hardinessZone || 'N/A'}`;
-        
-        // Fetch weather if coords available
-        if (profile.lat && profile.lng) {
-          const { getWeatherForFarm, formatWeatherContext } = await import('./weather');
-          const weather = await getWeatherForFarm(profile.lat, profile.lng);
-          if (weather.ok) {
-            weatherContext = formatWeatherContext(weather.data);
-          }
+      farmContext = buildFarmContext(profile, userTexts);
+
+      // Fetch weather if coords available
+      if (profile?.lat && profile.lng) {
+        const { getWeatherForFarm, formatWeatherContext } = await import('./weather');
+        const weather = await getWeatherForFarm(profile.lat, profile.lng);
+        if (weather.ok) {
+          weatherContext = formatWeatherContext(weather.data);
         }
       }
     } catch (err) {
@@ -1408,10 +1426,18 @@ export async function getExpertResponse(
   deliverableRequest?: DeliverableGenerationRequest,
 ): Promise<InsertMessage> { 
   console.log(`Generating response for expert: ${expert.name} (${expert.role})`);
-  // G6: fetch the conversation for its council charter (farm/weather context
-  // is only wired into the streaming path).
+  // G6: fetch the conversation for its council charter and farm context.
   const conversation = await storage.getConversation(expert.conversationId);
-  const systemPrompt = generateSystemPrompt(expert, availableRoles, undefined, undefined, conversation?.charter ?? null);
+  const userTexts = [...history.filter(message => message.role === "user").map(message => message.content), referenceMessageContent];
+  let farmContext = buildFarmContext(undefined, userTexts);
+  if (conversation) {
+    try {
+      farmContext = buildFarmContext(await storage.getFarmProfile(conversation.userId), userTexts);
+    } catch (error) {
+      console.warn("Could not fetch farm context:", (error as Error).message);
+    }
+  }
+  const systemPrompt = generateSystemPrompt(expert, availableRoles, farmContext, undefined, conversation?.charter ?? null);
   
   const messages: AIMessage[] = [
     { role: "system", content: systemPrompt }

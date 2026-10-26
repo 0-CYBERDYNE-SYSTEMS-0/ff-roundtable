@@ -130,6 +130,33 @@ export function afterLastFrost(summary: string, startDate: string, frostIso: str
   return startDate < min ? min : startDate;
 }
 
+const SMALL_NUMBER_WORDS: Record<string, number> = {
+  one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
+  eleven: 11, twelve: 12,
+};
+
+/** Interpret explicit relative timing in the event notes against the plan's frost date. */
+function relativeFrostDate(text: string, frostIso: string | undefined): string | undefined {
+  if (!frostIso) return undefined;
+  const match = text.match(/\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s*(days?|weeks?)\s+(before|prior to|after|following)\s+(?:the\s+)?(?:(?:average|expected|last|first)\s+)?frost\b/i);
+  if (!match) return undefined;
+  const amount = Number(match[1]) || SMALL_NUMBER_WORDS[match[1].toLowerCase()];
+  const days = amount * (/^week/i.test(match[2]) ? 7 : 1);
+  return addDaysIso(frostIso, /^(before|prior)/i.test(match[3]) ? -days : days);
+}
+
+/** Use a date written in the event note, interpreting yearless dates in the anchor year. */
+function noteDate(text: string, frostIso: string | undefined): string | undefined {
+  const relative = relativeFrostDate(text, frostIso);
+  if (relative) return relative;
+  const withoutFrostDate = text.replace(
+    /\b(?:last|average|expected|first)?\s*frost(?:\s+date)?\s*(?:(?:is|of)\s+|[:=]\s*)?(?:\d{4}-\d{2}-\d{2}|(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+\d{1,2}(?:,?\s*\d{4})?)/gi,
+    "",
+  ).replace(new RegExp(`\\b${MONTH_RE}\\.?\\s+\\d{1,2}\\s*[–—-]\\s*(?:${MONTH_RE}\\.?\\s+)?\\d{1,2}`, "gi"), "");
+  const todayIso = frostIso ?? new Date().toISOString().slice(0, 10);
+  return parseTimingCell(withoutFrostDate, { todayIso, anchorIso: frostIso })?.date;
+}
+
 /** Shift expert week windows to the same anchor used by event dates. */
 function alignNoteRanges(notes: string, startDate: string): string {
   const range = new RegExp(`\\b${MONTH_RE}\\.?\\s+(\\d{1,2})\\s*[–—-]\\s*(?:${MONTH_RE}\\.?\\s+)?(\\d{1,2})`, "gi");
@@ -149,9 +176,10 @@ function alignNoteRanges(notes: string, startDate: string): string {
 
 /** Final event list for any calendar surface: dates, frost rule, clean de-duplicated notes. */
 export function finalizeCalendarEvents<T extends { summary: string; startDate: string; description: string }>(events: T[], frostIso: string | undefined): T[] {
-  return events
+  const finalized = events
     .map(e => {
-      const startDate = afterLastFrost(e.summary, e.startDate, frostIso);
+      const notedDate = noteDate(e.description, frostIso);
+      const startDate = notedDate ?? afterLastFrost(e.summary, e.startDate, frostIso);
       const week = e.summary.match(/\bWeek\s+(\d+)\b/i)?.[1];
       const hasApproximateDate = /^\s*(?:\d{1,2}\s*)?[—–-]\s*Week/i.test(e.summary) || /~?\b(?:early|mid|late)\s+(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)|~?\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2}|\(\s*last frost\s*\)/i.test(e.summary);
       let summary = e.summary;
@@ -172,6 +200,23 @@ export function finalizeCalendarEvents<T extends { summary: string; startDate: s
       return { ...e, summary: capEventTitle(summary), startDate, description: notesWithoutTitle(alignNoteRanges(e.description, startDate), summary) };
     })
     .sort((a, b) => a.startDate.localeCompare(b.startDate));
+  const seen = new Set<string>();
+  const unique = finalized.filter(event => {
+    const title = event.summary
+      .replace(/\s*[—–-]\s*Week\s+\d+\b/gi, "")
+      .replace(/\s*\([A-Z][a-z]{2}\s+\d{1,2}\)\s*$/, "")
+      .normalize("NFKC").toLowerCase().replace(/\s+/g, " ").trim();
+    const key = `${event.startDate}:${title}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  const weeks = Array.from(new Set(unique.map(event => Number(event.summary.match(/\bWeek\s+(\d+)\b/i)?.[1])).filter(Number.isFinite))).sort((a, b) => a - b);
+  const compactWeek = new Map(weeks.map((week, index) => [week, (weeks[0] ?? 1) + index]));
+  return unique.map(event => ({
+    ...event,
+    summary: event.summary.replace(/\bWeek\s+(\d+)\b/i, (_match, week) => `Week ${compactWeek.get(Number(week)) ?? week}`),
+  }));
 }
 
 export function buildRowSummary(row: ScheduleRow): string {
@@ -217,7 +262,7 @@ function isoOf(y: number, m: number, d: number): string | undefined {
 }
 
 /** "April 20", "Apr 20, 2027", "20 April" → ISO; no year → next occurrence on/after today. */
-export function parseMonthDay(text: string, todayIso: string): string | undefined {
+export function parseMonthDay(text: string, todayIso: string, anchorIso?: string): string | undefined {
   const a = text.match(new RegExp(`\\b${MONTH_RE}\\.?\\s+(\\d{1,2})(?:st|nd|rd|th)?\\b(?:,?\\s*(\\d{4}))?`, "i"));
   const b = a ? null : text.match(new RegExp(`\\b(\\d{1,2})(?:st|nd|rd|th)?\\s+${MONTH_RE}\\b(?:,?\\s*(\\d{4}))?`, "i"));
   const [monthName, day, year] = a ? [a[1], a[2], a[3]] : b ? [b[2], b[1], b[3]] : [];
@@ -225,8 +270,12 @@ export function parseMonthDay(text: string, todayIso: string): string | undefine
   const m = MONTHS.indexOf(monthName.slice(0, 3).toLowerCase()) + 1;
   const d = Number(day);
   if (year) return isoOf(Number(year), m, d);
-  const ty = Number(todayIso.slice(0, 4));
+  const ty = Number((anchorIso ?? todayIso).slice(0, 4));
   const thisYear = isoOf(ty, m, d);
+  if (anchorIso && thisYear) {
+    const anchorMonth = Number(anchorIso.slice(5, 7));
+    return anchorMonth >= 11 && m <= 2 ? isoOf(ty + 1, m, d) : thisYear;
+  }
   if (thisYear && thisYear >= todayIso) return thisYear;
   return isoOf(ty + 1, m, d);
 }
@@ -239,13 +288,19 @@ const SEASON_PART: Record<string, number> = { early: 0, mid: 30, late: 60 };
  * "this spring", "next fall", "early spring", "late summer 2027" → ISO start of
  * that season, never in the past: from Oct 2026, "this spring" is spring 2027.
  */
-export function parseSeason(text: string, todayIso: string): string | undefined {
+export function parseSeason(text: string, todayIso: string, anchorIso?: string): string | undefined {
   const m = text.match(/\b(?:(this|next|coming)\s+)?(?:(early|mid|late)[- ]?)?(spring|summer|fall|autumn|winter)\b(?:\s+(\d{4}))?/i);
   if (!m) return undefined;
   const [mm, dd] = SEASONS[m[3].toLowerCase()];
   const offset = SEASON_PART[(m[2] ?? "early").toLowerCase()] ?? 0;
   const at = (y: number) => addDaysIso(isoOf(y, mm, dd)!, offset);
   if (m[4]) return at(Number(m[4]));
+  if (anchorIso) {
+    const year = Number(anchorIso.slice(0, 4));
+    const candidate = at(year);
+    const daysFromAnchor = Math.round((Date.parse(`${candidate}T00:00:00Z`) - Date.parse(`${anchorIso}T00:00:00Z`)) / 86400000);
+    return daysFromAnchor < -90 ? at(year + 1) : candidate;
+  }
   const ty = Number(todayIso.slice(0, 4));
   let candidate = at(ty);
   if (candidate < todayIso) candidate = at(ty + 1);
@@ -256,14 +311,18 @@ export function parseSeason(text: string, todayIso: string): string | undefined 
 }
 
 /** "April", "early May" → the 1st/15th of the next occurrence of that month. */
-export function parseMonthOnly(text: string, todayIso: string): string | undefined {
+export function parseMonthOnly(text: string, todayIso: string, anchorIso?: string): string | undefined {
   const m = text.match(new RegExp(`\\b(?:(early|mid|late)[- ]?)?${MONTH_RE}\\b(?:\\s+(\\d{4}))?`, "i"));
   if (!m) return undefined;
   const month = MONTHS.indexOf(m[2].slice(0, 3).toLowerCase()) + 1;
   const day = ({ early: 1, mid: 15, late: 22 } as Record<string, number>)[(m[1] ?? "early").toLowerCase()] ?? 1;
   if (m[3]) return isoOf(Number(m[3]), month, day);
-  const ty = Number(todayIso.slice(0, 4));
+  const ty = Number((anchorIso ?? todayIso).slice(0, 4));
   const c = isoOf(ty, month, day)!;
+  if (anchorIso) {
+    const anchorMonth = Number(anchorIso.slice(5, 7));
+    return anchorMonth >= 11 && month <= 2 ? isoOf(ty + 1, month, day) : c;
+  }
   return c >= todayIso ? c : isoOf(ty + 1, month, day);
 }
 
@@ -305,7 +364,7 @@ export function parseTimingCell(cell: string, ctx: TimingContext): { date?: stri
   if (/^T$|\bT\s*(?:=|0)\b/.test(text) && ctx.anchorIso) return { date: ctx.anchorIso };
   const week = text.match(/\b(?:week|wk|w)\.?\s*(\d{1,2})\b/i);
   if (week) { const n = parseWeekCell(week[1]); if (n) return { weekIndex: n }; }
-  const md = parseMonthDay(text, ctx.todayIso) ?? parseSeason(text, ctx.todayIso) ?? parseMonthOnly(text, ctx.todayIso);
+  const md = parseMonthDay(text, ctx.todayIso, ctx.anchorIso) ?? parseSeason(text, ctx.todayIso, ctx.anchorIso) ?? parseMonthOnly(text, ctx.todayIso, ctx.anchorIso);
   return md ? { date: md } : undefined;
 }
 
@@ -662,7 +721,9 @@ export function extractScheduleRows(
   todayIso: string = new Date().toISOString().slice(0, 10),
 ): ScheduleRow[] {
   const rows: ScheduleRow[] = [];
-  let anchorIso: string | undefined = findConversationAnchor(messages, todayIso, planFileTexts(files, readFile));
+  const fileTexts = planFileTexts(files, readFile);
+  let anchorIso: string | undefined = findPlanAnchor([...messageTexts(messages), ...fileTexts], todayIso)
+    ?? findPersistedCalendarAnchor(messages);
 
   for (const message of messages ?? []) {
     anchorIso = findTimingAnchor(String((message as { content?: unknown }).content ?? ""), todayIso) ?? anchorIso;

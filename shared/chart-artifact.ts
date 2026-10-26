@@ -38,8 +38,27 @@ export function parseVegaChart(value: unknown): VegaChart | null {
   return safe(spec) ? result.data : null;
 }
 
-/** Theme defaults leave encodings, composition, transforms, and interactions to the expert. */
-const NUMERIC_STRING = /^\s*[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?\s*$/;
+/** Parse chart measures, treating a stated range as its midpoint. */
+export function parseChartNumericValue(value: unknown): number | undefined {
+  if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
+  if (typeof value !== "string") return undefined;
+
+  const number = "[-+]?(?:\\d{1,3}(?:,\\d{3})+|\\d+)(?:\\.\\d+)?";
+  const range = value.match(new RegExp(`^\\s*(${number})\\s*(k)?\\s*(?:[-–—]|to)\\s*(${number})\\s*(k)?\\s*$`, "i"));
+  const scalar = value.match(new RegExp(`^\\s*(${number})\\s*(k)?\\s*$`, "i"));
+  const parse = (raw: string, suffix?: string) => Number(raw.replace(/,/g, "")) * (suffix ? 1000 : 1);
+
+  if (range) {
+    // A suffix on one bound applies to both bounds in compact forms such as 14–20k.
+    const suffix = range[2] || range[4];
+    const low = parse(range[1], range[2] || (!range[1].includes(",") ? suffix : undefined));
+    const high = parse(range[3], range[4] || (!range[3].includes(",") ? suffix : undefined));
+    return Number.isFinite(low) && Number.isFinite(high) ? (low + high) / 2 : undefined;
+  }
+  if (!scalar) return undefined;
+  const parsed = parse(scalar[1], scalar[2]);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
 
 /** Models often quote numbers or type measures as ordinal; fix both so bars and lines scale. */
 export function normalizeChartData(chart: VegaChart): { data: VegaChart["data"]; numeric: Set<string> } {
@@ -47,10 +66,10 @@ export function normalizeChartData(chart: VegaChart): { data: VegaChart["data"];
   const numeric = new Set<string>();
   for (const f of fields) {
     const vals = chart.data.map(r => (r as Record<string, unknown>)[f]).filter(v => v !== null && v !== undefined && v !== "");
-    if (vals.length && vals.every(v => typeof v === "number" || (typeof v === "string" && NUMERIC_STRING.test(v)))) numeric.add(f);
+    if (vals.length && vals.every(v => parseChartNumericValue(v) !== undefined)) numeric.add(f);
   }
   const data = chart.data.map(row => Object.fromEntries(Object.entries(row).map(([k, v]) =>
-    [k, numeric.has(k) && typeof v === "string" ? Number(v.replace(/,/g, "")) : v]))) as VegaChart["data"];
+    [k, numeric.has(k) && typeof v === "string" ? parseChartNumericValue(v)! : v]))) as VegaChart["data"];
   return { data, numeric };
 }
 
@@ -235,7 +254,7 @@ export function chartHasPlottableSeries(chart: Pick<VegaChart, "data" | "spec">)
   if (quantitative.length) {
     return quantitative.some(f => chart.data.some(row => {
       const v = (row as Record<string, unknown>)[f.field];
-      return (typeof v === "number" && Number.isFinite(v)) || (typeof v === "string" && NUMERIC_STRING.test(v));
+      return parseChartNumericValue(v) !== undefined;
     }));
   }
   return true;
@@ -512,8 +531,8 @@ export function applyFacetScales(chart: { data: Record<string, unknown>[]; spec:
   if (!independent && ff && yf) {
     const groups = new Map<string, number[]>();
     for (const row of chart.data) {
-      const v = Number(row[yf]);
-      if (!Number.isFinite(v)) continue;
+      const v = parseChartNumericValue(row[yf]);
+      if (v === undefined) continue;
       const k = String(row[ff]);
       groups.set(k, [...(groups.get(k) ?? []), Math.abs(v)]);
     }
