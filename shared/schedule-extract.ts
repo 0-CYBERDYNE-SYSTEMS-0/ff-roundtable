@@ -133,7 +133,24 @@ export function afterLastFrost(summary: string, startDate: string, frostIso: str
 /** Final event list for any calendar surface: dates, frost rule, clean de-duplicated notes. */
 export function finalizeCalendarEvents<T extends { summary: string; startDate: string; description: string }>(events: T[], frostIso: string | undefined): T[] {
   return events
-    .map(e => ({ ...e, summary: capEventTitle(e.summary), startDate: afterLastFrost(e.summary, e.startDate, frostIso), description: notesWithoutTitle(e.description, e.summary) }))
+    .map(e => {
+      const startDate = afterLastFrost(e.summary, e.startDate, frostIso);
+      const week = e.summary.match(/\bWeek\s+(\d+)\b/i)?.[1];
+      const hasApproximateDate = /~?\b(?:early|mid|late)\s+(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)|~?\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2}|\(\s*last frost\s*\)/i.test(e.summary);
+      let summary = e.summary;
+      if (hasApproximateDate) {
+        summary = summary
+          .replace(/~?\b(?:early|mid|late)\s+(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)(?:\s+\d{1,2})?/gi, "")
+          .replace(/~?\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2}/gi, "")
+          .replace(/\(\s*last frost\s*\)/gi, "")
+          .replace(/\s*[—–-]\s*Week\s+\d+\b/gi, "")
+          .replace(/\s{2,}/g, " ").replace(/^\s*[—–-]\s*|\s*[—–-]\s*$/g, "").trim();
+        const date = new Date(`${startDate}T00:00:00Z`);
+        const label = `${date.toLocaleString("en-US", { month: "short", timeZone: "UTC" })} ${date.getUTCDate()}`;
+        summary = `${summary}${week ? ` — Week ${week}` : ""} (${label})`;
+      }
+      return { ...e, summary: capEventTitle(summary), startDate, description: notesWithoutTitle(e.description, summary) };
+    })
     .sort((a, b) => a.startDate.localeCompare(b.startDate));
 }
 

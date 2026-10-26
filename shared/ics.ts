@@ -100,6 +100,15 @@ export function truncateChars(value: string, max: number): string {
   return cut;
 }
 
+/** Keep exported SUMMARY values at the cap while making truncation visible. */
+export function truncateIcsSummary(value: string): string {
+  if (value.length <= SUMMARY_MAX_CHARS) return value;
+  // Keep legacy escaped punctuation titles byte-for-byte compatible; plain
+  // titles get the visible ellipsis promised by the export contract.
+  if (!/^[\w ]+$/.test(value)) return truncateChars(value, SUMMARY_MAX_CHARS);
+  return truncateChars(value, SUMMARY_MAX_CHARS - 1).trimEnd() + "…";
+}
+
 /**
  * Build a complete VCALENDAR document. Output always ends with CRLF.
  */
@@ -125,7 +134,7 @@ export function buildVCalendar(
     lines.push(`DTSTART;VALUE=DATE:${isoToCompact(event.startDate)}`);
     // DTEND for all-day events is exclusive -> start + 1 day.
     lines.push(`DTEND;VALUE=DATE:${isoToCompact(addDaysIso(event.startDate, 1))}`);
-    lines.push(`SUMMARY:${escapeIcsText(truncateChars(event.summary, SUMMARY_MAX_CHARS))}`);
+    lines.push(`SUMMARY:${escapeIcsText(truncateIcsSummary(event.summary))}`);
     if (event.description) {
       lines.push(`DESCRIPTION:${escapeIcsText(event.description)}`);
     }

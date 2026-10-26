@@ -18,7 +18,7 @@ import { WebSocketServer, type RawData } from "ws";
 import { InsertConversation, InsertExpert, InsertMessage, Message, type File, insertFarmProfileSchema } from "@shared/schema";
 import { z } from "zod";
 import { extractMentions } from "@shared/mentions";
-import { buildVCalendar } from "@shared/ics";
+import { buildVCalendar, truncateIcsSummary } from "@shared/ics";
 import { calendarEventsSchema, type CalendarDraft } from "@shared/calendar-draft";
 import { inspectCalendar } from "./calendar-files";
 import { extractScheduleRows, parseIsoDate, nextMondayFrom, resolveRowStartDate, buildRowSummary, resolveScheduleAnchor, findConversationAnchor, planFileTexts, calendarDisplayName, finalizeCalendarEvents, findFrostAnchor } from "@shared/schedule-extract";
@@ -282,6 +282,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
         console.error("Dev login error:", error);
         res.status(500).json({ message: "Development login failed", error: error.message });
       }
+    });
+
+    app.get("/api/dev/ics-title-check", (req, res) => {
+      if (process.env.NODE_ENV === "production") return res.status(404).json({ message: "Not found" });
+      const raw = Number(req.query.len);
+      const inputLength = Number.isFinite(raw) ? Math.max(0, Math.min(500, Math.floor(raw))) : 0;
+      const summary = truncateIcsSummary("A".repeat(inputLength));
+      buildVCalendar([{ uid: "dev-title-check", summary, startDate: "2027-01-01" }], "Dev title check");
+      return res.json({ inputLength, summary, summaryLength: summary.length });
     });
     
     console.log("Development login endpoint registered at /api/dev-login");
