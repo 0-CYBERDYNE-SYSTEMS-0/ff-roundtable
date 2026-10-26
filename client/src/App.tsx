@@ -1,3 +1,4 @@
+import { VersionFooter } from "@/components/VersionFooter";
 import { Component, type ErrorInfo, type ReactNode } from "react";
 import { Switch, Route } from "wouter";
 import { queryClient } from "./lib/queryClient";
@@ -94,7 +95,7 @@ function PublicHomeRoute() {
       </div>
     );
   }
-  return user ? <ProtectedRoute path="/" component={HomePage} /> : <LandingPage />;
+  return user ? <ProtectedRoute key={"user-" + String((user as { id?: number }).id ?? "")} path="/" component={HomePage} /> : <LandingPage />;
 }
 
 function App() {
@@ -104,6 +105,7 @@ function App() {
         <AuthProvider>
           <Router />
           <Toaster />
+          <VersionFooter />
         </AuthProvider>
       </QueryClientProvider>
     </ErrorBoundary>

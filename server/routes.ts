@@ -1,3 +1,4 @@
+import { buildSha } from "./version";
 import { catalogAvatar } from "@shared/expert-catalog";
 import { billingErrorResponse, billingUnavailable } from "./billing-errors";
 import type { Express, Request, Response } from "express";
@@ -252,6 +253,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (!res.headersSent) res.status(404).json({ message: "File not found" });
     }
   });
+
+  // Public build id so QA can confirm which commit is running (hex sha only).
+  app.get("/api/version", (_req, res) => { res.json({ sha: buildSha() }); });
 
   // Special development login endpoint
   if (DEVELOPMENT_MODE) {
