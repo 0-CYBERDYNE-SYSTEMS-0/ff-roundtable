@@ -77,3 +77,18 @@ describe("calendar reply extraction regressions", () => {
     expect(JSON.parse(inline!.content).anchor).toBe("2026-04-15");
   });
 });
+
+describe("event count across expert tables", () => {
+  const tableOf = (rows: Array<[string, string]>) => ({ type: "table", title: "Plan", content: ["| Date | Task | Notes |", "|---|---|---|", ...rows.map(([d, t]) => `| ${d} | ${t} | n |`)].join("\n") });
+
+  it("drops only the repeated event across two expert tables (7 + 9 rows, one shared)", () => {
+    const a: Array<[string, string]> = [1, 2, 3, 4, 5, 6, 7].map(i => [`2026-03-${String(i * 3).padStart(2, "0")}`, `Task A${i}`]);
+    const b: Array<[string, string]> = [1, 2, 3, 4, 5, 6, 7].map(i => [`2026-04-${String(i * 3).padStart(2, "0")}`, `Task B${i}`]);
+    b.push(a[0]); // the shared event
+    b.push(["2026-03-03", "Different task, same day"]);
+    const messages = [{ content: "A", artifacts: [tableOf(a)] }, { content: "B", artifacts: [tableOf(b)] }] as any;
+    const rows = extractScheduleRows(messages, [], () => null, TODAY);
+    expect(rows).toHaveLength(7 + 9 - 1);
+    expect(rows.filter(r => r.date === "2026-03-03")).toHaveLength(2);
+  });
+});
