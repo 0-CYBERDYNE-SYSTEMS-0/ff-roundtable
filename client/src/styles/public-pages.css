@@ -275,3 +275,12 @@
     .ff-hero, .ff-auth-shell { background-image:image-set(url("/images/ffrt-bg-mobile-1080x1920.webp") type("image/webp"), url("/images/ffrt-bg-mobile-1080x1920.jpg") type("image/jpeg")); }
   }
 }
+
+/* Demo screenshot gallery (landing page) */
+.ff-demo { border-top: 1px solid #e2e3d9; }
+.ff-demo-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; align-items: start; margin-top: 36px; }
+.ff-demo-item { margin: 0; padding: 12px; border: 1px solid #e2e3d9; border-radius: 14px; background: #fbfaf5; }
+.ff-demo-item img { display: block; width: 100%; height: auto; border-radius: 9px; background: #eeefe6; }
+.ff-demo-item figcaption { margin: 12px 4px 4px; color: #69756b; font-size: 13.5px; line-height: 1.6; }
+@media (max-width: 1024px) { .ff-demo-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 760px) { .ff-demo-grid { grid-template-columns: 1fr; gap: 12px; margin-top: 26px; } }
