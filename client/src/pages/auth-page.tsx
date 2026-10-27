@@ -1,5 +1,6 @@
 import { useAuth } from "@/hooks/use-auth";
-import { Redirect } from "wouter";
+import { Link, Redirect, useLocation } from "wouter";
+import { useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -9,9 +10,10 @@ import { Button } from "@/components/ui/button";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
-import { FileText, Loader2, Search, Users } from "lucide-react";
-import { queryClient } from "@/lib/queryClient";
+import { ArrowLeft, Loader2 } from "lucide-react";
+import { queryClient, resetCacheForSession } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
+import "../styles/public-pages.css";
 
 const loginSchema = z.object({
   username: z.string().min(1, "Username is required"),
@@ -37,6 +39,11 @@ const DEVELOPMENT_MODE = import.meta.env.DEV;
 export default function AuthPage() {
   const { user, isLoading, loginMutation, registerMutation } = useAuth();
   const { toast } = useToast();
+  const [, setLocation] = useLocation();
+  const initialTab = typeof window !== "undefined" && (window.location.pathname === "/sign-up" || new URLSearchParams(window.location.search).get("tab") === "register")
+    ? "register"
+    : "login";
+  const [activeTab, setActiveTab] = useState<"login" | "register">(initialTab);
   
   const loginForm = useForm<LoginFormValues>({
     resolver: zodResolver(loginSchema),
@@ -83,7 +90,7 @@ export default function AuthPage() {
       const user = await response.json();
       
       // Update the cache
-      queryClient.setQueryData(["/api/user"], user);
+      resetCacheForSession(queryClient, user);
       
       // Redirect to home (handled by our component)
     } catch (error: any) {
@@ -101,227 +108,84 @@ export default function AuthPage() {
     return <Redirect to="/" />;
   }
   
+  const changeTab = (value: string) => {
+    const next = value === "register" ? "register" : "login";
+    setActiveTab(next);
+    setLocation(next === "register" ? "/sign-up" : "/sign-in");
+  };
+
   return (
-    <div className="min-h-screen flex items-center justify-center bg-neutral-100 p-4">
-      <div className="flex flex-col md:flex-row w-full max-w-6xl bg-card rounded-lg shadow-md overflow-hidden">
-        {/* Left side - Forms */}
-        <div className="w-full md:w-1/2 p-6">
-          <div className="flex items-center mb-6">
-            <img
-              src="/logo.jpeg"
-              alt="Farm Friend Logo"
-              className="h-12 w-12 object-contain bg-white rounded-lg border-2 border-neutral-200 p-1.5 mr-3"
-            />
-            <h1 className="font-serif text-2xl font-bold text-primary">Farm Friend Roundtable</h1>
-          </div>
-          
-          <Tabs defaultValue="login" className="w-full">
-            <TabsList className="grid w-full grid-cols-2 mb-6">
-              <TabsTrigger value="login">Login</TabsTrigger>
-              <TabsTrigger value="register">Register</TabsTrigger>
-            </TabsList>
-            
-            <TabsContent value="login">
-              <Card>
-                <CardHeader>
-                  <CardTitle>Login to your account</CardTitle>
-                  <CardDescription>
-                    Enter your credentials to access your Farm Friend Roundtable.
-                  </CardDescription>
-                </CardHeader>
-                <CardContent>
-                  <Form {...loginForm}>
-                    <form id="login-form" onSubmit={loginForm.handleSubmit(onLoginSubmit)} className="space-y-4">
-                      <FormField
-                        control={loginForm.control}
-                        name="username"
-                        render={({ field }) => (
-                          <FormItem>
-                            <FormLabel>Username</FormLabel>
-                            <FormControl>
-                              <Input autoComplete="username" placeholder="username" {...field} />
-                            </FormControl>
-                            <FormMessage />
-                          </FormItem>
-                        )}
-                      />
-                      <FormField
-                        control={loginForm.control}
-                        name="password"
-                        render={({ field }) => (
-                          <FormItem>
-                            <FormLabel>Password</FormLabel>
-                            <FormControl>
-                              <Input autoComplete="current-password" type="password" placeholder="••••••••" {...field} />
-                            </FormControl>
-                            <FormMessage />
-                          </FormItem>
-                        )}
-                      />
-                    </form>
-                  </Form>
-                </CardContent>
-                <CardFooter>
-                  <Button 
-                    type="submit" 
-                    form="login-form" 
-                    className="w-full" 
-                    disabled={loginMutation.isPending}
-                  >
-                    {loginMutation.isPending ? (
-                      <>
-                        <Loader2 className="mr-2 h-4 w-4 animate-spin motion-reduce:animate-none" />
-                        Logging in...
-                      </>
-                    ) : (
-                      "Login"
-                    )}
-                  </Button>
-                </CardFooter>
-                {DEVELOPMENT_MODE && (
-                  <div className="mt-4 pt-4 border-t border-gray-200">
-                    <Button 
-                      type="button" 
-                      variant="outline"
-                      className="w-full bg-green-50 hover:bg-green-100 border-green-200 dark:bg-green-950 dark:hover:bg-green-900 dark:border-green-800"
-                      onClick={handleDevLogin}
-                    >
-                      Quick Development Login
-                    </Button>
-                    <p className="text-xs text-center mt-2 text-gray-500">
-                      For development purposes only
-                    </p>
-                  </div>
-                )}
-              </Card>
-            </TabsContent>
-            
-            <TabsContent value="register">
-              <Card>
-                <CardHeader>
-                  <CardTitle>Create an account</CardTitle>
-                  <CardDescription>
-                    Join Farm Friend Roundtable to access AI-powered agricultural expertise.
-                  </CardDescription>
-                </CardHeader>
-                <CardContent>
-                  <Form {...registerForm}>
-                    <form id="register-form" onSubmit={registerForm.handleSubmit(onRegisterSubmit)} className="space-y-4">
-                      <FormField
-                        control={registerForm.control}
-                        name="username"
-                        render={({ field }) => (
-                          <FormItem>
-                            <FormLabel>Username</FormLabel>
-                            <FormControl>
-                              <Input autoComplete="username" placeholder="username" {...field} />
-                            </FormControl>
-                            <FormMessage />
-                          </FormItem>
-                        )}
-                      />
-                      <FormField
-                        control={registerForm.control}
-                        name="email"
-                        render={({ field }) => (
-                          <FormItem>
-                            <FormLabel>Email</FormLabel>
-                            <FormControl>
-                              <Input autoComplete="email" type="email" placeholder="email@example.com" {...field} />
-                            </FormControl>
-                            <FormMessage />
-                          </FormItem>
-                        )}
-                      />
-                      <FormField
-                        control={registerForm.control}
-                        name="password"
-                        render={({ field }) => (
-                          <FormItem>
-                            <FormLabel>Password</FormLabel>
-                            <FormControl>
-                              <Input autoComplete="new-password" type="password" placeholder="••••••••" {...field} />
-                            </FormControl>
-                            <FormMessage />
-                          </FormItem>
-                        )}
-                      />
-                      <FormField
-                        control={registerForm.control}
-                        name="confirmPassword"
-                        render={({ field }) => (
-                          <FormItem>
-                            <FormLabel>Confirm Password</FormLabel>
-                            <FormControl>
-                              <Input autoComplete="new-password" type="password" placeholder="••••••••" {...field} />
-                            </FormControl>
-                            <FormMessage />
-                          </FormItem>
-                        )}
-                      />
-                    </form>
-                  </Form>
-                </CardContent>
-                <CardFooter>
-                  <Button 
-                    type="submit" 
-                    form="register-form" 
-                    className="w-full" 
-                    disabled={registerMutation.isPending}
-                  >
-                    {registerMutation.isPending ? (
-                      <>
-                        <Loader2 className="mr-2 h-4 w-4 animate-spin motion-reduce:animate-none" />
-                        Creating account...
-                      </>
-                    ) : (
-                      "Register"
-                    )}
-                  </Button>
-                </CardFooter>
-              </Card>
-            </TabsContent>
-          </Tabs>
-        </div>
-        
-        {/* Right side - Hero section */}
-        <div className="w-full md:w-1/2 bg-gradient-to-br from-farm-blue to-farm-dark-green text-white p-8 flex flex-col justify-center">
-          <h2 className="text-3xl font-serif font-bold mb-4">Expert Agricultural Advice at Your Fingertips</h2>
-          <p className="mb-6">Join Farm Friend Roundtable and connect with AI experts in soil science, crop management, irrigation, pest control, and more.</p>
-          
-          <div className="space-y-4">
-            <div className="flex items-start">
-              <div className="bg-white bg-opacity-20 p-2 rounded-full mr-4">
-                <Users className="h-5 w-5" aria-hidden="true" />
-              </div>
-              <div>
-                <h3 className="font-medium text-lg">Interactive Roundtable</h3>
-                <p className="text-sm opacity-90">Seat up to 3 AI experts free, or up to 8 on Pro, from 20 farm specialties or your own custom experts.</p>
-              </div>
-            </div>
-            
-            <div className="flex items-start">
-              <div className="bg-white bg-opacity-20 p-2 rounded-full mr-4">
-                <Search className="h-5 w-5" aria-hidden="true" />
-              </div>
-              <div>
-                <h3 className="font-medium text-lg">Research & Insights</h3>
-                <p className="text-sm opacity-90">Get real-time research and summaries of key agricultural insights.</p>
-              </div>
-            </div>
-            
-            <div className="flex items-start">
-              <div className="bg-white bg-opacity-20 p-2 rounded-full mr-4">
-                <FileText className="h-5 w-5" aria-hidden="true" />
-              </div>
-              <div>
-                <h3 className="font-medium text-lg">File Generation</h3>
-                <p className="text-sm opacity-90">Create custom reports, schedules, and scripts based on your needs.</p>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
+    <main className="ff-public ff-auth-shell">
+      <section className="ff-auth-card" aria-label="Farm Friend account access">
+        <Link href="/" className="ff-auth-brand">
+          <img src="/logo.jpeg" alt="" />
+          <span>Farm Friend Roundtable</span>
+        </Link>
+        <h1 className="ff-auth-heading">{activeTab === "login" ? "Welcome back." : "Make room at the table."}</h1>
+        <p className="ff-auth-subhead">{activeTab === "login" ? "Sign in to pick up where your farm left off." : "Create an account to bring a panel of farm expertise to your next question."}</p>
+        <Tabs value={activeTab} onValueChange={changeTab} className="w-full">
+          <TabsList className="grid w-full grid-cols-2 mb-5">
+            <TabsTrigger value="login">Sign in</TabsTrigger>
+            <TabsTrigger value="register">Create account</TabsTrigger>
+          </TabsList>
+          <TabsContent value="login">
+            <Card className="auth-form-card">
+              <CardHeader><CardTitle>Sign in to your account</CardTitle><CardDescription>Enter your username and password to continue.</CardDescription></CardHeader>
+              <CardContent>
+                <Form {...loginForm}>
+                  <form id="login-form" onSubmit={loginForm.handleSubmit(onLoginSubmit)} className="space-y-4">
+                    <FormField control={loginForm.control} name="username" render={({ field }) => (
+                      <FormItem><FormLabel>Username</FormLabel><FormControl><Input autoComplete="username" placeholder="Your username" {...field} /></FormControl><FormMessage /></FormItem>
+                    )} />
+                    <FormField control={loginForm.control} name="password" render={({ field }) => (
+                      <FormItem><FormLabel>Password</FormLabel><FormControl><Input autoComplete="current-password" type="password" placeholder="Your password" {...field} /></FormControl><FormMessage /></FormItem>
+                    )} />
+                  </form>
+                </Form>
+              </CardContent>
+              <CardFooter>
+                <Button type="submit" form="login-form" className="w-full" disabled={loginMutation.isPending}>
+                  {loginMutation.isPending ? <><Loader2 className="mr-2 h-4 w-4 animate-spin motion-reduce:animate-none" />Signing in…</> : "Sign in"}
+                </Button>
+              </CardFooter>
+              {DEVELOPMENT_MODE && <div className="mt-4 border-t border-[#e2e5dc] pt-4">
+                <Button type="button" variant="outline" className="w-full" onClick={handleDevLogin}>Quick development login</Button>
+                <p className="mt-2 text-center text-xs text-muted-foreground">Available in development only.</p>
+              </div>}
+            </Card>
+          </TabsContent>
+          <TabsContent value="register">
+            <Card className="auth-form-card">
+              <CardHeader><CardTitle>Create your account</CardTitle><CardDescription>A better-informed next step starts with a good question.</CardDescription></CardHeader>
+              <CardContent>
+                <Form {...registerForm}>
+                  <form id="register-form" onSubmit={registerForm.handleSubmit(onRegisterSubmit)} className="space-y-3">
+                    <FormField control={registerForm.control} name="username" render={({ field }) => (
+                      <FormItem><FormLabel>Username</FormLabel><FormControl><Input autoComplete="username" placeholder="Choose a username" {...field} /></FormControl><FormMessage /></FormItem>
+                    )} />
+                    <FormField control={registerForm.control} name="email" render={({ field }) => (
+                      <FormItem><FormLabel>Email</FormLabel><FormControl><Input autoComplete="email" type="email" placeholder="you@example.com" {...field} /></FormControl><FormMessage /></FormItem>
+                    )} />
+                    <FormField control={registerForm.control} name="password" render={({ field }) => (
+                      <FormItem><FormLabel>Password</FormLabel><FormControl><Input autoComplete="new-password" type="password" placeholder="At least 6 characters" {...field} /></FormControl><FormMessage /></FormItem>
+                    )} />
+                    <FormField control={registerForm.control} name="confirmPassword" render={({ field }) => (
+                      <FormItem><FormLabel>Confirm password</FormLabel><FormControl><Input autoComplete="new-password" type="password" placeholder="Enter your password again" {...field} /></FormControl><FormMessage /></FormItem>
+                    )} />
+                  </form>
+                </Form>
+              </CardContent>
+              <CardFooter>
+                <Button type="submit" form="register-form" className="w-full" disabled={registerMutation.isPending}>
+                  {registerMutation.isPending ? <><Loader2 className="mr-2 h-4 w-4 animate-spin motion-reduce:animate-none" />Creating account…</> : "Create account"}
+                </Button>
+              </CardFooter>
+            </Card>
+          </TabsContent>
+        </Tabs>
+        <Link className="ff-auth-back" href="/"><ArrowLeft size={14} className="mr-2" aria-hidden="true" />Back to Farm Friend</Link>
+      </section>
+      <div className="ff-auth-tagline">A thoughtful second opinion for the work ahead.</div>
+    </main>
   );
 }

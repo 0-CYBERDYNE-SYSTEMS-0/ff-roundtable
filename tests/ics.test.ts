@@ -65,6 +65,12 @@ vi.mock("../server/ai", () => ({
 import { registerRoutes } from "../server/routes";
 import { storage } from "../server/storage";
 
+// Injectable clock: fixtures use spring-2026 dates, so "today" is pinned before them
+// (future plans roll past dates forward; see validator-gate-c-r5 tests).
+beforeEach(() => { vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(new Date("2026-01-15T12:00:00Z")); });
+import { afterEach as _afterEachClock } from "vitest";
+_afterEachClock(() => { vi.useRealTimers(); });
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 function makeMessage(artifacts: Artifact[]): Message {
@@ -868,6 +874,85 @@ describe("GET /api/protected/conversations/:id/export.ics", () => {
     });
   });
 
+  it("calendar preview empty state carries a message the sidebar recognizes", async () => {
+    const agent = request.agent(app);
+    await registerAndLogin(agent, "calEmpty");
+    const convo = await createConversation(agent, "No Plan Preview");
+    const res = await agent.get(`/api/protected/conversations/${convo.id}/calendar?start=2026-10-26`);
+    // 200 empty state (not 422) so the sidebar preview doesn't log console errors.
+    expect(res.status).toBe(200);
+    expect(res.body.empty).toBe(true);
+    expect(res.body.events).toEqual([]);
+    expect(res.body.message).toMatch(/No schedulable items/);
+  });
+
+  it("uses the first explicit event date instead of a stale saved calendar anchor", async () => {
+    const agent = request.agent(app);
+    await registerAndLogin(agent, "calExplicitYear");
+    const convo = await createConversation(agent, "Tomato calendar");
+
+    await storage.createMessage({
+      conversationId: convo.id,
+      content: "",
+      role: "expert",
+      artifacts: [
+        { type: "calendar", title: "Older calendar", content: JSON.stringify({ anchor: "2027-05-07", events: [] }) },
+        {
+          type: "table",
+          title: "Tomato plan",
+          content: "| Date | Task |\n|---|---|\n| 2026-03-26 | Start tomato seeds |\n| 2026-04-02 | Harden seedlings |",
+        },
+      ],
+    } as any);
+
+    const res = await agent.get(`/api/protected/conversations/${convo.id}/calendar`);
+    expect(res.status).toBe(200);
+    expect(res.body.autoAnchor).toBe("2026-03-26");
+    expect(res.body.anchor).toBe("2026-03-26");
+    expect(res.body.events[0].startDate).toBe("2026-03-26");
+    expect(res.body.planKey).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it("anchors to the stated frost date, honors note offsets, compacts week labels, and keeps Week 1 equal to the first event", async () => {
+    vi.setSystemTime(new Date("2027-06-01T12:00:00Z"));
+    const agent = request.agent(app);
+    await registerAndLogin(agent, "calFrostNotes");
+    const convo = await createConversation(agent, "Frost anchored plan");
+
+    await storage.createMessage({
+      conversationId: convo.id,
+      content: "The last frost date is April 15, 2027.",
+      role: "expert",
+      artifacts: [{
+        type: "table",
+        title: "Planting plan",
+        content: [
+          "| Week | Task | Notes |",
+          "|---|---|---|",
+          "| Week 1 | Prepare tomato beds | Six weeks before last frost |",
+          "| Week 3 | Transplant tomatoes | April 29, 2027 |",
+          "| Week 5 | Sow beans | May 13 |",
+          "| Week 8 | Transplant tomatoes | April 29, 2027 |",
+        ].join("\n"),
+      }],
+    } as any);
+
+    const res = await agent.get(`/api/protected/conversations/${convo.id}/calendar`);
+    expect(res.status).toBe(200);
+    expect(res.body.anchor).toBe("2027-04-15");
+    expect(res.body.autoAnchor).toBe("2027-03-04");
+    expect(res.body.events.map((event: any) => event.startDate)).toEqual([
+      "2027-03-04", "2027-04-29", "2027-05-13",
+    ]);
+    expect(res.body.events.map((event: any) => event.summary)).toEqual([
+      "Prepare tomato beds — Week 1",
+      "Transplant tomatoes — Week 2",
+      "Sow beans — Week 3",
+    ]);
+    expect(res.body.events.filter((event: any) => event.summary.startsWith("Transplant tomatoes"))).toHaveLength(1);
+    expect(res.body.autoAnchor).toBe(res.body.events[0].startDate);
+  });
+
   it("returns 200 text/calendar starting with BEGIN:VCALENDAR for a table artifact", async () => {
     const agent = request.agent(app);
     await registerAndLogin(agent, "icsTable");
@@ -966,7 +1051,7 @@ describe("GET /api/protected/conversations/:id/export.ics", () => {
     }
   });
 
-  it("defaults the anchor to the next Monday (strictly after today)", async () => {
+  it("defaults Week 1 to today when the plan states no anchor (gate C r5)", async () => {
     const agent = request.agent(app);
     await registerAndLogin(agent, "icsMonday");
     const convo = await createConversation(agent, "Next Monday");
@@ -978,7 +1063,7 @@ describe("GET /api/protected/conversations/:id/export.ics", () => {
       artifacts: [tableArtifact()],
     } as any);
 
-    const expectedAnchor = nextMondayFrom(new Date());
+    const expectedAnchor = new Date().toISOString().slice(0, 10);
     const res = await agent.get(`/api/protected/conversations/${convo.id}/export.ics`);
     expect(res.status).toBe(200);
     expect(res.text).toContain(`DTSTART;VALUE=DATE:${expectedAnchor.replace(/-/g, "")}\r\n`);

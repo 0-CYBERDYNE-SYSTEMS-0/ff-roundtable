@@ -1,0 +1,1 @@
+- [Free trial product](free-plan-product.md) — Free signup enters the app with existing tier limits and strict abuse controls; Pro checkout stays unchanged.

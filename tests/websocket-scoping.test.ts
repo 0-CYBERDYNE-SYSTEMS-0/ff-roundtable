@@ -23,6 +23,12 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
+vi.mock("../server/free-capacity", () => ({
+  assertFreeCapacity: vi.fn().mockResolvedValue(undefined),
+  reserveFreeCall: vi.fn().mockResolvedValue(undefined),
+  settleFreeCall: vi.fn().mockResolvedValue(undefined),
+  FREE_CALL_RESERVATION_USD: 0.1,
+}));
 import express from "express";
 import type { Server } from "http";
 import WebSocket from "ws";
@@ -156,7 +162,7 @@ async function createConversation(baseUrl: string, cookie: string, title: string
 async function addExpert(baseUrl: string, cookie: string, conversationId: number) {
   const res = await api(baseUrl, "POST", `/api/protected/conversations/${conversationId}/experts`, {
     cookie,
-    body: { name: "Dr. Stream", role: "Agronomist", model: "test/model:free" },
+    body: { name: "Dr. Stream", role: "Agronomist", model: "anthropic/claude-haiku-5.5" },
   });
   expect(res.status).toBe(201);
   return res.json();
@@ -259,6 +265,27 @@ describe("WebSocket scoping (G3)", () => {
     await waitFor(300);
     (server as any).closeAllConnections?.();
     await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  it("leaves non-/ws upgrades (Vite HMR) alone instead of answering 400", async () => {
+    // A sibling upgrade listener (like Vite HMR) must get the socket untouched.
+    let sawOther = false;
+    const other = (req: any, socket: any) => {
+      if (String(req.url).startsWith("/vite-hmr")) { sawOther = true; socket.destroy(); }
+    };
+    server.on("upgrade", other);
+    try {
+      const outcome = await new Promise<string>((resolve) => {
+        const ws = new WebSocket(wsUrl.replace("/ws", "/vite-hmr?token=x"), "vite-hmr");
+        ws.on("unexpected-response", (_req, res) => resolve(`http ${res.statusCode}`));
+        ws.on("error", () => resolve("error"));
+        ws.on("close", () => resolve("closed"));
+      });
+      expect(outcome).not.toBe("http 400");
+      expect(sawOther).toBe(true);
+    } finally {
+      server.off("upgrade", other);
+    }
   });
 
   it("closes unauthenticated upgrades with 4401 and sends no messages", async () => {
@@ -629,7 +656,7 @@ describe("WebSocket scoping (G3)", () => {
     await addExpert(baseUrl, cookieA, convo.id);
     const modRes = await api(baseUrl, "POST", `/api/protected/conversations/${convo.id}/experts`, {
       cookie: cookieA,
-      body: { name: "Chair", role: "Moderator", model: "test/model:free" },
+      body: { name: "Chair", role: "Moderator", model: "anthropic/claude-haiku-5.5" },
     });
     expect(modRes.status).toBe(201);
 

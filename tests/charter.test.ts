@@ -20,10 +20,17 @@
  * exercised and their prompt payloads inspected.
  */
 
+import { calendarOfRecord } from "../shared/inline-calendar";
 import { afterEach, describe, it, expect, beforeAll, beforeEach, vi } from "vitest";
 import request from "supertest";
 import express from "express";
 import type { Express } from "express";
+vi.mock("../server/free-capacity", () => ({
+  assertFreeCapacity: vi.fn().mockResolvedValue(undefined),
+  reserveFreeCall: vi.fn().mockResolvedValue(undefined),
+  settleFreeCall: vi.fn().mockResolvedValue(undefined),
+  FREE_CALL_RESERVATION_USD: 0.1,
+}));
 
 // ── Force MemStorage BEFORE any server imports ──
 process.env.DATABASE_URL = "";
@@ -47,6 +54,7 @@ vi.mock("../server/orchestrator", () => ({
     disableAutonomous() {}
   },
   getConversationState: vi.fn().mockReturnValue(null),
+  getFarmerFileIntent: vi.fn().mockReturnValue(null),
 }));
 
 // ── Mock the provider seam (real ai.ts stays live; calls are captured here) ──
@@ -66,6 +74,8 @@ import { registerRoutes } from "../server/routes";
 import { storage, MemStorage, PostgresStorage } from "../server/storage";
 import {
   generateSystemPrompt,
+  buildFarmContext,
+  extractFarmerLocation,
   getModeratorNextSpeakerSuggestion,
   generateClosingSynthesis,
   buildClosingSynthesisPrompt,
@@ -139,6 +149,32 @@ describe("generateSystemPrompt charter injection", () => {
     expect(prompt).toContain("🌾 FARMER CONTEXT");
     // Charter is a governing block: it must precede the per-farm context.
     expect(prompt.indexOf("📜 COUNCIL CHARTER")).toBeLessThan(prompt.indexOf("🌾 FARMER CONTEXT"));
+  });
+
+  it("uses the farmer's stated location or farm profile in expert context", () => {
+    expect(extractFarmerLocation(["We farm in Eugene, Oregon."])).toBe("Eugene, Oregon");
+    expect(buildFarmContext(undefined, ["We farm in Eugene, Oregon."])).toContain("Location: Eugene, Oregon");
+    expect(buildFarmContext({ location: "Corvallis, Oregon" } as any, [])).toContain("Location: Corvallis, Oregon");
+
+    const prompt = generateSystemPrompt(expert, roles, buildFarmContext(undefined, ["We farm in Eugene, Oregon."]));
+    expect(prompt).toContain("Location: Eugene, Oregon");
+    expect(prompt).toContain("Never substitute an unrelated example location or generic USDA zone");
+  });
+
+  it("passes message and profile locations through both response paths", async () => {
+    mockProviderChat.mockReset().mockResolvedValue({ message: { role: "assistant", content: "Localized answer." } });
+    mockProviderChatStream.mockReset().mockResolvedValue({ message: { role: "assistant", content: "Localized answer." } });
+    const conversation = await storage.createConversation({ userId: 1, title: "Location context" });
+    await storage.upsertFarmProfile(conversation.userId, { location: "Corvallis, Oregon" });
+    const locationExpert = createMockExpert(91, conversation.id, "Crop Expert", "Crop Specialist");
+
+    await getExpertResponseStream(locationExpert, [], "We farm in Eugene, Oregon.", [], [locationExpert.role], () => {});
+    const streamPrompt = mockProviderChatStream.mock.calls[0][0].find((message: any) => message.role === "system").content;
+    expect(streamPrompt).toContain("Location: Eugene, Oregon");
+
+    await getExpertResponse(locationExpert, [], "Use my saved farm location.", [], [locationExpert.role]);
+    const nonStreamPrompt = mockProviderChat.mock.calls[0][0].find((message: any) => message.role === "system").content;
+    expect(nonStreamPrompt).toContain("Location: Corvallis, Oregon");
   });
 
   it("requires named cross-talk to reuse two concrete domain terms without repeating a recommendation", () => {
@@ -860,6 +896,21 @@ describe("generateClosingSynthesis charter awareness", () => {
     expect(prompt).toContain("Do not invent consensus.");
     expect(prompt).toContain("In Dissent, name each expert role from the ledger");
   });
+
+  it("pins closing-synthesis dates to the newest calendar in the conversation", () => {
+    const cal = (events: Array<{ summary: string; startDate: string }>) => ({ artifacts: [{ type: "calendar", content: JSON.stringify({ events }) }] });
+    const record = calendarOfRecord([
+      cal([{ summary: "Old", startDate: "2026-01-01" }]),
+      { artifacts: [] },
+      cal([{ summary: "Transplant", startDate: "2026-04-20" }, { summary: "Start seeds", startDate: "2026-02-15" }]),
+    ]);
+    expect(record).toBe("- 2026-02-15: Start seeds\n- 2026-04-20: Transplant");
+    const prompt = buildClosingSynthesisPrompt({ "Soil Scientist": null }, [], null, record);
+    expect(prompt).toContain("must match this list exactly");
+    expect(prompt).toContain("- 2026-02-15: Start seeds");
+    expect(buildClosingSynthesisPrompt({ "Soil Scientist": null })).not.toContain("calendar already shows");
+    expect(calendarOfRecord([{ artifacts: [{ type: "calendar", content: "not json" }] }])).toBe("");
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════
@@ -916,12 +967,14 @@ describe("PUT /api/protected/conversations/:id (charter + title)", () => {
     expect(res.status).toBe(200);
     expect(res.body.title).toBe("After");
     expect(res.body.charter ?? null).toBeNull();
-    expect(res.body.turnBudget).toBe(25);
+    expect(res.body.turnBudget).toBe(3);
   });
 
   it("accepts turn budgets, normalizes zero to null, and preserves omitted values", async () => {
     const agent = request.agent(app);
     await registerAndLogin(agent, "charterTurnBudgetUser");
+    const proUser = await storage.getUserByUsername("charterTurnBudgetUser");
+    await storage.updateUserStripeInfo(proUser!.id, { stripeCustomerId: null, tier: "pro", subscriptionStatus: "active" });
     const convo = await createConversation(agent);
 
     const set = await agent
@@ -976,12 +1029,14 @@ describe("PUT /api/protected/conversations/:id (charter + title)", () => {
     }
 
     const get = await agent.get(`/api/protected/conversations/${convo.id}`);
-    expect(get.body.turnBudget).toBe(25);
+    expect(get.body.turnBudget).toBe(3);
   });
 
   it("accepts both numeric turn-budget boundaries", async () => {
     const agent = request.agent(app);
     await registerAndLogin(agent, "charterTurnBudgetBoundsUser");
+    const proUser = await storage.getUserByUsername("charterTurnBudgetBoundsUser");
+    await storage.updateUserStripeInfo(proUser!.id, { stripeCustomerId: null, tier: "pro", subscriptionStatus: "active" });
     const convo = await createConversation(agent);
 
     const minimum = await agent
@@ -995,6 +1050,29 @@ describe("PUT /api/protected/conversations/:id (charter + title)", () => {
       .send({ turnBudget: 100 });
     expect(maximum.status).toBe(200);
     expect(maximum.body.turnBudget).toBe(100);
+  });
+
+  it("keeps Free runs short and denies over-quota messages before AI work", async () => {
+    mockProcessMessageTurnBased.mockResolvedValue(undefined);
+    const agent = request.agent(app);
+    await registerAndLogin(agent, "freeAdmissionUser");
+    const user = await storage.getUserByUsername("freeAdmissionUser");
+    const convo = await createConversation(agent);
+    expect(convo.turnBudget).toBe(3);
+    for (const turnBudget of [100, 0, null]) {
+      const updated = await agent.put(`/api/protected/conversations/${convo.id}`).send({ turnBudget });
+      expect(updated.status).toBe(200);
+      expect(updated.body.turnBudget).toBe(3);
+    }
+    for (let i = 0; i < 10; i++) {
+      const sent = await agent.post(`/api/protected/conversations/${convo.id}/messages`).send({ content: `Free farmer question ${i}` });
+      expect(sent.status).toBe(201);
+    }
+    const denied = await agent.post(`/api/protected/conversations/${convo.id}/messages`).send({ content: "The eleventh message" });
+    expect(denied.status).toBe(429);
+    expect(denied.body).toMatchObject({ code: "free_minute_limit", upgradeUrl: "/subscribe" });
+    expect((await storage.getMonthlyUsage(user!.id, `free:roundtables:${new Date().toISOString().slice(0, 7)}`)).messageCount).toBe(1);
+    expect((await agent.get("/api/user/tier")).body.usage.messages).toBe(1);
   });
 
   it("sets the charter and returns the updated conversation", async () => {

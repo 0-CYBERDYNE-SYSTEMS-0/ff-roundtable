@@ -1,9 +1,14 @@
-import { checkHouseKeyCall, currentUsagePeriod, UsageCapError, BUDGET_FALLBACK_MODEL } from "./usage-caps";
+import { checkHouseKeyCall, currentUsagePeriod, UsageCapError, BUDGET_FALLBACK_MODEL, FREE_MODEL_FALLBACKS, FREE_EXPERT_MAX_TOKENS, FREE_DELIVERABLE_MAX_TOKENS, freeModelChain } from "./usage-caps";
 import type { AIMessage, AIModelResponse } from './ai';
 import { randomUUID } from 'crypto';
+import { reserveFreeCall, settleFreeCall, FREE_CALL_RESERVATION_USD } from "./free-capacity";
+import { FREE_ALLOWED_MODELS } from "@shared/free-plan";
 
 const AI_REQUEST_TIMEOUT_MS = 120_000;
+/** Reasoning models need room to finish before trying the included fallback. */
+const FREE_REQUEST_TIMEOUT_MS = 120_000;
 const OUTPUT_LIMIT_ERROR = "Response reached the output limit. Please ask for a shorter response or split the request into smaller parts.";
+export const FREE_TRUNCATION_NOTE = "\n\n[Response shortened at the Free output limit. Ask a shorter follow-up to continue.]";
 // Output ceiling per call. 1024 truncated File Creator SOPs mid-document;
 // 8192 let one runaway answer cost 8x a normal turn. 4096 (~3,000 words)
 // fits the longest documents we generate. Override with OPENROUTER_MAX_OUTPUT_TOKENS.
@@ -12,14 +17,24 @@ export function maxOutputTokens(): number {
   const parsed = Number(process.env.OPENROUTER_MAX_OUTPUT_TOKENS);
   return Number.isInteger(parsed) && parsed >= 256 && parsed <= 32768 ? parsed : DEFAULT_MAX_OUTPUT_TOKENS;
 }
-// Free OpenRouter models come and go; when a :free model is requested,
-// OpenRouter's `models` array lets it fall through to these (verified live 2026-10-16).
-export const FREE_MODEL_FALLBACKS = [
-  "dots-studio/dots-3-note-preview:free",
-];
+export { FREE_MODEL_FALLBACKS };
 export function modelRouting(model: string): { model: string; models?: string[] } {
   if (!model.endsWith(":free")) return { model };
   return { model, models: [model, ...FREE_MODEL_FALLBACKS.filter(m => m !== model)].slice(0, 3) };
+}
+
+/** Thrown by a single Free attempt that should move on to the next free model. */
+export class FreeModelRetryError extends Error {
+  constructor(message: string, readonly cause?: unknown) {
+    super(message);
+    this.name = "FreeModelRetryError";
+  }
+}
+const FREE_ALL_FAILED = "The free models are busy right now. Please try again in a minute.";
+/** Visible text after dropping whitespace and a bare STANCE line; empty means nothing for the farmer. */
+export function hasVisibleText(content: unknown): boolean {
+  if (typeof content !== "string") return false;
+  return content.replace(/^\s*\**\s*STANCE\s*:.*$/gim, "").trim().length > 0;
 }
 const SPEND_CAP_PER_REQUEST_USD = 0.4;
 
@@ -39,6 +54,10 @@ type OpenRouterAttempt = {
   houseKeyUserId?: number;
   usagePeriod?: string;
   providerPriceLimit?: { prompt: number; completion: number };
+  freeHouseKey?: boolean;
+  freeReasoningEffort?: "low" | "medium";
+  freeReservation?: boolean;
+  estimatedInputTokens?: number;
   settled: boolean;
 };
 
@@ -55,6 +74,9 @@ export type OpenRouterUsageSnapshot = {
     elapsedMs: number;
     result: "success" | "failed";
     costUsd: number | null;
+    promptTokens?: number;
+    completionTokens?: number;
+    reasoningTokens?: number;
     errorCode?: number;
   }>;
 };
@@ -75,6 +97,7 @@ function numericCost(usage: any): number | undefined {
 const UNSUPPORTED_IMAGE_ERROR = /(?:image|vision|modalit|multimodal)[\s\S]{0,100}(?:not\s+support|unsupport\w*|reject\w*|invalid|disabled|not\s+allowed|can(?:not|'t)|unable)|(?:not\s+support|unsupport\w*|reject\w*|invalid|disabled|not\s+allowed|can(?:not|'t)|unable)[\s\S]{0,100}(?:image|vision|modalit|multimodal)|support\s+(?:[\w-]+\s+){0,2}(?:image|vision|multimodal|modalit)/i;
 
 function safeOpenRouterError(status: number | undefined, providerDetail?: unknown): Error {
+  if (status === 402) console.error("[OPENROUTER_CREDITS_UNAVAILABLE] HTTP 402: provider account has insufficient credits.");
   let detail = "";
   try {
     detail = typeof providerDetail === "string" ? providerDetail : JSON.stringify(providerDetail ?? "");
@@ -88,7 +111,7 @@ function safeOpenRouterError(status: number | undefined, providerDetail?: unknow
     : status === 401
     ? "OpenRouter authentication failed. Contact the account operator."
     : status === 402
-      ? "The OpenRouter account needs credits. Contact the account operator."
+      ? "AI is temporarily unavailable because the provider account has insufficient credits. Please try again later."
       : status === 429
         ? "OpenRouter is temporarily rate-limited. Try again later."
         : `OpenRouter could not complete this request${status === undefined ? "" : ` (${status})`}. Retry or continue with available work.`;
@@ -98,7 +121,22 @@ function safeOpenRouterError(status: number | undefined, providerDetail?: unknow
 // ─── Provider Interface ───────────────────────────────────────────────────────
 
 /** Per-call options. maxTokens overrides the default output cap (e.g. expert replies). */
-export type ChatOptions = { maxTokens?: number };
+export type ChatOptions = {
+  maxTokens?: number;
+  purpose?: "auxiliary";
+  /** Structured / synthesis output (Moderator): Free routes to FREE_CAPABLE_MODEL first. */
+  capable?: boolean;
+  /** Internal: exact free model for this attempt (set by the Free retry loop). */
+  freeModelOverride?: string;
+  /** Expert turn that builds a deliverable (chart/table/HTML/code/plan): Free gets FREE_DELIVERABLE_MAX_TOKENS. */
+  deliverable?: boolean;
+};
+
+function requireAIUser(userId?: number): asserts userId is number {
+  if (!Number.isInteger(userId) || !userId || userId < 1) {
+    throw new UsageCapError({ status: 401, code: "ai_user_required", message: "Sign in before using AI." });
+  }
+}
 
 export interface AIProvider {
   chat(messages: AIMessage[], model: string, userId?: number, webSearch?: boolean, options?: ChatOptions): Promise<AIModelResponse>;
@@ -142,6 +180,7 @@ export class OpenRouterProvider implements AIProvider {
       reservedUsd: 0,
       maxTokens,
       settled: false,
+      estimatedInputTokens: Math.max(1, Buffer.byteLength(JSON.stringify(messages), "utf8") * 2 + 1024),
     };
     if (this.spendCapUsd === null) return attempt;
 
@@ -159,15 +198,18 @@ export class OpenRouterProvider implements AIProvider {
     return attempt;
   }
 
-  private settleAttempt(
+  private async settleAttempt(
     attempt: OpenRouterAttempt,
     result: "success" | "failed",
     usage?: unknown,
     metadata: { generationId?: string; responseModel?: string; provider?: string; errorCode?: number } = {},
-  ): void {
+  ): Promise<void> {
     if (attempt.settled) return;
     attempt.settled = true;
     const costUsd = numericCost(usage);
+    if (attempt.freeReservation) {
+      await settleFreeCall(attempt.id, result, usage, metadata);
+    }
     if (attempt.houseKeyUserId && attempt.usagePeriod && costUsd) {
       const { houseKeyUserId, usagePeriod } = attempt;
       void import("./storage")
@@ -178,7 +220,7 @@ export class OpenRouterProvider implements AIProvider {
       this.reservedUsd = Math.max(0, this.reservedUsd - attempt.reservedUsd);
       // When the provider omits cost, conservatively consume the reservation
       // so later calls cannot turn missing telemetry into unbounded spend.
-      this.spentUsd += costUsd ?? attempt.reservedUsd;
+      this.spentUsd += costUsd ?? (attempt.freeReservation && result === "failed" ? 0 : attempt.reservedUsd);
     } else if (costUsd !== undefined) {
       this.spentUsd += costUsd;
     }
@@ -191,6 +233,9 @@ export class OpenRouterProvider implements AIProvider {
       elapsedMs: Date.now() - attempt.startedAt,
       result,
       costUsd: costUsd ?? null,
+      promptTokens: (usage as any)?.prompt_tokens,
+      completionTokens: (usage as any)?.completion_tokens,
+      reasoningTokens: (usage as any)?.completion_tokens_details?.reasoning_tokens,
       ...(metadata.errorCode === undefined ? {} : { errorCode: metadata.errorCode }),
     };
     this.attempts.push(record);
@@ -218,13 +263,38 @@ export class OpenRouterProvider implements AIProvider {
   /**
    * Resolve the key for a call and enforce pricing caps on house-key calls
    * (server/usage-caps.ts): tier gate, Pro model allowlist, monthly budget.
-   * BYOK calls are never capped and never counted.
+   * Paid-plan BYOK calls are never capped or counted; Free uses house models.
    */
-  private async authorizeCall(attempt: OpenRouterAttempt, model: string, userId?: number): Promise<{ key: string; model: string }> {
+  private async authorizeCall(attempt: OpenRouterAttempt, model: string, userId?: number, options: ChatOptions = {}): Promise<{ key: string; model: string }> {
+    requireAIUser(userId);
     const { key, byok } = await this.resolveKey(userId);
-    if (byok || !userId) return { key, model };
     const { storage } = await import("./storage");
     const user = await storage.getUser(userId);
+    if (!user) throw new UsageCapError({ status: 401, code: "ai_user_required", message: "Sign in before using AI." });
+    if ((user?.tier || "free") === "free") {
+      const freeKey = process.env.OPENROUTER_API_KEY;
+      if (!freeKey) throw new Error("OpenRouter API key not provided");
+      const freeModel = options.freeModelOverride
+        ?? freeModelChain(model, options.capable || options.purpose === "auxiliary")[0];
+      if (!FREE_ALLOWED_MODELS.includes(freeModel)) {
+        throw new UsageCapError({ status: 402, code: "model_not_in_free_allowlist", message: "Choose an included Free model.", upgradeUrl: "/subscribe" });
+      }
+      attempt.model = freeModel;
+      attempt.maxTokens = options.purpose === "auxiliary" || options.capable ? 4000 : options.deliverable ? FREE_DELIVERABLE_MAX_TOKENS : FREE_EXPERT_MAX_TOKENS;
+      attempt.freeReasoningEffort = options.purpose === "auxiliary" || options.capable ? "medium" : "low";
+      // Reserve before dispatch, bounding both input and output price. Never
+      // let a provider's route change bypass the daily USD ceiling.
+      const ceiling = FREE_CALL_RESERVATION_USD * 0.45 * 1_000_000;
+      attempt.providerPriceLimit = {
+        prompt: ceiling / attempt.estimatedInputTokens!,
+        completion: ceiling / attempt.maxTokens,
+      };
+      await reserveFreeCall(attempt.id, userId, freeModel);
+      attempt.freeReservation = true;
+      attempt.freeHouseKey = true;
+      return { key: freeKey, model: freeModel };
+    }
+    if (byok) return { key, model };
     const period = currentUsagePeriod();
     const usage = await storage.getMonthlyUsage(userId, period);
     const denial = checkHouseKeyCall(user?.tier, model, usage.aiSpendUsd);
@@ -264,7 +334,71 @@ export class OpenRouterProvider implements AIProvider {
     return { key: platformKey, byok: false };
   }
 
+  /** True when this call will run on the house key as a Free user (so the Free retry loop applies). */
+  private async isFreeHouseCall(userId?: number): Promise<boolean> {
+    if (!userId) return false;
+    const { storage } = await import("./storage");
+    const user = await storage.getUser(userId);
+    return (user?.tier || "free") === "free";
+  }
+
+  /** Free: try the selected model, then the retry chain, until one returns visible text. */
+  private async withFreeRetries(
+    model: string,
+    userId: number | undefined,
+    options: ChatOptions,
+    run: (opts: ChatOptions) => Promise<AIModelResponse>,
+    canRetry: () => boolean = () => true,
+  ): Promise<AIModelResponse> {
+    requireAIUser(userId);
+    if (options.freeModelOverride || !(await this.isFreeHouseCall(userId))) return run(options);
+    const chain = freeModelChain(model, options.capable || options.purpose === "auxiliary");
+    let lastError: unknown;
+    let creditError: unknown;
+    for (const freeModel of chain) {
+      try {
+        return await run({ ...options, freeModelOverride: freeModel });
+      } catch (error) {
+        if (error instanceof UsageCapError) throw error;
+        // Once visible tokens reached the farmer, a retry would duplicate text.
+        if (!canRetry()) throw error;
+        lastError = error;
+        if ((error as any)?.statusCode === 402) creditError = error;
+        console.warn(`[FREE_RETRY] ${freeModel} failed (${(error as Error)?.message ?? error}); trying next free model`);
+        // Shared free pools rate-limit in bursts; a short pause helps the next pick.
+        if ((error as any)?.statusCode === 429 && process.env.NODE_ENV !== "test") await new Promise(r => setTimeout(r, 1500));
+      }
+    }
+    console.error("[FREE_RETRY] all free models failed", (lastError as Error)?.message);
+    if (creditError) throw creditError;
+    throw new Error(FREE_ALL_FAILED);
+  }
+
   async chat(messages: AIMessage[], model: string, userId?: number, webSearch = false, options: ChatOptions = {}): Promise<AIModelResponse> {
+    return this.withFreeRetries(model, userId, options, opts => this.chatOnce(messages, model, userId, webSearch, opts));
+  }
+
+  async chatStream(
+    messages: AIMessage[],
+    model: string,
+    onToken: (token: string) => void,
+    userId?: number,
+    webSearch = false,
+    options: ChatOptions = {}
+  ): Promise<AIModelResponse> {
+    let emitted = false;
+    const tracked = (token: string) => {
+      if (token) emitted = true;
+      onToken(token);
+    };
+    return this.withFreeRetries(
+      model, userId, options,
+      opts => this.chatStreamOnce(messages, model, tracked, userId, webSearch, opts),
+      () => !emitted,
+    );
+  }
+
+  private async chatOnce(messages: AIMessage[], model: string, userId?: number, webSearch = false, options: ChatOptions = {}): Promise<AIModelResponse> {
     const attempt = this.beginAttempt(model, messages, options.maxTokens);
     let requestStarted = false;
     let usage: unknown;
@@ -272,7 +406,7 @@ export class OpenRouterProvider implements AIProvider {
     let provider: string | undefined;
     let responseModel: string | undefined;
     try {
-      const authorized = await this.authorizeCall(attempt, model, userId);
+      const authorized = await this.authorizeCall(attempt, model, userId, options);
       const openRouterKey = authorized.key;
       model = authorized.model;
 
@@ -286,17 +420,19 @@ export class OpenRouterProvider implements AIProvider {
           "X-Title": "Farm Friend Roundtable"
         },
         body: JSON.stringify({
-          ...modelRouting(model),
+          ...(attempt.freeHouseKey ? { model } : modelRouting(model)),
           messages: messages,
           temperature: 0.7,
           ...this.requestBudget(attempt),
           usage: { include: true },
-          ...(process.env.OPENROUTER_REASONING_EFFORT
+          ...(attempt.freeHouseKey
+            ? { reasoning: { effort: attempt.freeReasoningEffort, exclude: true } }
+            : process.env.OPENROUTER_REASONING_EFFORT
             ? { reasoning: { effort: process.env.OPENROUTER_REASONING_EFFORT } }
             : {}),
-          ...(webSearch ? { plugins: [{ id: "web", max_results: 3 }] } : {}),
+          ...(webSearch && !attempt.freeHouseKey ? { plugins: [{ id: "web", max_results: 3 }] } : {}),
         }),
-        signal: AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS),
+        signal: AbortSignal.timeout(attempt.freeHouseKey ? FREE_REQUEST_TIMEOUT_MS : AI_REQUEST_TIMEOUT_MS),
       });
 
       if (!response.ok) {
@@ -317,11 +453,17 @@ export class OpenRouterProvider implements AIProvider {
         throw new Error("Invalid response format from OpenRouter API");
       }
 
+      if (attempt.freeHouseKey && !hasVisibleText(data.choices[0].message.content)) {
+        // Reasoning-only / empty output: never show a bare cut-off notice.
+        throw new FreeModelRetryError(`${model} returned no visible text (finish_reason=${data.choices[0].finish_reason})`);
+      }
       if (data.choices[0].finish_reason === "length") {
-        throw new Error(OUTPUT_LIMIT_ERROR);
+        if (!attempt.freeHouseKey) throw new Error(OUTPUT_LIMIT_ERROR);
+        const partial = data.choices[0].message.content;
+        data.choices[0].message.content = (typeof partial === "string" ? partial : "").trimEnd() + FREE_TRUNCATION_NOTE;
       }
 
-      this.settleAttempt(attempt, "success", usage, { generationId, responseModel, provider });
+      await this.settleAttempt(attempt, "success", usage, { generationId, responseModel, provider });
       return {
         message: data.choices[0].message,
         ...(Array.isArray(data.citations) ? { citations: data.citations.filter((value: unknown): value is string => typeof value === "string") } : {}),
@@ -332,7 +474,7 @@ export class OpenRouterProvider implements AIProvider {
       };
     } catch (error: unknown) {
       const status = typeof (error as any)?.statusCode === "number" ? (error as any).statusCode : undefined;
-      this.settleAttempt(attempt, "failed", requestStarted ? usage : { cost: 0 }, {
+      await this.settleAttempt(attempt, "failed", requestStarted ? usage : { cost: 0 }, {
         generationId,
         responseModel,
         provider,
@@ -346,7 +488,7 @@ export class OpenRouterProvider implements AIProvider {
     }
   }
 
-  async chatStream(
+  private async chatStreamOnce(
     messages: AIMessage[],
     model: string,
     onToken: (token: string) => void,
@@ -361,7 +503,7 @@ export class OpenRouterProvider implements AIProvider {
     let provider: string | undefined;
     let responseModel: string | undefined;
     try {
-      const authorized = await this.authorizeCall(attempt, model, userId);
+      const authorized = await this.authorizeCall(attempt, model, userId, options);
       const openRouterKey = authorized.key;
       model = authorized.model;
 
@@ -375,18 +517,20 @@ export class OpenRouterProvider implements AIProvider {
           "X-Title": "Farm Friend Roundtable"
         },
         body: JSON.stringify({
-          ...modelRouting(model),
+          ...(attempt.freeHouseKey ? { model } : modelRouting(model)),
           messages: messages,
           temperature: 0.7,
           ...this.requestBudget(attempt),
           usage: { include: true },
-          ...(process.env.OPENROUTER_REASONING_EFFORT
+          ...(attempt.freeHouseKey
+            ? { reasoning: { effort: attempt.freeReasoningEffort, exclude: true } }
+            : process.env.OPENROUTER_REASONING_EFFORT
             ? { reasoning: { effort: process.env.OPENROUTER_REASONING_EFFORT } }
             : {}),
-          ...(webSearch ? { plugins: [{ id: "web", max_results: 3 }] } : {}),
+          ...(webSearch && !attempt.freeHouseKey ? { plugins: [{ id: "web", max_results: 3 }] } : {}),
           stream: true,
         }),
-        signal: AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS),
+        signal: AbortSignal.timeout(attempt.freeHouseKey ? FREE_REQUEST_TIMEOUT_MS : AI_REQUEST_TIMEOUT_MS),
       });
 
       if (!response.ok) {
@@ -451,11 +595,16 @@ export class OpenRouterProvider implements AIProvider {
         reader.releaseLock();
       }
 
+      if (attempt.freeHouseKey && !hasVisibleText(fullContent)) {
+        throw new FreeModelRetryError(`${model} streamed no visible text (finish_reason=${finishReason})`);
+      }
       if (finishReason === "length") {
-        throw new Error(OUTPUT_LIMIT_ERROR);
+        if (!attempt.freeHouseKey) throw new Error(OUTPUT_LIMIT_ERROR);
+        fullContent = fullContent.trimEnd() + FREE_TRUNCATION_NOTE;
+        onToken(FREE_TRUNCATION_NOTE);
       }
 
-      this.settleAttempt(attempt, "success", usage, { generationId, responseModel, provider });
+      await this.settleAttempt(attempt, "success", usage, { generationId, responseModel, provider });
 
       return {
         message: { role: "assistant", content: fullContent },
@@ -466,7 +615,7 @@ export class OpenRouterProvider implements AIProvider {
       };
     } catch (error: unknown) {
       const status = typeof (error as any)?.statusCode === "number" ? (error as any).statusCode : undefined;
-      this.settleAttempt(attempt, "failed", requestStarted ? usage : { cost: 0 }, {
+      await this.settleAttempt(attempt, "failed", requestStarted ? usage : { cost: 0 }, {
         generationId,
         responseModel,
         provider,
@@ -505,6 +654,7 @@ export class LocalOpenAIProvider implements AIProvider {
   }
 
   async chat(messages: AIMessage[], model: string, _userId?: number): Promise<AIModelResponse> {
+    requireAIUser(_userId);
     const baseUrl = this.getBaseUrl();
     const actualModel = this.getActualModel(model);
 
@@ -566,6 +716,7 @@ export class LocalOpenAIProvider implements AIProvider {
     onToken: (token: string) => void,
     _userId?: number
   ): Promise<AIModelResponse> {
+    requireAIUser(_userId);
     const baseUrl = this.getBaseUrl();
     const actualModel = this.getActualModel(model);
 

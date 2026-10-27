@@ -10,3 +10,6 @@ uploads/*
 cookies.txt
 jev-audit/
 videos/
+
+.tools/
+.codex/

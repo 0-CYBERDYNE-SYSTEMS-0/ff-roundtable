@@ -22,7 +22,9 @@ export function log(message: string, source = "express") {
 export async function setupVite(app: Express, server: Server) {
   const serverOptions = {
     middlewareMode: true,
-    hmr: process.env.REPL_ID ? { server } : { port: 24678 },
+    // HMR shares the app's http server on its own path so it never collides
+    // with the app socket at /ws.
+    hmr: process.env.REPL_ID ? { server, path: "/vite-hmr" } : { port: 24678 },
     allowedHosts: true as const,
   };
 

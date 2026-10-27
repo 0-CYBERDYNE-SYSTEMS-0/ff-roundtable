@@ -1,4 +1,5 @@
 import { storage } from "./storage";
+import { UsageCapError } from "./usage-caps";
 import { getExpertResponse, getExpertResponseStream, generateInsights, getModeratorNextSpeakerSuggestion, generateClosingSynthesis, resolveAuxModel, isRetryableExpertProviderFailure } from "./ai";
 import type { DeliverableGenerationRequest, ModeratorContext } from "./ai";
 import { isNearDuplicate, shouldStopForRedundancy, REDUNDANCY_STOP_SIMILARITY_THRESHOLD } from "./text-similarity";
@@ -7,6 +8,7 @@ import { commitPendingDeliverable, discardPendingDeliverable } from "./pending-d
 import type { InsertMessage, Expert, Message, File, MessageStance, OrchestratorSnapshot } from "@shared/schema";
 import { extractFarmerQuestions } from "@shared/mentions";
 import { createHash } from "crypto";
+import { FREE_MAX_TURNS } from "./usage-caps";
 
 // Verbose per-turn tracing is opt-in (ORCH_DEBUG=1). The default flood slows
 // test teardown and leaks conversation content into production logs.
@@ -553,6 +555,16 @@ function classifyFarmerFileIntent(content: string | null | undefined): FarmerFil
     // Keep that work in the generation path; only a retrieval-only message is
     // fulfilled directly from stored files.
     if (/\b(?:create|make|generate|draft|write|produce|prepare|revise|update|modify|export|save)\b.{0,80}\b(?:files?|documents?|sops?|calendars?|spreadsheets?|exports?)\b/.test(text)) {
+        return null;
+    }
+
+    // "Give me a table … plus a calendar" asks for new work: an indefinite
+    // article (or new/fresh) before the noun is generation, not retrieval,
+    // unless the farmer also points at something saved or asks for a link.
+    if (
+        new RegExp(`\\b(?:get|send|give|show|provide|share)\\s+(?:me|us)?\\s*(?:a|an|some|new|fresh)\\b.{0,80}\\b(?:tables?|charts?|${fileNoun.slice(3, -1)})\\b`).test(text) &&
+        !/\b(?:existing|saved|current|latest|previous|already|link|download)\b/.test(text)
+    ) {
         return null;
     }
 
@@ -1233,11 +1245,17 @@ export class InteractionOrchestrator {
         });
         broadcast(this.conversationId, { type: "concluding", conversationId: this.conversationId });
 
+        let capacityPaused = false;
         try {
             const pendingWrites = Array.from(openQuestionWritePromises.get(this.conversationId) ?? []);
             if (pendingWrites.length > 0) await Promise.allSettled(pendingWrites);
             await generateClosingSynthesis(this.conversationId, moderator, broadcast, stanceLedger);
         } catch (error) {
+            if (error instanceof UsageCapError && error.denial.code === "free_capacity_used") {
+                capacityPaused = true;
+                this.handleScheduledFailure(error);
+                return;
+            }
             console.error(`Orchestrator: Could not generate closing handoff for ${this.conversationId}:`, error);
             broadcast(this.conversationId, {
                 type: "notice",
@@ -1246,7 +1264,7 @@ export class InteractionOrchestrator {
             });
         } finally {
             updateConversationState(this.conversationId, {
-                handoffStatus: "delivered",
+                handoffStatus: capacityPaused ? "not_started" : "delivered",
                 turnInFlight: false,
             });
         }
@@ -1337,6 +1355,16 @@ export class InteractionOrchestrator {
 
     /** Recover queued farmer input after a turn chain or scheduled callback fails. */
     handleScheduledFailure(error: unknown): void {
+        if (error instanceof UsageCapError && error.denial.code === "free_capacity_used") {
+            this.pause();
+            const state = updateConversationState(this.conversationId, {
+                turnInFlight: false, turnChainScheduled: false,
+            });
+            state?.broadcastFn(this.conversationId, {
+                type: "error", ...error.denial, interactionMode: "paused",
+            });
+            return;
+        }
         console.error(`Orchestrator: Turn chain failed for ${this.conversationId}:`, error);
         const existingState = getConversationState(this.conversationId);
         if (!existingState) return;
@@ -1947,6 +1975,18 @@ export class InteractionOrchestrator {
                     : undefined;
                 const beforeDispatch = getConversationState(this.conversationId);
                 if (!beforeDispatch) return;
+                if (beforeDispatch.lastUserMessage?.userId && typeof storage.getUser === "function") {
+                    const owner = await storage.getUser(beforeDispatch.lastUserMessage.userId);
+                    if (owner && (owner.tier || "free") === "free") {
+                        const replies = history.filter(message =>
+                            message.id > beforeDispatch.lastUserMessage!.id &&
+                            message.role === "assistant" && message.expertId !== null);
+                        if (replies.length >= FREE_MAX_TURNS) {
+                            updateConversationState(this.conversationId, { mode: "idle" });
+                            return;
+                        }
+                    }
+                }
                 state = updateConversationState(this.conversationId, {
                     currentExpertIndex: nextExpertIndex,
                     ...(countedAsAutonomousTurn && beforeDispatch.totalAutonomousTurnsTaken < beforeDispatch.maxAutonomousTurns
@@ -2177,6 +2217,10 @@ export class InteractionOrchestrator {
                     postTurnState.sequenceExpertContents.push(storedExpertMessage.content);
                 }
             } catch (error) {
+                if (error instanceof UsageCapError && error.denial.code === "free_capacity_used") {
+                    this.handleScheduledFailure(error);
+                    return;
+                }
                 if (providerCallStarted && !providerCallResolved) {
                     expertResponseFailed = true;
                     await this.recordExpertFailure(currentExpert);

@@ -1,5 +1,6 @@
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
+import { requiresUpgradeBadge } from "@/lib/openrouter-model-options";
 
 // Expanded props to include optional name and showId flag
 interface ModelBadgeProps {
@@ -115,7 +116,7 @@ export default function ModelBadge({
     ? `${modelName} (${formatModelId(modelId)})` 
     : displayName;
 
-  const isPaid = !modelId.endsWith(":free") && !modelId.startsWith("local/");
+  const isPaid = requiresUpgradeBadge(modelId);
 
   return (
     <div className="flex items-center gap-1.5">

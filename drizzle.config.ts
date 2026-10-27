@@ -9,6 +9,7 @@ export default defineConfig({
   out: "./migrations",
   schema: "./shared/schema.ts",
   dialect: "postgresql",
+  tablesFilter: ["!session"],
   dbCredentials: {
     url: dbUrl || "postgresql://localhost:5432/farm_roundtable_dev",
   },

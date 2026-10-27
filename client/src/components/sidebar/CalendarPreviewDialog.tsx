@@ -15,21 +15,22 @@ export default function CalendarPreviewDialog({ conversationId, start, fileId, o
   const [events, setEvents] = useState<CalendarEvent[]>([]);
   const [dirty, setDirty] = useState(false);
   const [view, setView] = useState<"agenda" | "month">("agenda");
-  const [month, setMonth] = useState(start.slice(0, 7));
+  const [month, setMonth] = useState((start || format(new Date(), 'yyyy-MM-dd')).slice(0, 7));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [status, setStatus] = useState("");
   useEffect(() => {
     const controller = new AbortController();
-    const query = new URLSearchParams({ start });
+    const query = new URLSearchParams(start ? { start } : {});
     if (fileId) query.set("fileId", String(fileId));
     void fetch(`/api/protected/conversations/${conversationId}/calendar?${query}`, { credentials: "include", signal: controller.signal })
       .then(async response => {
         const result = await response.json();
         if (!response.ok) throw new Error(result.message || "Calendar preview unavailable");
+        if (result.empty) throw new Error(result.message || "No schedulable items found.");
         if (!controller.signal.aborted) {
           setDraft(result); setEvents(result.events);
-          setMonth(result.events.map((event: CalendarEvent) => event.startDate).sort()[0]?.slice(0, 7) || start.slice(0, 7));
+          setMonth(result.events.map((event: CalendarEvent) => event.startDate).sort()[0]?.slice(0, 7) || (start || format(new Date(), 'yyyy-MM-dd')).slice(0, 7));
         }
       })
       .catch(error => { if (!controller.signal.aborted) setError(error.message); });

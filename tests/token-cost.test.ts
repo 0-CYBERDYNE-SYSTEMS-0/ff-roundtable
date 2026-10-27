@@ -25,6 +25,15 @@ process.env.NODE_ENV = "test";
 // ── Mock fetch BEFORE importing server modules that call providers ──
 const mockFetch = vi.fn();
 global.fetch = mockFetch;
+vi.mock("../server/storage", () => ({
+  storage: {
+    getConversation: vi.fn().mockResolvedValue({ id: 1, userId: 1 }),
+    getUser: vi.fn().mockResolvedValue({ id: 1, tier: "pro" }),
+    getUserApiKey: vi.fn().mockResolvedValue("test-key"),
+    getFarmProfile: vi.fn().mockResolvedValue(undefined),
+    getConversationInsights: vi.fn().mockResolvedValue([]),
+  },
+}));
 
 import {
   trigramJaccard,

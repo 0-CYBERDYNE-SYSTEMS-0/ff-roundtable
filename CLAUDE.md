@@ -29,6 +29,8 @@ Monorepo with three roots, aliased as `@/` (client/src) and `@shared/` (shared):
   - `ai-providers.ts` — `getProvider(modelId)` picks OpenRouter or a local OpenAI-compatible endpoint (`LOCAL_AI_BASE_URL`).
   - `expert-tools.ts` — text-protocol tools any model can use (DuckDuckGo search, public-URL fetch, HTML/PDF extraction, sourced charts) and deliverable parsing/versioning/ownership. Deliverables are parsed during the model call but saved only after the orchestrator accepts the turn (`pending-deliverables.ts`, kept out of `ai.ts` so tests that mock `ai.ts` still get real commit/discard); a duplicate or rejected turn must leave no file. A revision creates a version; another expert's change becomes a proposal unless the farmer hands over ownership.
   - `turn-fairness.ts`, `response-hygiene.ts`, `text-similarity.ts` — post-moderator speaker rules (one @mention honoured per farmer message, unspoken experts go first, no back-to-back turns, per-expert cap) and answer cleanup before storage (citations limited to sources retrieved this turn or already in the conversation, internal STANCE/tool lines stripped, repeated questions merged).
+  - `chart-picker.ts`, `chart-repair.ts`, `model-json.ts` — chart type selection and repair of malformed/truncated model JSON; `calendar-files.ts` / `calendar-notes-prompt.ts` — schedule extraction into calendar files and ICS. Each has a matching `tests/*.test.ts`.
+  - `model-catalog.ts`, `free-capacity.ts`, `free-synthesis.ts`, `usage-caps.ts`, `abuse-limits.ts` — free-model availability/fallbacks and per-tier usage and abuse limits.
   - `storage.ts` — `IStorage` with `MemStorage` and `PostgresStorage`; chosen at startup by presence of `DATABASE_URL`. New storage operations must be implemented in both.
   - `auth.ts` — Passport local strategy + sessions; `tiers.ts` — subscription tier limits.
 - `shared/` — Drizzle schema + zod types (`schema.ts`) and pure helpers used by both sides (mentions parsing, schedule extraction, ICS export, markdown).
@@ -36,6 +38,8 @@ Monorepo with three roots, aliased as `@/` (client/src) and `@shared/` (shared):
 Deletion rules: `DELETE /api/protected/conversations/:id` and `DELETE /api/protected/conversations/:id/experts/:expertId` return 409 while the orchestrator is non-idle, unless that state is older than `STALE_PROCESSING_MS` (5 min, `orchestrator.ts`) — so a long-paused conversation can be deleted. A removed expert's messages are kept with `expertId: null`. The conversations list returns a computed `updatedAt` (latest message, else `createdAt`); it is not a DB column.
 
 `server/dev-config.json` defines the default expert panel and their OpenRouter model slugs (free-tier models). Free slugs get retired and start 404ing — update them there.
+
+Product constraint (from `AGENTS.md`): the experts give advice, not field measurements, and nothing may imply physical control of farm equipment. Keep that framing in prompts and UI copy. Also see `AGENTS.md` for shared working rules (preserve uncommitted work; don't reset or revert it).
 
 ## Client conventions
 

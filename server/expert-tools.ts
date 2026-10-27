@@ -14,7 +14,10 @@ import { randomBytes, randomUUID } from "crypto";
 import { lookup } from "dns/promises";
 import net from "net";
 import { compile, type TopLevelSpec } from "vega-lite";
-import { parseVegaChart, themedVegaSpec } from "@shared/chart-artifact";
+import { premiumChartsEnabled } from "./chart-picker";
+import { parseChartJsonWithRepair, fallbackSpecFromRows, hoistNestedData } from "./chart-repair";
+import { parseVegaChart, themedVegaSpec, chartHasPlottableSeries, stripDualAxis, asksForDualAxis, filterRelevantSources, tidySourceList, applyFacetScales, rankSource, ensureFacetWhenAsked, normalizeMixedUnitChart, readableSourceTitle, isFrostClimateQuestion, isAuthoritativeClimateHost } from "@shared/chart-artifact";
+import { extractCanonicalFrost, type CanonicalFrost } from "@shared/frost-canonical";
 
 export const MAX_TOOL_CALLS_PER_TURN = 3;
 export const TOOL_TIMEOUT_MS = 10_000;
@@ -36,8 +39,10 @@ Reply with at most ${limit} lines, each exactly one of:
 SEARCH: <short web search query within your specialty>
 FETCH: <https URL you already know is authoritative, e.g. a university extension page>
 or reply with the single word NONE if the farmer's facts and your expertise are enough.
+When the farmer asks for numbers, a chart, a table, a budget, prices, yields, rates or a comparison, SEARCH for real current data (e.g. USDA NASS, university extension, market reports) so the roundtable can chart real figures.
 Prefer SEARCH when you need a source but are unsure the exact URL is reachable; search results are fetched before they can be cited. Use FETCH only for a stable URL you know is relevant.
 For decisions involving marketing or hedging, loan or insurance obligations, veterinary or health risks, safety, or regulation, do not reply NONE merely because you know the general advice: SEARCH for at least one relevant authoritative public-agency or university source. For soil-fertility, liming, fertilizer/nutrient-application, conservation-practice, or crop-production recommendations—especially numeric rates, thresholds, or yield claims—also SEARCH for at least one relevant authoritative public-agency or university source. Never search for or contradict a price or condition supplied by the farmer; use it as given. Use farmer-provided soil tests, acres, yields, prices, and field conditions exactly as supplied; never invent missing measurements or a source. If no source can be fetched, say that you could not verify the source-dependent claim and do not invent a citation.
+For field-crop calendars, schedules or timing (grass seed, wheat, hazelnuts, hay, row crops), SEARCH the farmer's state extension crop-production or field-crop guides (e.g. "OSU Extension <crop> production guide Willamette Valley"), not home-garden or backyard calendars.
 No other text.
 
 Farmer's question / latest discussion:
@@ -139,21 +144,33 @@ export async function fetchPage(rawUrl: string, fetchImpl: FetchLike = fetch): P
   return { title, url: url.toString(), text: stripHtml(html).slice(0, MAX_PAGE_CHARS) };
 }
 
+export const FROST_FALLBACK_CALLS: ToolCall[] = [
+  { tool: "search", query: "OSU Extension frost dates Oregon last frost" },
+  { tool: "search", query: "NOAA NCEI climate normals freeze dates" },
+  { tool: "fetch", url: "https://www.ncei.noaa.gov/access/us-climate-normals/" },
+  { tool: "fetch", url: "https://planthardiness.ars.usda.gov/" },
+];
+
 /** Executes planned calls; never throws (failures become notes). */
-export async function runToolCalls(calls: ToolCall[], fetchImpl: FetchLike = fetch): Promise<ToolRun> {
+export async function runToolCalls(calls: ToolCall[], fetchImpl: FetchLike = fetch, questionText?: string): Promise<ToolRun> {
   const sources: ToolSource[] = [];
   const notes: string[] = [];
+  // Every prompt type (charts, calendars, tables, prose): skip content farms and
+  // out-of-region pages (Iowa corn for a Eugene question) before they are fetched.
+  const relevant = (url: string) => filterRelevantSources([url], questionText).length > 0;
   for (const call of calls.slice(0, MAX_TOOL_CALLS_PER_TURN)) {
     try {
       if (call.tool === "search") {
-        const results = await webSearch(call.query, fetchImpl);
+        // Best-fitting source first (OSU field-crop guides before home-garden calendars for farm questions).
+        const results = (await webSearch(call.query, fetchImpl)).map((r, i) => ({ r, i })).sort((a, b) => rankSource(a.r.url, questionText) - rankSource(b.r.url, questionText) || a.i - b.i).map(({ r }) => r);
         if (!results.length) notes.push(`Search "${call.query}" returned no results.`);
         let verified = results.some(r => sources.some(s => s.url === r.url));
         for (const r of results) {
           if (sources.some(s => s.url === r.url)) { verified = true; break; }
+          if (!relevant(r.url)) { notes.push(`Search result ${r.url} skipped: not relevant to the farmer's crop/region.`); continue; }
           try {
             const page = await fetchPage(r.url, fetchImpl);
-            sources.push({ id: `S${sources.length + 1}`, title: page.title || r.title, url: page.url, snippet: page.text });
+            sources.push({ id: `S${sources.length + 1}`, title: readableSourceTitle(page.title, page.url, r.title), url: page.url, snippet: page.text });
             verified = true;
             break;
           } catch (error) {
@@ -162,22 +179,49 @@ export async function runToolCalls(calls: ToolCall[], fetchImpl: FetchLike = fet
         }
         if (results.length && !verified) notes.push(`Search "${call.query}" returned no fetchable source; do not cite its snippets.`);
       } else {
+        if (!relevant(call.url)) { notes.push(`Fetch ${call.url} skipped: not relevant to the farmer's crop/region.`); continue; }
         const page = await fetchPage(call.url, fetchImpl);
-        sources.push({ id: `S${sources.length + 1}`, title: page.title, url: page.url, snippet: page.text });
+        sources.push({ id: `S${sources.length + 1}`, title: readableSourceTitle(page.title, page.url), url: page.url, snippet: page.text });
       }
     } catch (error) {
       notes.push(`${call.tool === "search" ? `Search "${call.query}"` : `Fetch ${call.url}`} failed: ${(error as Error).message}`);
     }
   }
-  return { calls, sources, notes };
+  // Frost / climate answers must lead with OSU, USDA or NOAA: when research found none
+  // (e.g. only Almanac.com), run targeted follow-ups before the expert answers.
+  if (isFrostClimateQuestion(questionText) && !sources.some(s => isAuthoritativeClimateHost(s.url))) {
+    for (const call of FROST_FALLBACK_CALLS) {
+      if (sources.some(s => isAuthoritativeClimateHost(s.url))) break;
+      try {
+        if (call.tool === "search") {
+          const results = (await webSearch(call.query, fetchImpl)).filter(r => isAuthoritativeClimateHost(r.url));
+          for (const r of results) {
+            if (sources.some(s => s.url === r.url)) break;
+            try { const page = await fetchPage(r.url, fetchImpl); sources.push({ id: "", title: readableSourceTitle(page.title, page.url, r.title), url: page.url, snippet: page.text }); break; } catch { /* next */ }
+          }
+        } else {
+          const page = await fetchPage(call.url, fetchImpl);
+          sources.push({ id: "", title: readableSourceTitle(page.title, page.url), url: page.url, snippet: page.text });
+        }
+      } catch (error) {
+        notes.push(`Frost/climate follow-up ${call.tool === "search" ? call.query : call.url} failed: ${(error as Error).message}`);
+      }
+    }
+    if (!sources.some(s => isAuthoritativeClimateHost(s.url))) notes.push("No OSU, USDA or NOAA frost/climate source could be fetched; say the frost dates are unverified.");
+  }
+  // Authoritative first across calls (OSU/USDA/NOAA before app frost sites); ids follow the new order.
+  const ranked = sources.map((s, i) => ({ s, i })).sort((a, b) => rankSource(a.s.url, questionText) - rankSource(b.s.url, questionText) || a.i - b.i).map(({ s }, i) => ({ ...s, id: `S${i + 1}` }));
+  return { calls, sources: ranked, notes };
 }
 
 export function formatToolResultsForPrompt(run: ToolRun): string {
+  // (sources are pre-ranked: S1 is the most authoritative; frost/climate answers cite it first)
   if (!run.calls.length) return "";
   const lines = [
     "🔎 RESEARCH RESULTS (fetched this turn; cite each source inline as [S1](URL)):",
     "MANDATORY CITATION CONTRACT: If a fetched result directly supports a relevant fact, include at least one concise sentence using only that fact and cite it inline in that same sentence as [S1](URL); do not only add a source list. For a cited sentence, every numeric value must appear in the fetched text—never compute or combine figures in a cited claim. Preserve the source's scope and caveats; put any calculation in a separate sentence and label it as your calculation. If nothing supports a claim, omit or qualify it.",
   ];
+  if (run.sources.length && isAuthoritativeClimateHost(run.sources[0].url)) lines.splice(2, 0, "Sources are ordered most authoritative first: for frost dates, freeze risk or climate normals, cite [S1] (OSU, USDA or NOAA) first, before any other source.");
   for (const s of run.sources) lines.push(`[${s.id}] ${s.title} — ${s.url}\n${s.snippet}`);
   if (!run.sources.length) lines.push("No sources could be retrieved. Say that you could not verify current information; do not invent citations.");
   for (const n of run.notes) lines.push(`(note: ${n})`);
@@ -195,7 +239,9 @@ title: <short descriptive title>
 <markdown content>
 \`\`\`
 Reusing the same title revises that document as a new version. You may only revise documents you wrote (or that the farmer explicitly asked you to change); otherwise your block is saved as a proposal for the owner.
-- Charts: put the chart JSON in a fenced block tagged \`chart\` (\`\`\`chart ... \`\`\`), never \`json\`, with every brace closed. Only from numbers the farmer gave, the weather data provided, or the research results. Every chart JSON must include "title" (specific, e.g. "June rainfall vs. 30-yr normal, Ames IA") and "sources" (list of URLs from RESEARCH RESULTS, or "farmer" / "weather"). If you have no real data, do not make a chart. Never use example or illustrative numbers.`;
+- Charts: put the chart JSON in a fenced block tagged \`chart\` (\`\`\`chart ... \`\`\`), never \`json\`, with every brace closed. Use numbers the farmer gave, the weather data provided, or RESEARCH RESULTS / SHARED RESEARCH. Every chart JSON must include "title" (specific, e.g. "June rainfall vs. 30-yr normal, Ames IA") and "sources" (URLs from the research results, or "farmer" / "weather"). If no real data exists for a requested chart, still make it from stated typical assumptions: start the title with "Illustrative:", list the assumptions in "description", and set "sources": ["assumptions"]. Never copy example numbers.
+- HTML visuals: for a richer visual (infographic, annotated diagram, interactive calculator, SVG chart) you may return one self-contained \`\`\`html block (inline CSS/SVG/JS, no external scripts or network calls).
+- Code and tables: use fenced code blocks with a language tag, and GitHub markdown tables for comparisons.`;
 }
 
 // ---------- Deliverables ----------
@@ -318,7 +364,7 @@ export async function saveExpertDeliverable(
 
 // ---------- Charts ----------
 
-const GENERIC_TITLES = /^(chart( artifact)?|visual aid|data|trend|untitled|seasonal agricultural trends)$/i;
+const GENERIC_TITLES = /^(chart( artifact)?|visual aid|data|trend|untitled|illustrative( chart)?|seasonal agricultural trends)$/i;
 
 /** Models often drop trailing closers from long JSON; add the missing ones before giving up. */
 function parseChartJson(text: string): unknown {
@@ -340,8 +386,15 @@ function parseChartJson(text: string): unknown {
   }
 }
 
+/** Charts built from stated assumptions are allowed when visibly labeled "Illustrative". */
+export function isIllustrativeChart(chart: any): boolean {
+  return [chart?.title, chart?.description, chart?.subtitle, chart?.caption]
+    .some(v => typeof v === "string" && /\billustrative\b/i.test(v));
+}
+
 export type ChartArtifactRejectionReason =
   | "invalid-json"
+  | "empty-series"
   | "invalid-vega-envelope"
   | "invalid-vega-spec"
   | "missing-title"
@@ -350,7 +403,14 @@ export type ChartArtifactRejectionReason =
   | "unverified-source"
   | "missing-data";
 
-export type ChartEvidence = { farmerText?: string; weatherText?: string };
+export type ChartEvidence = { farmerText?: string; weatherText?: string; researchUrls?: string[] };
+
+/** Research URLs this turn's text actually cites (by [S1]/[R1] id or URL); all fetched URLs if none are cited explicitly. */
+export function chartResearchUrls(text: string, sources: Array<Pick<ToolSource, "id" | "url">>): string[] {
+  const cited = sources.filter(s => s.url && (text.includes(s.url) || (s.id && text.toUpperCase().includes(`[${s.id.toUpperCase()}]`))));
+  const picked = (cited.length ? cited : sources).map(s => s.url).filter(Boolean);
+  return Array.from(new Set(picked)).slice(0, 5);
+}
 
 type ChartValidationResult =
   | { ok: true; json: string; title: string }
@@ -386,12 +446,17 @@ export function validateChartArtifactDetailed(
   evidence: ChartEvidence = {},
 ): ChartValidationResult {
   let chart: any;
-  try { chart = parseChartJson(chartJson); } catch { return { ok: false, reason: "invalid-json" }; }
+  const premium = premiumChartsEnabled();
+  try { chart = parseChartJson(chartJson); } catch {
+    if (!premium) return { ok: false, reason: "invalid-json" };
+    try { chart = parseChartJsonWithRepair(chartJson).value; } catch { return { ok: false, reason: "invalid-json" }; }
+  }
   if (!chart || typeof chart !== "object" || Array.isArray(chart)) return { ok: false, reason: "invalid-json" };
 
   const title = typeof chart.title === "string" ? chart.title.trim() : "";
   if (!title) return { ok: false, reason: "missing-title" };
   if (GENERIC_TITLES.test(title)) return { ok: false, reason: "generic-title" };
+  if (premium && chart.spec && typeof chart.spec === "object") hoistNestedData(chart);
   if (!Array.isArray(chart.data) || chart.data.length === 0) return { ok: false, reason: "missing-data" };
 
   let sources: unknown[] = Array.isArray(chart.sources) && chart.sources.length
@@ -403,18 +468,66 @@ export function validateChartArtifactDetailed(
       sources = [inferredSource];
     }
   }
+  const illustrative = isIllustrativeChart(chart);
+  if (!sources.length && illustrative) sources = ["assumptions"];
   if (!sources.length) return { ok: false, reason: "missing-source" };
   if (!Array.isArray(chart.sources) || chart.sources.length === 0) chart.sources = sources;
 
+  if (premium && chart && typeof chart === "object" && !chart.type && chart.spec) chart.type = "vega-lite";
   if (chart?.type === "vega-lite") {
-    const parsed = parseVegaChart(chart);
+    let parsed = parseVegaChart(chart);
+    const compiles = (c: NonNullable<typeof parsed>) => { try { compile(themedVegaSpec(c) as unknown as TopLevelSpec); return true; } catch { return false; } };
+    if ((!parsed || !compiles(parsed)) && premium) {
+      // Fallback: keep the model's rows, title and sources; rebuild a plain themed chart.
+      const spec = Array.isArray(chart.data) ? fallbackSpecFromRows(chart.data) : null;
+      const rebuilt = spec ? parseVegaChart({ ...chart, spec }) : null;
+      if (rebuilt && compiles(rebuilt)) parsed = rebuilt;
+      else return { ok: false, reason: parsed ? "invalid-vega-spec" : "invalid-vega-envelope" };
+    }
     if (!parsed) return { ok: false, reason: "invalid-vega-envelope" };
-    try { compile(themedVegaSpec(parsed) as unknown as TopLevelSpec); } catch { return { ok: false, reason: "invalid-vega-spec" }; }
+    if (!compiles(parsed)) return { ok: false, reason: "invalid-vega-spec" };
+    if (premium) {
+      if (!asksForDualAxis(evidence.farmerText)) parsed = { ...parsed, spec: stripDualAxis(parsed.spec as Record<string, unknown>) as typeof parsed.spec };
+      parsed = { ...parsed, spec: ensureFacetWhenAsked(parsed.spec as Record<string, unknown>, evidence.farmerText ?? "") as typeof parsed.spec };
+      { const mixed = normalizeMixedUnitChart(parsed as any); parsed = { ...(parsed as any), data: mixed.data, spec: mixed.spec as typeof parsed.spec }; }
+      { const f = applyFacetScales(parsed as any); parsed = { ...(parsed as any), spec: f.spec, ...(f.description ? { description: f.description } : {}) }; }
+      if (!chartHasPlottableSeries(parsed as any)) {
+        // Axes with no series: rebuild from the rows, or drop the chart.
+        const spec = fallbackSpecFromRows((parsed as any).data as Record<string, unknown>[]);
+        const rebuilt = spec ? parseVegaChart({ ...chart, data: (parsed as any).data, spec }) : null;
+        if (!rebuilt || !compiles(rebuilt) || !chartHasPlottableSeries(rebuilt)) return { ok: false, reason: "empty-series" };
+        parsed = rebuilt;
+      }
+    }
     chart = parsed;
   }
   const allowed = new Set(allowedUrls);
-  const ok = sources.every(s => typeof s === "string" && (allowed.has(s.trim()) || /^(farmer|weather)$/i.test(s.trim())));
+  const isAssumption = (s: unknown) => typeof s === "string" && /^(assumptions?|illustrative)$/i.test(s.trim());
+  const accepted = (s: unknown) => typeof s === "string" && (allowed.has(s.trim()) || /^(farmer|weather)$/i.test(s.trim()) || (illustrative && isAssumption(s)));
+  let ok = sources.every(accepted);
+  if (!ok && premium) {
+    // Models often name a fetched page by title ("OSU EM 8538") or tweak its URL.
+    // Map URL variants onto the fetched URL and drop unverifiable labels; keep the
+    // chart only if a verified/assumption source remains.
+    const norm = (u: string) => u.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/[#?].*$/, "").replace(/\/+$/, "");
+    const byNorm = new Map(Array.from(allowed).map(u => [norm(u), u]));
+    const mapped = sources.map(s => typeof s === "string" && !accepted(s) && /^https?:\/\//i.test(s.trim()) ? byNorm.get(norm(s)) ?? s : s).filter(accepted);
+    if (mapped.length) { sources = Array.from(new Set(mapped)); ok = true; }
+  }
   if (!ok) return { ok: false, reason: "unverified-source" };
+  // The footer lists the real research behind the turn, not just "assumptions".
+  let research = (evidence.researchUrls ?? []).filter(u => allowed.has(u));
+  if (premium) {
+    research = filterRelevantSources(research, evidence.farmerText);
+    const relevant = filterRelevantSources(sources.filter((x): x is string => typeof x === "string"), evidence.farmerText);
+    if (!relevant.length) {
+      if (!illustrative) return { ok: false, reason: "unverified-source" };
+      sources = ["assumptions"];
+    } else sources = relevant;
+  }
+  if (research.length && sources.every(isAssumption)) sources = [...research, ...sources];
+  if (premium) sources = tidySourceList(sources as string[]);
+  if (chart && typeof chart === "object") chart.sources = sources;
   return { ok: true, json: JSON.stringify(chart, null, 2), title };
 }
 
@@ -443,4 +556,55 @@ export function filterChartArtifacts<T extends { type: string; content: string; 
     kept.push({ ...a, content: valid.json, title: valid.title });
   }
   return { kept, dropped, droppedReasons };
+}
+
+// ---------- Shared roundtable research ----------
+// Sources fetched by any expert (or the Research Analyst's retrieval) are shared
+// with every other expert in the same roundtable and count as chart sources.
+const SHARED_RESEARCH_TTL_MS = 6 * 60 * 60 * 1000;
+const SHARED_RESEARCH_MAX = 8;
+const sharedResearchStore = new Map<number, { at: number; sources: ToolSource[] }>();
+const canonicalFrostStore = new Map<number, CanonicalFrost[]>();
+
+export function rememberCanonicalFrost(conversationId: number | undefined, text: string, sources: ToolSource[]): CanonicalFrost | null {
+  if (!conversationId) return null;
+  const value = extractCanonicalFrost(text, sources);
+  if (!value) return null;
+  const existing = canonicalFrostStore.get(conversationId) ?? [];
+  if (!existing.some(item => item.location.toLowerCase() === value.location.toLowerCase())) canonicalFrostStore.set(conversationId, [...existing, value]);
+  return existing.find(item => item.location.toLowerCase() === value.location.toLowerCase()) ?? value;
+}
+
+/** The store is in memory, so after a restart rebuild it from the conversation's own expert replies (first cited value per place wins, as live). */
+export function restoreCanonicalFrost(conversationId: number | undefined, history: Array<{ role: string; content: string }>): void {
+  if (!conversationId || canonicalFrostStore.has(conversationId)) return;
+  for (const m of history) if (m.role !== "user") rememberCanonicalFrost(conversationId, m.content, []);
+}
+
+export function getCanonicalFrost(conversationId: number | undefined): CanonicalFrost[] {
+  return conversationId ? canonicalFrostStore.get(conversationId) ?? [] : [];
+}
+
+export function rememberSharedResearch(conversationId: number | undefined, sources: Array<Pick<ToolSource, "title" | "url" | "snippet">>, now = Date.now()): void {
+  if (!conversationId || !sources.length) return;
+  const entry = sharedResearchStore.get(conversationId);
+  const existing = entry && now - entry.at < SHARED_RESEARCH_TTL_MS ? entry.sources : [];
+  const merged = [...existing];
+  for (const s of sources) if (s.url && !merged.some(m => m.url === s.url)) merged.push({ id: "", title: s.title, url: s.url, snippet: s.snippet });
+  const kept = merged.slice(-SHARED_RESEARCH_MAX).map((s, i) => ({ ...s, id: `R${i + 1}` }));
+  sharedResearchStore.set(conversationId, { at: now, sources: kept });
+}
+
+export function getSharedResearch(conversationId: number | undefined, now = Date.now()): ToolSource[] {
+  if (!conversationId) return [];
+  const entry = sharedResearchStore.get(conversationId);
+  if (!entry || now - entry.at >= SHARED_RESEARCH_TTL_MS) return [];
+  return entry.sources;
+}
+
+export function formatSharedResearchForPrompt(sources: ToolSource[], excludeUrls: string[] = [], frost: CanonicalFrost[] = []): string {
+  const shown = sources.filter(s => !excludeUrls.includes(s.url));
+  const frostLines = frost.map(f => `CANONICAL FROST (use this value, do not contradict it): last spring frost for ${f.location} ≈ ${f.lastFrost}${f.threshold ? ` [${f.threshold}]` : ""} per ${f.sourceTitle} (${f.sourceUrl}).`);
+  if (!shown.length && !frostLines.length) return "";
+  return [...frostLines, ...(shown.length ? ["📚 SHARED RESEARCH from other experts in this roundtable (fetched pages; cite as [R1](URL); usable as chart sources by URL):", ...shown.map(s => `[${s.id}] ${s.title} — ${s.url}\n${s.snippet.slice(0, 1200)}`)] : [])].join("\n");
 }

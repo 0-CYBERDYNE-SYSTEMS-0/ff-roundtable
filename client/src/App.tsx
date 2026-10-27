@@ -1,3 +1,4 @@
+import { VersionFooter } from "@/components/VersionFooter";
 import { Component, type ErrorInfo, type ReactNode } from "react";
 import { Switch, Route } from "wouter";
 import { queryClient } from "./lib/queryClient";
@@ -10,7 +11,9 @@ import NotFound from "@/pages/not-found";
 import HomePage from "@/pages/home-page";
 import AuthPage from "@/pages/auth-page";
 import SubscribePage from "@/pages/subscribe-page";
+import LandingPage from "@/pages/landing-page";
 import { ProtectedRoute } from "./lib/protected-route";
+import { useAuth } from "@/hooks/use-auth";
 
 interface ErrorBoundaryProps {
   children: ReactNode;
@@ -71,12 +74,28 @@ class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
 function Router() {
   return (
     <Switch>
-      <ProtectedRoute path="/" component={HomePage} />
+      <Route path="/" component={PublicHomeRoute} />
       <Route path="/auth" component={AuthPage} />
+      <Route path="/sign-in" component={AuthPage} />
+      <Route path="/sign-up" component={AuthPage} />
+      <Route path="/pricing" component={SubscribePage} />
       <Route path="/subscribe" component={SubscribePage} />
       <Route component={NotFound} />
     </Switch>
   );
+}
+
+function PublicHomeRoute() {
+  const { user, isLoading } = useAuth();
+  if (isLoading) {
+    return (
+      <div className="min-h-[100dvh] bg-[#f2f1e8] p-8" aria-label="Loading Farm Friend">
+        <div className="mx-auto mt-24 h-10 max-w-3xl animate-pulse rounded-lg bg-[#e0e3d8]" />
+        <div className="mx-auto mt-5 h-56 max-w-3xl animate-pulse rounded-2xl bg-[#e7e8df]" />
+      </div>
+    );
+  }
+  return user ? <ProtectedRoute key={"user-" + String((user as { id?: number }).id ?? "")} path="/" component={HomePage} /> : <LandingPage />;
 }
 
 function App() {
@@ -86,6 +105,7 @@ function App() {
         <AuthProvider>
           <Router />
           <Toaster />
+          <VersionFooter />
         </AuthProvider>
       </QueryClientProvider>
     </ErrorBoundary>

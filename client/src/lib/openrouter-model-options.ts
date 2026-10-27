@@ -1,3 +1,9 @@
+import { FREE_EXPERT_MODELS, isFreeExpertModel } from "@shared/free-plan";
+export const FREE_MODEL_OPTIONS = FREE_EXPERT_MODELS.map((id, i) => ({
+  id, name: ["Claude Haiku 5.5", "MiniMax M3.1 Flash", "GLM 5.3 Flash"][i],
+  description: "Included in the Free plan",
+}));
+
 export interface RequestedOpenRouterModel {
   id: string;
   name: string;
@@ -29,9 +35,11 @@ export const REQUESTED_OPENROUTER_MODELS: RequestedOpenRouterModel[] = [
 
 export function withRequestedOpenRouterModels<T extends { id: string }>(models: T[]) {
   const existingIds = new Set(models.map((model) => model.id));
+  const pinned = [...REQUESTED_OPENROUTER_MODELS, ...FREE_MODEL_OPTIONS]
+    .filter((model, index, all) => all.findIndex(m => m.id === model.id) === index);
   return [
     ...models,
-    ...REQUESTED_OPENROUTER_MODELS.filter((model) => !existingIds.has(model.id)),
+    ...pinned.filter((model) => !existingIds.has(model.id)),
   ];
 }
 
@@ -41,8 +49,12 @@ export function withRequestedOpenRouterModels<T extends { id: string }>(models: 
 export const HOUSE_KEY_MODEL_IDS: readonly string[] = REQUESTED_OPENROUTER_MODELS.map((model) => model.id);
 
 export function isModelAvailableForPlan(id: string, tier: string | null, hasOwnKey: boolean): boolean {
+  if (tier === "free") return isFreeExpertModel(id);
   if (id.endsWith(":free")) return true;
-  if (tier === "free") return false;
   if (tier === "pro" && !hasOwnKey) return HOUSE_KEY_MODEL_IDS.includes(id);
   return true;
+}
+
+export function requiresUpgradeBadge(id: string): boolean {
+  return !isFreeExpertModel(id) && !id.endsWith(":free") && !id.startsWith("local/");
 }

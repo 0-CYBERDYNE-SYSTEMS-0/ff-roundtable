@@ -4,11 +4,14 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { AtSign, Bot, Paperclip, Send, Loader2, Users, ScrollText, PanelRight, ChevronLeft, ChevronDown, ChevronUp, X } from "lucide-react";
+import { AtSign, Bot, Paperclip, Send, Loader2, Users, ScrollText, PanelRight, ChevronLeft, ChevronDown, ChevronUp, X, Download } from "lucide-react";
 import { Message, Expert, User, OpenQuestion } from "@shared/schema";
 import { format } from "date-fns";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { markdownTableComponents } from "./markdown-table";
+import { normalizeMarkdownTablesInText } from "@shared/markdown-table-normalize";
+import { splitIcsBlocks } from "@shared/ics";
 import { formatMessageDate } from "@/lib/file-utils";
 import ModelBadge from "../roundtable/ModelBadge";
 import ConversationSidebar from "../roundtable/ConversationSidebar";
@@ -316,7 +319,9 @@ export default function ChatInterface({
     const handleScroll = () => {
       isNearBottomRef.current =
         viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 120;
-      setShowJumpToLatest(!isNearBottomRef.current);
+      // Scrolling alone never shows the pill; it only hides it once the
+      // reader is back at the bottom.
+      if (isNearBottomRef.current) setShowJumpToLatest(false);
     };
     handleScroll();
     viewport.addEventListener("scroll", handleScroll, { passive: true });
@@ -332,6 +337,23 @@ export default function ChatInterface({
       messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
     }
   }, [messages, streamingMessages, isLoading, isLoadingMessages]);
+
+  // Show the "New messages" pill only when a new message arrives while the
+  // reader is scrolled up (also after a dismissal), never from scrolling.
+  const messageCountRef = useRef<number | null>(null);
+  const messageCount = messages.length + streamingMessages.size;
+  useEffect(() => {
+    const previous = messageCountRef.current;
+    messageCountRef.current = messageCount;
+    if (isLoadingMessages) {
+      messageCountRef.current = null;
+      setShowJumpToLatest(false);
+      return;
+    }
+    if (previous !== null && messageCount > previous && !isNearBottomRef.current) {
+      setShowJumpToLatest(true);
+    }
+  }, [messageCount, isLoadingMessages]);
   // G4: the latest message's mentions drive the expert strip highlight.
   const latestMessage = messages.length > 0 ? messages[messages.length - 1] : null;
   const latestMentionedRoles = new Set(
@@ -504,6 +526,7 @@ export default function ChatInterface({
   // structure, and MentionAwareCode renders those spans as inline pills.
   const markdownComponents = useMemo(
     () => ({
+      ...markdownTableComponents,
       code: (props: React.ComponentPropsWithoutRef<"code"> & { node?: unknown }) => (
         <MentionAwareCode {...props} experts={experts} />
       ),
@@ -525,17 +548,33 @@ export default function ChatInterface({
     }),
     [markdownComponents]
   );
-  const renderMessageBody = (content: string, isSynthesis = false) => {
-    const prepared = content.replace(/@\[([^\]]+)\]/g, (tag) => `\`${tag}\``);
-    return (
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        components={isSynthesis ? synthesisMarkdownComponents : markdownComponents}
-      >
-        {prepared}
-      </ReactMarkdown>
-    );
+  const downloadIcs = (ics: string) => {
+    const url = URL.createObjectURL(new Blob([ics], { type: "text/calendar" }));
+    const link = document.createElement("a");
+    link.href = url; link.download = "calendar.ics"; link.click();
+    URL.revokeObjectURL(url);
   };
+  const renderMessageBody = (content: string, isSynthesis = false) =>
+    splitIcsBlocks(content).map((segment, i) => {
+      if (segment.type === "ics") {
+        return (
+          <Button key={i} type="button" size="sm" variant="outline" className="my-2" onClick={() => downloadIcs(segment.ics)}>
+            <Download className="h-4 w-4 mr-2" />
+            Download calendar (.ics){segment.events ? ` · ${segment.events} event${segment.events === 1 ? "" : "s"}` : ""}
+          </Button>
+        );
+      }
+      const prepared = segment.text.replace(/@\[([^\]]+)\]/g, (tag) => `\`${tag}\``);
+      return (
+        <ReactMarkdown
+          key={i}
+          remarkPlugins={[remarkGfm]}
+          components={isSynthesis ? synthesisMarkdownComponents : markdownComponents}
+        >
+          {normalizeMarkdownTablesInText(prepared)}
+        </ReactMarkdown>
+      );
+    });
 
   const getExpertBubbleColor = (expertId: number) => {
     const borderColors = [
@@ -1004,20 +1043,33 @@ export default function ChatInterface({
         </ScrollArea>
 
         {showJumpToLatest && (
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="absolute bottom-4 left-1/2 z-20 -translate-x-1/2 rounded-full bg-card shadow-md"
-            onClick={() => {
-              isNearBottomRef.current = true;
-              setShowJumpToLatest(false);
-              messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
-            }}
-            aria-label="New messages, jump to latest"
-          >
-            New messages ↓
-          </Button>
+          <div className="absolute bottom-4 left-1/2 z-20 flex -translate-x-1/2 items-center rounded-full border bg-card shadow-md" data-testid="new-messages-pill">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="rounded-l-full rounded-r-none"
+              onClick={() => {
+                isNearBottomRef.current = true;
+                setShowJumpToLatest(false);
+                messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+              }}
+              aria-label="New messages, jump to latest"
+            >
+              New messages ↓
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="rounded-l-none rounded-r-full border-l px-2"
+              onClick={() => setShowJumpToLatest(false)}
+              aria-label="Dismiss new messages notice"
+              data-testid="new-messages-dismiss"
+            >
+              ×
+            </Button>
+          </div>
         )}
         </div>
         

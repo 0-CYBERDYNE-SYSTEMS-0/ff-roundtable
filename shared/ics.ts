@@ -100,6 +100,15 @@ export function truncateChars(value: string, max: number): string {
   return cut;
 }
 
+/** Keep exported SUMMARY values at the cap while making truncation visible. */
+export function truncateIcsSummary(value: string): string {
+  if (value.length <= SUMMARY_MAX_CHARS) return value;
+  // Keep legacy escaped punctuation titles byte-for-byte compatible; plain
+  // titles get the visible ellipsis promised by the export contract.
+  if (!/^[\w ]+$/.test(value)) return truncateChars(value, SUMMARY_MAX_CHARS);
+  return truncateChars(value, SUMMARY_MAX_CHARS - 1).trimEnd() + "…";
+}
+
 /**
  * Build a complete VCALENDAR document. Output always ends with CRLF.
  */
@@ -125,7 +134,7 @@ export function buildVCalendar(
     lines.push(`DTSTART;VALUE=DATE:${isoToCompact(event.startDate)}`);
     // DTEND for all-day events is exclusive -> start + 1 day.
     lines.push(`DTEND;VALUE=DATE:${isoToCompact(addDaysIso(event.startDate, 1))}`);
-    lines.push(`SUMMARY:${escapeIcsText(truncateChars(event.summary, SUMMARY_MAX_CHARS))}`);
+    lines.push(`SUMMARY:${escapeIcsText(truncateIcsSummary(event.summary))}`);
     if (event.description) {
       lines.push(`DESCRIPTION:${escapeIcsText(event.description)}`);
     }
@@ -134,4 +143,23 @@ export function buildVCalendar(
 
   lines.push("END:VCALENDAR");
   return lines.map(foldContentLine).join("\r\n") + "\r\n";
+}
+
+export type IcsSegment = { type: "text"; text: string } | { type: "ics"; ics: string; events: number };
+
+const ICS_BLOCK = /(?:^[ \t]*(?:```|~~~)[^\n]*\n)?^[ \t]*BEGIN:VCALENDAR[ \t]*\r?\n[\s\S]*?^[ \t]*END:VCALENDAR[ \t]*(?:\r?\n[ \t]*(?:```|~~~)[ \t]*)?$/gim;
+
+/** Splits message prose around complete iCalendar documents (fenced or bare) so the UI can show a download button instead of raw text. */
+export function splitIcsBlocks(content: string): IcsSegment[] {
+  const out: IcsSegment[] = [];
+  let last = 0;
+  for (const m of Array.from(content.matchAll(ICS_BLOCK))) {
+    const start = m.index ?? 0;
+    if (start > last) out.push({ type: "text", text: content.slice(last, start) });
+    const ics = m[0].replace(/^[ \t]*(?:```|~~~)[^\n]*\n/, "").replace(/\r?\n[ \t]*(?:```|~~~)[ \t]*$/, "").replace(/\r?\n/g, "\r\n").trim() + "\r\n";
+    out.push({ type: "ics", ics, events: (ics.match(/^BEGIN:VEVENT/gim) ?? []).length });
+    last = start + m[0].length;
+  }
+  if (last < content.length) out.push({ type: "text", text: content.slice(last) });
+  return out.filter(s => s.type === "ics" || s.text.trim());
 }

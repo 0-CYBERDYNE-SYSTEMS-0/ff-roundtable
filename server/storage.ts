@@ -2,11 +2,14 @@ import { users, type User, type InsertUser, conversations, type Conversation, ty
 import { encryptApiKey, decryptApiKey } from "./crypto";
 import createMemoryStore from "memorystore";
 import session from "express-session";
-import { Pool } from "pg";
+import type { Pool } from "pg";
+import { getDatabasePool } from "./database-pool";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { eq, desc, asc, and, isNull, isNotNull, max, sql } from "drizzle-orm";
 import ConnectPgSimple from "connect-pg-simple";
 import type { DeliverableGenerationRequest, SaveDeliverableVersionResult } from "@shared/schema";
+import { freeQuotaWindows, freeQuotaDenial, type CapDenial } from "./usage-caps";
+import { freeRoundtableStarts } from "@shared/schema";
 
 const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || "";
 
@@ -24,14 +27,17 @@ export class DeliverableConflictError extends Error {}
 // modify the interface with any CRUD methods
 // you might need
 export type ConversationWithActivity = Conversation & { updatedAt: Date | null };
+type UserStripeInfo = Pick<User, "stripeCustomerId"> &
+  Partial<Pick<User, "stripeSubscriptionId" | "tier" | "subscriptionStatus">>;
 
 export interface IStorage {
   // User operations
   getUser(id: number): Promise<User | undefined>;
   getUserByUsername(username: string): Promise<User | undefined>;
   getUserByStripeSubscriptionId(subscriptionId: string): Promise<User | undefined>;
+  getUserByStripeCustomerId(customerId: string): Promise<User | undefined>;
   createUser(user: InsertUser): Promise<User>;
-  updateUserStripeInfo(userId: number, stripeInfo: { stripeCustomerId: string, stripeSubscriptionId: string }): Promise<User>;
+  updateUserStripeInfo(userId: number, stripeInfo: UserStripeInfo): Promise<User>;
   updateSubscriptionStatus(userId: number, status: string): Promise<User>;
   getUserApiKey(userId: number): Promise<string | null>;
   setUserApiKey(userId: number, key: string): Promise<void>;
@@ -40,6 +46,7 @@ export interface IStorage {
   // Pricing caps (server/usage-caps.ts). period = "YYYY-MM" UTC.
   getMonthlyUsage(userId: number, period: string): Promise<{ messageCount: number; aiSpendUsd: number }>;
   incrementMonthlyMessages(userId: number, period: string): Promise<number>;
+  consumeFreeMessageAllowance(userId: number, now?: Date, roundtableKey?: string): Promise<CapDenial | null>;
   addMonthlyAiSpend(userId: number, period: string, usd: number): Promise<void>;
   
   // Conversation operations
@@ -58,6 +65,7 @@ export interface IStorage {
   
   // Expert operations
   createExpert(expert: InsertExpert): Promise<Expert>;
+  createExpertWithinLimit(expert: InsertExpert, limit: number): Promise<Expert | undefined>;
   getExpertById(expertId: number): Promise<Expert | undefined>;
   getConversationExperts(conversationId: number): Promise<Expert[]>;
   updateExpert(expertId: number, updates: Partial<Expert>): Promise<Expert>;
@@ -186,6 +194,12 @@ export class MemStorage implements IStorage {
     );
   }
 
+  async getUserByStripeCustomerId(customerId: string): Promise<User | undefined> {
+    return Array.from(this.users.values()).find(
+      (user) => user.stripeCustomerId === customerId,
+    );
+  }
+
   async createUser(insertUser: InsertUser): Promise<User> {
     const id = this.userId++;
     const now = new Date();
@@ -203,14 +217,13 @@ export class MemStorage implements IStorage {
     return user;
   }
   
-  async updateUserStripeInfo(userId: number, stripeInfo: { stripeCustomerId: string, stripeSubscriptionId: string }): Promise<User> {
+  async updateUserStripeInfo(userId: number, stripeInfo: UserStripeInfo): Promise<User> {
     const user = await this.getUser(userId);
     if (!user) throw new Error(`User with ID ${userId} not found`);
     
     const updatedUser: User = {
       ...user,
-      stripeCustomerId: stripeInfo.stripeCustomerId,
-      stripeSubscriptionId: stripeInfo.stripeSubscriptionId
+      ...stripeInfo,
     };
 
     this.users.set(userId, updatedUser);
@@ -231,6 +244,26 @@ export class MemStorage implements IStorage {
   }
 
   private usage = new Map<string, { messageCount: number; aiSpendUsd: number }>();
+  private freeStarts = new Set<string>();
+
+  async consumeFreeMessageAllowance(userId: number, now = new Date(), roundtableKey?: string): Promise<CapDenial | null> {
+    const key = roundtableKey ? `${userId}:${freeQuotaWindows(now)[0].period}:${roundtableKey}` : undefined;
+    const windows = freeQuotaWindows(now).filter((_, i) => i !== 0 || !key || !this.freeStarts.has(key));
+    for (const window of windows) {
+      if ((this.usage.get(`${userId}:${window.period}`)?.messageCount ?? 0) >= window.limit) {
+        return freeQuotaDenial(window);
+      }
+    }
+    // No await between checking and incrementing: concurrent admissions cannot
+    // race in the in-memory backend.
+    for (const window of windows) {
+      const key = `${userId}:${window.period}`;
+      const row = this.usage.get(key) ?? { messageCount: 0, aiSpendUsd: 0 };
+      this.usage.set(key, { ...row, messageCount: row.messageCount + 1 });
+    }
+    if (key) this.freeStarts.add(key);
+    return null;
+  }
 
   async getMonthlyUsage(userId: number, period: string) {
     return { ...(this.usage.get(`${userId}:${period}`) ?? { messageCount: 0, aiSpendUsd: 0 }) };
@@ -356,6 +389,11 @@ export class MemStorage implements IStorage {
   }
   
   // Expert operations
+  async createExpertWithinLimit(expert: InsertExpert, limit: number): Promise<Expert | undefined> {
+    if (Array.from(this.experts.values()).filter(row => row.conversationId === expert.conversationId).length >= limit) return undefined;
+    return this.createExpert(expert);
+  }
+
   async createExpert(insertExpert: InsertExpert): Promise<Expert> {
     const id = this.expertId++;
     const expert: Expert = {
@@ -671,14 +709,7 @@ export class PostgresStorage implements IStorage {
   sessionStore: session.Store;
 
   constructor(databaseUrl: string) {
-    this.pool = new Pool({
-      connectionString: databaseUrl,
-      max: 10,
-      // Columns are `timestamp without time zone` and are read back as UTC.
-      // Pin the session to UTC so defaultNow() writes UTC, whatever the
-      // Postgres server's own TimeZone is (a PT server shifted times by 7h).
-      options: "-c timezone=UTC",
-    });
+    this.pool = getDatabasePool(databaseUrl);
 
     this.db = drizzle(this.pool, {
       schema: { users, conversations, experts, messages, openQuestions, files, insights, farmProfiles, weatherCache, usageMonthly },
@@ -733,18 +764,20 @@ export class PostgresStorage implements IStorage {
     return result[0];
   }
 
+  async getUserByStripeCustomerId(customerId: string): Promise<User | undefined> {
+    const result = await this.db.select().from(users).where(eq(users.stripeCustomerId, customerId)).limit(1);
+    return result[0];
+  }
+
   async createUser(insertUser: InsertUser): Promise<User> {
     const result = await this.db.insert(users).values(insertUser).returning();
     return result[0];
   }
 
-  async updateUserStripeInfo(userId: number, stripeInfo: { stripeCustomerId: string; stripeSubscriptionId: string }): Promise<User> {
+  async updateUserStripeInfo(userId: number, stripeInfo: UserStripeInfo): Promise<User> {
     const result = await this.db
       .update(users)
-      .set({
-        stripeCustomerId: stripeInfo.stripeCustomerId,
-        stripeSubscriptionId: stripeInfo.stripeSubscriptionId,
-      })
+      .set(stripeInfo)
       .where(eq(users.id, userId))
       .returning();
 
@@ -761,6 +794,38 @@ export class PostgresStorage implements IStorage {
 
     if (!result[0]) throw new Error(`User with ID ${userId} not found`);
     return result[0];
+  }
+
+  async consumeFreeMessageAllowance(userId: number, now = new Date(), roundtableKey?: string): Promise<CapDenial | null> {
+    return this.db.transaction(async (tx) => {
+      let windows = freeQuotaWindows(now);
+      const monthly = { userId, period: windows[0].period, messageCount: 0, aiSpendUsd: 0 };
+      await tx.insert(usageMonthly).values(monthly).onConflictDoNothing();
+      // One durable lock per user/month serializes admissions across processes
+      // and conversations. Minute/day counters survive restarts and autoscale.
+      await tx.select().from(usageMonthly)
+        .where(and(eq(usageMonthly.userId, userId), eq(usageMonthly.period, monthly.period))).for("update");
+      const key = roundtableKey ? `${userId}:${monthly.period}:${roundtableKey}` : undefined;
+      if (key) {
+        const [existing] = await tx.select().from(freeRoundtableStarts).where(eq(freeRoundtableStarts.key, key));
+        if (existing) windows = windows.slice(1);
+      }
+      for (const window of windows) {
+        const [row] = await tx.select().from(usageMonthly)
+          .where(and(eq(usageMonthly.userId, userId), eq(usageMonthly.period, window.period)));
+        if ((row?.messageCount ?? 0) >= window.limit) return freeQuotaDenial(window);
+      }
+      for (const window of windows) {
+        await tx.insert(usageMonthly)
+          .values({ userId, period: window.period, messageCount: 1, aiSpendUsd: 0 })
+          .onConflictDoUpdate({
+            target: [usageMonthly.userId, usageMonthly.period],
+            set: { messageCount: sql`${usageMonthly.messageCount} + 1` },
+          });
+      }
+      if (key) await tx.insert(freeRoundtableStarts).values({ key, userId, period: monthly.period }).onConflictDoNothing();
+      return null;
+    });
   }
 
   async getMonthlyUsage(userId: number, period: string) {
@@ -897,6 +962,16 @@ export class PostgresStorage implements IStorage {
   }
 
   // ── Expert operations ──────────────────────────────────────────────────────
+
+  async createExpertWithinLimit(expert: InsertExpert, limit: number): Promise<Expert | undefined> {
+    return this.db.transaction(async (tx) => {
+      await tx.select().from(conversations).where(eq(conversations.id, expert.conversationId)).for("update");
+      const rows = await tx.select({ id: experts.id }).from(experts).where(eq(experts.conversationId, expert.conversationId));
+      if (rows.length >= limit) return undefined;
+      const [created] = await tx.insert(experts).values(expert).returning();
+      return created;
+    });
+  }
 
   async createExpert(insertExpert: InsertExpert): Promise<Expert> {
     const result = await this.db.insert(experts).values(insertExpert).returning();

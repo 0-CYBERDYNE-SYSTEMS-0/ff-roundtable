@@ -27,6 +27,7 @@ vi.mock("../server/storage", () => ({
     getConversation: mockGetConversation,
     getConversationExperts: mockGetConversationExperts,
     getUserApiKey: mockGetUserApiKey,
+    getUser: vi.fn().mockResolvedValue({ id: 42, tier: "pro" }),
   },
 }));
 
@@ -50,12 +51,22 @@ describe("AI Providers", () => {
     mockFetch.mockClear();
     mockGetConversation.mockReset();
     mockGetConversationExperts.mockReset();
-    mockGetUserApiKey.mockReset().mockResolvedValue(null);
+    // These tests isolate transport/formatting; house-key policy is covered
+    // in usage-caps.test.ts. Use the test key as this signed-in user's BYOK.
+    mockGetUserApiKey.mockReset().mockImplementation(async () => process.env.OPENROUTER_API_KEY || null);
     delete process.env.LOCAL_AI_BASE_URL;
     delete process.env.LOCAL_AI_API_KEY;
     delete process.env.OPENROUTER_API_KEY;
     delete process.env.OPENROUTER_REASONING_EFFORT;
     delete process.env.OPENROUTER_SPEND_CAP_USD;
+  });
+
+  it.each([new OpenRouterProvider(null), new LocalOpenAIProvider()])("denies anonymous chat and streaming before dispatch", async provider => {
+    await expect(provider.chat([{ role: "user", content: "hello" }], "arbitrary/model"))
+      .rejects.toMatchObject({ denial: { code: "ai_user_required" } });
+    await expect(provider.chatStream([{ role: "user", content: "hello" }], "arbitrary/model", () => {}))
+      .rejects.toMatchObject({ denial: { code: "ai_user_required" } });
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 
   describe("Moderator suggestion storage failures", () => {
@@ -136,7 +147,7 @@ describe("AI Providers", () => {
       });
 
       const provider = new LocalOpenAIProvider();
-      await provider.chat([{ role: "user", content: "hello" }], "local/llama3");
+      await provider.chat([{ role: "user", content: "hello" }], "local/llama3", 42);
 
       const callUrl = mockFetch.mock.calls[0][0];
       expect(callUrl).toBe("http://localhost:11434/v1/chat/completions");
@@ -153,7 +164,7 @@ describe("AI Providers", () => {
       });
 
       const provider = new LocalOpenAIProvider();
-      await provider.chat([{ role: "user", content: "hello" }], "local/llama3");
+      await provider.chat([{ role: "user", content: "hello" }], "local/llama3", 42);
 
       const callUrl = mockFetch.mock.calls[0][0];
       expect(callUrl).toBe("http://my-local-ai:8080/v1/chat/completions");
@@ -170,7 +181,7 @@ describe("AI Providers", () => {
       });
 
       const provider = new LocalOpenAIProvider();
-      await provider.chat([{ role: "user", content: "hello" }], "local/llama3.1:8b");
+      await provider.chat([{ role: "user", content: "hello" }], "local/llama3.1:8b", 42);
 
       const callBody = JSON.parse(mockFetch.mock.calls[0][1].body);
       expect(callBody.model).toBe("llama3.1:8b");
@@ -192,7 +203,7 @@ describe("AI Providers", () => {
       });
 
       const provider = new OpenRouterProvider();
-      await provider.chat([{ role: "user", content: "hello" }], "deepseek/deepseek-v3");
+      await provider.chat([{ role: "user", content: "hello" }], "deepseek/deepseek-v3", 42);
 
       const [_url, options] = mockFetch.mock.calls[0];
       expect(options.headers["Authorization"]).toBe("Bearer or-key-123");
@@ -216,7 +227,7 @@ describe("AI Providers", () => {
       });
 
       const provider = new OpenRouterProvider(1);
-      const result = await provider.chat([{ role: "user", content: "Question" }], "deepseek/deepseek-v4.1-flash");
+      const result = await provider.chat([{ role: "user", content: "Question" }], "deepseek/deepseek-v4.1-flash", 42);
       const body = JSON.parse(mockFetch.mock.calls[0][1].body);
 
       expect(body.usage).toEqual({ include: true });
@@ -242,7 +253,7 @@ describe("AI Providers", () => {
       ]));
 
       const provider = new OpenRouterProvider(0.5);
-      const result = await provider.chatStream([{ role: "user", content: "Question" }], "z-ai/glm-5.3-flash", () => {});
+      const result = await provider.chatStream([{ role: "user", content: "Question" }], "z-ai/glm-5.3-flash", () => {}, 42);
       const body = JSON.parse(mockFetch.mock.calls[0][1].body);
 
       expect(body.usage).toEqual({ include: true });
@@ -266,8 +277,8 @@ describe("AI Providers", () => {
       });
       const provider = new OpenRouterProvider(0.3);
 
-      await provider.chat([{ role: "user", content: "Question" }], "z-ai/glm-5.3-flash");
-      await expect(provider.chat([{ role: "user", content: "Another question" }], "z-ai/glm-5.3-flash"))
+      await provider.chat([{ role: "user", content: "Question" }], "z-ai/glm-5.3-flash", 42);
+      await expect(provider.chat([{ role: "user", content: "Another question" }], "z-ai/glm-5.3-flash", 42))
         .rejects.toThrow("spend limit has been reached");
 
       expect(mockFetch).toHaveBeenCalledTimes(1);
@@ -282,7 +293,7 @@ describe("AI Providers", () => {
       });
       const provider = new OpenRouterProvider(0.4);
 
-      await provider.chat([{ role: "user", content: "Question" }], "z-ai/glm-5.3-flash");
+      await provider.chat([{ role: "user", content: "Question" }], "z-ai/glm-5.3-flash", 42);
 
       expect(provider.getUsageSnapshot()).toMatchObject({
         spentUsd: 0.4,
@@ -304,9 +315,9 @@ describe("AI Providers", () => {
 
       const provider = new OpenRouterProvider();
       if (method === "chat") {
-        await provider.chat([{ role: "user", content: "Question" }], "xiaomi/mimo-v2.6-flash", undefined, true);
+        await provider.chat([{ role: "user", content: "Question" }], "xiaomi/mimo-v2.6-flash", 42, true);
       } else {
-        await provider.chatStream([{ role: "user", content: "Question" }], "xiaomi/mimo-v2.6-flash", () => {}, undefined, true);
+        await provider.chatStream([{ role: "user", content: "Question" }], "xiaomi/mimo-v2.6-flash", () => {}, 42, true);
       }
 
       const body = JSON.parse(mockFetch.mock.calls[0][1].body);
@@ -346,9 +357,9 @@ describe("AI Providers", () => {
 
       const provider = new OpenRouterProvider();
       if (method === "chat") {
-        await provider.chat([{ role: "user", content: "hello" }], "openai/gpt-6-luna");
+        await provider.chat([{ role: "user", content: "hello" }], "openai/gpt-6-luna", 42);
       } else {
-        await provider.chatStream([{ role: "user", content: "hello" }], "openai/gpt-6-luna", () => {});
+        await provider.chatStream([{ role: "user", content: "hello" }], "openai/gpt-6-luna", () => {}, 42);
       }
 
       const body = JSON.parse(mockFetch.mock.calls[0][1].body);
@@ -363,7 +374,7 @@ describe("AI Providers", () => {
       const provider = new OpenRouterProvider();
 
       await expect(
-        provider.chatStream([{ role: "user", content: "hello" }], "z-ai/glm-5.3-flash", () => {}),
+        provider.chatStream([{ role: "user", content: "hello" }], "z-ai/glm-5.3-flash", () => {}, 42),
       ).rejects.toThrow("OpenRouter could not complete this request");
     });
 
@@ -376,7 +387,7 @@ describe("AI Providers", () => {
       const provider = new OpenRouterProvider();
 
       await expect(
-        provider.chatStream([{ role: "user", content: "hello" }], "z-ai/glm-5.3-flash", () => {}),
+        provider.chatStream([{ role: "user", content: "hello" }], "z-ai/glm-5.3-flash", () => {}, 42),
       ).rejects.toThrow("output limit");
     });
 
@@ -391,7 +402,7 @@ describe("AI Providers", () => {
       const provider = new OpenRouterProvider();
 
       await expect(
-        provider.chat([{ role: "user", content: "hello" }], "z-ai/glm-5.3-flash"),
+        provider.chat([{ role: "user", content: "hello" }], "z-ai/glm-5.3-flash", 42),
       ).rejects.toThrow("shorter response or split");
     });
 
@@ -400,7 +411,7 @@ describe("AI Providers", () => {
       const provider = new OpenRouterProvider();
 
       await expect(
-        provider.chat([{ role: "user", content: "hello" }], "deepseek/deepseek-v3")
+        provider.chat([{ role: "user", content: "hello" }], "deepseek/deepseek-v3", 42)
       ).rejects.toThrow("OpenRouter API key not provided");
     });
   });
@@ -434,7 +445,7 @@ describe("AI Providers", () => {
       });
 
       const provider = new OpenRouterProvider();
-      await provider.chat(multimodalMessages, "openai/gpt-4o");
+      await provider.chat(multimodalMessages, "openai/gpt-4o", 42);
 
       const body = JSON.parse(mockFetch.mock.calls[0][1].body);
       expect(body.messages).toEqual(multimodalMessages);
@@ -453,7 +464,7 @@ describe("AI Providers", () => {
       });
 
       const provider = new LocalOpenAIProvider();
-      await provider.chat(multimodalMessages, "local/llava");
+      await provider.chat(multimodalMessages, "local/llava", 42);
 
       const body = JSON.parse(mockFetch.mock.calls[0][1].body);
       expect(body.messages).toEqual(multimodalMessages);

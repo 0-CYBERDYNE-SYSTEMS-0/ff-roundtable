@@ -1,3 +1,4 @@
+import { buildSha } from "./version";
 import { catalogAvatar } from "@shared/expert-catalog";
 import { billingErrorResponse, billingUnavailable } from "./billing-errors";
 import type { Express, Request, Response } from "express";
@@ -11,22 +12,27 @@ import { encryptApiKey, decryptApiKey, maskApiKey } from "./crypto";
 import multer from "multer";
 import path from "path";
 import fs from "fs";
-import { createHmac, randomBytes, timingSafeEqual } from "crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "crypto";
 import Stripe from "stripe";
 import { WebSocketServer, type RawData } from "ws";
 import { InsertConversation, InsertExpert, InsertMessage, Message, type File, insertFarmProfileSchema } from "@shared/schema";
 import { z } from "zod";
 import { extractMentions } from "@shared/mentions";
-import { buildVCalendar } from "@shared/ics";
+import { buildVCalendar, truncateIcsSummary } from "@shared/ics";
 import { calendarEventsSchema, type CalendarDraft } from "@shared/calendar-draft";
 import { inspectCalendar } from "./calendar-files";
-import { extractScheduleRows, parseIsoDate, nextMondayFrom, resolveRowStartDate, buildRowSummary } from "@shared/schedule-extract";
+import { extractScheduleRows, parseIsoDate, nextMondayFrom, resolveRowStartDate, buildRowSummary, resolveScheduleAnchor, findConversationAnchor, findPlanAnchor, planFileTexts, calendarDisplayName, finalizeCalendarEvents, findFrostAnchor } from "@shared/schedule-extract";
+import { firstDatedScheduleAnchor } from "@shared/calendar-anchor";
 import { generateComprehensiveMarkdown } from './export-utils';
 import { getWeatherForFarm, formatWeatherContext } from './weather';
 import { isDuplicateUserSubmission } from './text-similarity';
 import { format } from 'date-fns';
 import { TIERS, getTierLimits, isPaidModel } from './tiers';
-import { checkMessageAllowance, currentUsagePeriod, isHouseKeyAllowedModel, HOUSE_KEY_PAID_MODEL_ALLOWLIST, UsageCapError, monthlyAiBudgetUsd, BUDGET_EXHAUSTED_NOTICE } from './usage-caps';
+import { getModelCatalog } from "./model-catalog";
+import { checkMessageAllowance, currentUsagePeriod, isHouseKeyAllowedModel, HOUSE_KEY_PAID_MODEL_ALLOWLIST, UsageCapError, monthlyAiBudgetUsd, BUDGET_EXHAUSTED_NOTICE, BUDGET_FALLBACK_MODEL, FREE_MAX_TURNS, FREE_MAX_MESSAGE_CHARS, FREE_MESSAGES_PER_MINUTE, FREE_MESSAGES_PER_DAY } from './usage-caps';
+import { FREE_EXPERT_MODELS, isFreeExpertModel } from "@shared/free-plan";
+import { assertFreeCapacity } from "./free-capacity";
+import { randomUUID } from "crypto";
 
 class OpenQuestionAnswerConflictError extends Error {}
 const rememberedAnswerTurnStarts = new Map<number, number>();
@@ -206,6 +212,21 @@ function getVerifiedSessionIdFromUpgradeRequest(req: { headers: { cookie?: strin
 }
 
 export async function registerRoutes(app: Express): Promise<Server> {
+  app.get("/api/models", async (_req, res) => {
+    try {
+      const catalog = await getModelCatalog();
+      // Only what the expert picker reads, not the full OpenRouter record for every model.
+      const data = catalog.data.map((m: any) => ({
+        id: m.id, name: m.name, description: m.description, context_length: m.context_length,
+        pricing: { prompt: m.pricing?.prompt, completion: m.pricing?.completion },
+      }));
+      res.set("Cache-Control", "public, max-age=600").json({ data });
+    } catch (error) {
+      console.error("Model catalog fetch failed:", (error as Error).message);
+      res.set("Cache-Control", "no-store").status(502).json({ message: "AI models are temporarily unavailable. Please try again shortly." });
+    }
+  });
+
   // Liveness/readiness for docker-compose and uptime checks (README-SELF-HOST).
   app.get("/api/health", async (_req, res) => {
     let database: "ok" | "memory" | "error" = process.env.DATABASE_URL ? "ok" : "memory";
@@ -239,6 +260,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Public build id so QA can confirm which commit is running (hex sha only).
+  app.get("/api/version", (_req, res) => { res.json({ sha: buildSha() }); });
+
   // Special development login endpoint
   if (DEVELOPMENT_MODE) {
     app.post("/api/dev-login", async (req, res) => {
@@ -264,6 +288,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
         console.error("Dev login error:", error);
         res.status(500).json({ message: "Development login failed", error: error.message });
       }
+    });
+
+    app.get("/api/dev/ics-title-check", (req, res) => {
+      if (process.env.NODE_ENV === "production") return res.status(404).json({ message: "Not found" });
+      const raw = Number(req.query.len);
+      const inputLength = Number.isFinite(raw) ? Math.max(0, Math.min(500, Math.floor(raw))) : 0;
+      const summary = truncateIcsSummary("A".repeat(inputLength));
+      buildVCalendar([{ uid: "dev-title-check", summary, startDate: "2027-01-01" }], "Dev title check");
+      return res.json({ inputLength, summary, summaryLength: summary.length });
     });
     
     console.log("Development login endpoint registered at /api/dev-login");
@@ -356,9 +389,18 @@ export async function registerRoutes(app: Express): Promise<Server> {
   const httpServer = createServer(app);
   
   // Initialize WebSocket server for real-time expert responses
-  const wss = new WebSocketServer({ 
-    server: httpServer,
-    path: "/ws" // Specify a path for WebSocket connections
+  // noServer + explicit routing: `new WebSocketServer({ server, path })` answers
+  // EVERY other upgrade on this http server with 400, which killed Vite's dev
+  // HMR socket (client then fell back to wss://localhost:undefined). Only /ws
+  // is handled here; other upgrades (Vite HMR at /vite-hmr) are left alone.
+  const wss = new WebSocketServer({ noServer: true });
+  httpServer.on("upgrade", (req, socket, head) => {
+    let pathname = "";
+    try { pathname = new URL(req.url ?? "", "http://localhost").pathname; } catch { /* malformed */ }
+    if (pathname !== "/ws") return;
+    // Diagnostics (no secrets): which upgrades reach /ws and whether a session cookie came with them.
+    console.log(`[WS] upgrade ${pathname}${(req.url ?? "").includes("?") ? "?…" : ""} cookie=${/(?:^|;\s*)connect\.sid=/.test(req.headers.cookie ?? "") ? "yes" : "no"}`);
+    wss.handleUpgrade(req, socket, head, ws => wss.emit("connection", ws, req));
   });
   
   console.log("WebSocket server initialized on path: /ws");
@@ -381,6 +423,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     const sid = getVerifiedSessionIdFromUpgradeRequest(req);
 
     if (!sid) {
+      console.log(`[WS] 4401: ${req.headers.cookie?.includes("connect.sid=") ? "session cookie signature did not verify (SESSION_SECRET " + (process.env.SESSION_SECRET ? "set" : "missing") + ")" : "no session cookie on upgrade"}`);
       rejectUnauthenticated();
       return;
     }
@@ -406,6 +449,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       const userId = session?.passport?.user;
       if (err || userId == null) {
+        console.log(`[WS] 4401: ${err ? "session store error" : "session has no logged-in user"}`);
         rejectUnauthenticated();
         return;
       }
@@ -679,14 +723,22 @@ export async function registerRoutes(app: Express): Promise<Server> {
     return { questionId: question.id };
   }
 
-  async function assertMessageAllowance(userId: number): Promise<void> {
+  async function assertMessageAllowance(userId: number, roundtableKey?: string): Promise<void> {
     const user = await storage.getUser(userId);
+    if ((user?.tier || "free") === "free") {
+      await assertFreeCapacity();
+      const denial = await storage.consumeFreeMessageAllowance(userId, new Date(), roundtableKey);
+      if (denial) throw new UsageCapError(denial);
+      return;
+    }
     const usage = await storage.getMonthlyUsage(userId, currentUsagePeriod());
     const denial = checkMessageAllowance(user?.tier, usage.messageCount);
     if (denial) throw new UsageCapError(denial);
   }
 
   async function recordUserMessage(userId: number): Promise<void> {
+    // Free allowance is reserved atomically before any work is dispatched.
+    if (((await storage.getUser(userId))?.tier || "free") === "free") return;
     try {
       await storage.incrementMonthlyMessages(userId, currentUsagePeriod());
     } catch (err) {
@@ -790,7 +842,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
 
     // Pricing caps: a "message" = one farmer message (see server/usage-caps.ts).
-    await assertMessageAllowance(userId);
+    if (((await storage.getUser(userId))?.tier || "free") === "free" && content.length > FREE_MAX_MESSAGE_CHARS) {
+      throw new UsageCapError({ status: 429, code: "free_message_too_long", message: `Please keep Free questions under ${FREE_MAX_MESSAGE_CHARS} characters, or upgrade to Pro.`, upgradeUrl: "/subscribe" });
+    }
+    await assertMessageAllowance(userId, `conversation:${conversationId}`);
 
     const conversationExperts = await storage.getConversationExperts(conversationId);
     const userMessage: InsertMessage = {
@@ -886,7 +941,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
         customerId = customer.id;
         await storage.updateUserStripeInfo(user.id, {
           stripeCustomerId: customerId,
-          stripeSubscriptionId: user.stripeSubscriptionId || "",
         });
       }
 
@@ -895,13 +949,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (interval !== "month" && interval !== "year") {
         return res.status(400).json({ message: 'interval must be "month" or "year"' });
       }
-      const priceId = interval === "year" ? process.env.STRIPE_PRICE_ID_PRO_ANNUAL : process.env.STRIPE_PRICE_ID_PRO;
+      const priceId = interval === "year" ? process.env.STRIPE_PRICE_ID_PRO_ANNUAL : (process.env.STRIPE_PRICE_ID_PRO || process.env.STRIPE_PRICE_ID);
       if (!priceId) {
         { const r = billingUnavailable(interval === "year" ? "Stripe annual Pro price ID not configured" : "Stripe Pro price ID not configured"); return res.status(r.status).json(r.body); }
       }
 
       const session = await stripe.checkout.sessions.create({
         customer: customerId,
+        client_reference_id: String(user.id),
+        metadata: { userId: String(user.id) },
         mode: "subscription",
         line_items: [{ price: priceId, quantity: 1 }],
         success_url: `${req.headers.origin || process.env.ALLOWED_ORIGIN || "http://localhost:5173"}/dashboard?checkout=success`,
@@ -1012,8 +1068,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
     const sig = req.headers["stripe-signature"];
     const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
     
-    if (!stripe || !endpointSecret || !sig) {
-      return res.status(400).json({ message: "Missing Stripe configuration" });
+    if (!stripe || !endpointSecret) {
+      console.warn("[STRIPE] Webhook received but STRIPE_SECRET_KEY / STRIPE_WEBHOOK_SECRET are not configured.");
+      return res.status(503).json({ message: "Stripe webhooks are not configured on this server" });
+    }
+    if (!sig) {
+      return res.status(400).json({ message: "Missing Stripe signature" });
     }
     
     let event;
@@ -1032,6 +1092,40 @@ export async function registerRoutes(app: Express): Promise<Server> {
     
     // Handle subscription events
     switch (event.type) {
+      case "checkout.session.completed":
+        try {
+          const session = event.data.object as Stripe.Checkout.Session;
+          const customerId = typeof session.customer === "string" ? session.customer : session.customer?.id;
+          const subscriptionId = typeof session.subscription === "string" ? session.subscription : session.subscription?.id;
+          if (session.mode !== "subscription" || !customerId || !subscriptionId) break;
+
+          let user;
+          for (const reference of [session.client_reference_id, session.metadata?.userId]) {
+            const userId = Number(reference);
+            if (Number.isSafeInteger(userId) && userId > 0) {
+              user = await storage.getUser(userId);
+              if (user) break;
+            }
+          }
+          user ??= await storage.getUserByStripeCustomerId(customerId);
+          if (!user) {
+            return res.status(500).json({ message: "Checkout user not found" });
+          }
+          if (user.tier === "pro" && user.subscriptionStatus === "active" &&
+              user.stripeCustomerId === customerId && user.stripeSubscriptionId === subscriptionId) break;
+
+          await storage.updateUserStripeInfo(user.id, {
+            stripeCustomerId: customerId,
+            stripeSubscriptionId: subscriptionId,
+            tier: "pro",
+            subscriptionStatus: "active",
+          });
+        } catch (error) {
+          console.error("Error processing checkout.session.completed:", error);
+          return res.status(500).json({ message: "Checkout activation failed" });
+        }
+        break;
+
       case "invoice.payment_succeeded":
         try {
           const invoice = event.data.object as any; // Type assertion to avoid TS errors
@@ -1078,11 +1172,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const user = await storage.getUser(req.user!.id);
       const tier = user?.tier || "free";
       const limits = getTierLimits(tier);
-      const usage = await storage.getMonthlyUsage(req.user!.id, currentUsagePeriod());
+      const usage = await storage.getMonthlyUsage(req.user!.id, tier === "free" ? `free:roundtables:${currentUsagePeriod()}` : currentUsagePeriod());
       res.json({
         tier,
         limits,
-        usage: { period: currentUsagePeriod(), messages: usage.messageCount },
+        usage: { period: currentUsagePeriod(), messages: usage.messageCount, unit: tier === "free" ? "roundtables" : "messages" },
+        freeLimits: { perMinute: FREE_MESSAGES_PER_MINUTE, perDay: FREE_MESSAGES_PER_DAY, maxTurns: FREE_MAX_TURNS },
         // True once house-key paid calls are falling back to free models.
         aiBudgetExhausted: tier === "pro" && !user?.openRouterKey && usage.aiSpendUsd >= monthlyAiBudgetUsd(tier),
         aiBudgetNotice: BUDGET_EXHAUSTED_NOTICE,
@@ -1101,7 +1196,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
       
       const conversation: InsertConversation = {
         userId,
-        title
+        title,
+        ...(((await storage.getUser(userId))?.tier || "free") === "free" ? { turnBudget: FREE_MAX_TURNS } : {}),
       };
       
       const createdConversation = await storage.createConversation(conversation);
@@ -1160,6 +1256,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const updates = parsed.data.turnBudget === 0
         ? { ...parsed.data, turnBudget: null }
         : parsed.data;
+      if (updates.turnBudget !== undefined && ((await storage.getUser(req.user!.id))?.tier || "free") === "free") {
+        updates.turnBudget = Math.min(updates.turnBudget ?? FREE_MAX_TURNS, FREE_MAX_TURNS);
+      }
       const updatedConversation = await storage.updateConversation(conversationId, updates);
       if (!updatedConversation) {
         return res.status(404).json({ message: "Conversation not found" });
@@ -1227,7 +1326,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
         });
       }
       
-      const { name, model } = req.body;
+      const { name } = req.body;
+      // Keep allowlisted Free picks; distribute missing picks across the lineup.
+      const requestedModel = typeof req.body.model === "string" ? req.body.model.trim() : "";
+      const model = tier === "free" && !requestedModel ? FREE_EXPERT_MODELS[existingExperts.filter(e => e.role !== "Moderator").length % 3] : requestedModel || req.body.model;
       const role = typeof req.body.role === "string" ? req.body.role.trim().slice(0, 60) : "";
       if (!role || /^(user|farmer)$/i.test(role)) {
         return res.status(400).json({ message: "Choose a valid expert role." });
@@ -1241,11 +1343,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // Built-in roles always get the bundled avatar; custom roles get the custom badge.
       const avatarUrl = catalogAvatar(role);
 
-      // Check paid model restriction for free tier
-      if (tier === "free" && isPaidModel(model)) {
+      // Only the three included expert models may be selected on Free.
+      if (tier === "free" && !isFreeExpertModel(model)) {
         return res.status(403).json({
           code: "TIER_LIMIT_MODEL",
-          message: "Upgrade to Pro for paid models",
+          message: "Choose Claude Haiku 5.5, MiniMax M3.1 Flash or GLM 5.3 Flash on Free, or upgrade to Pro.",
         });
       }
       if (await houseKeyModelDenied(req.user!.id, tier, model)) {
@@ -1265,7 +1367,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
         customInstructions,
       };
       
-      const createdExpert = await storage.createExpert(expert);
+      const createdExpert = tier === "free"
+        ? await storage.createExpertWithinLimit(expert, limits.maxExperts)
+        : await storage.createExpert(expert);
+      if (!createdExpert) {
+        return res.status(403).json({ code: "TIER_LIMIT_EXPERTS", message: "Free roundtables support up to 3 experts. Upgrade to Pro for up to 8.", upgradeUrl: "/subscribe" });
+      }
       res.status(201).json(createdExpert);
     } catch (error: any) {
       res.status(500).json({ message: error.message });
@@ -1345,16 +1452,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (model !== undefined) updates.model = model;
       if (customInstructions !== undefined) updates.customInstructions = customInstructions;
 
-      // Enforce the same paid-model restriction as expert creation — without
-      // this, free-tier users can upgrade any expert's model via the settings
-      // modal and bypass the gate entirely.
+      // Enforce the same exact Free allowlist on settings updates.
       if (model !== undefined) {
         const user = await storage.getUser(req.user!.id);
         const tier = user?.tier || "free";
-        if (tier === "free" && isPaidModel(model)) {
+        if (tier === "free" && !isFreeExpertModel(model)) {
           return res.status(403).json({
             code: "TIER_LIMIT_MODEL",
-            message: "Upgrade to Pro for paid models",
+            message: "Choose an included Free expert model or upgrade to Pro.",
           });
         }
         if (await houseKeyModelDenied(req.user!.id, tier, model)) {
@@ -1526,7 +1631,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       let restartMessage: Message;
       if (requestedTopic) {
-        await assertMessageAllowance(req.user!.id);
+        if (((await storage.getUser(req.user!.id))?.tier || "free") === "free" && requestedTopic.length > FREE_MAX_MESSAGE_CHARS) {
+          throw new UsageCapError({ status: 429, code: "free_message_too_long", message: `Please keep Free questions under ${FREE_MAX_MESSAGE_CHARS} characters, or upgrade to Pro.`, upgradeUrl: "/subscribe" });
+        }
+        await assertMessageAllowance(req.user!.id, `restart:${conversationId}:${randomUUID()}`);
         const conversationExperts = await storage.getConversationExperts(conversationId);
         restartMessage = await storage.createMessage({
           conversationId,
@@ -1541,6 +1649,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
       } else {
         // Bare `/new` repeats the latest farmer topic as an explicit fresh
         // run without adding an empty/command-only message to the transcript.
+        if (((await storage.getUser(req.user!.id))?.tier || "free") === "free") {
+          await assertMessageAllowance(req.user!.id, `restart:${conversationId}:${randomUUID()}`);
+        }
         restartMessage = previousUserMessage!;
       }
 
@@ -1822,15 +1933,34 @@ export async function registerRoutes(app: Express): Promise<Server> {
         const draft: CalendarDraft = { ...inspected, calendarName: conversation.title ?? "Roundtable", currentFileId: current?.id ?? null, sourceFileId, version: current?.version ?? null };
         return res.json(draft);
       }
-      const anchor = typeof req.query.start === "string" ? parseIsoDate(req.query.start) : nextMondayFrom(new Date());
+      const todayIso = new Date().toISOString().slice(0, 10);
+      const planMessages = await storage.getConversationMessages(conversationId);
+      const planFiles = await storage.getConversationFiles(conversationId);
+      const rows = extractScheduleRows(planMessages, planFiles, undefined, todayIso);
+      // Stated timing and frost dates outrank event dates; event/persisted anchors are fallbacks.
+      const firstDatedAnchor = firstDatedScheduleAnchor(rows);
+      const fileTexts = planFileTexts(planFiles);
+      const planTexts = planMessages.flatMap(message => [
+        String(message.content ?? ""),
+        ...(message.artifacts ?? []).filter(artifact => artifact.type === "table").map(artifact => artifact.content),
+      ]);
+      const planAnchor = findPlanAnchor([...planTexts, ...fileTexts], todayIso);
+      const conversationAnchor = findConversationAnchor(planMessages, todayIso, planFileTexts(planFiles));
+      const autoAnchor = resolveScheduleAnchor(planAnchor ?? firstDatedAnchor ?? conversationAnchor, todayIso);
+      const anchor = typeof req.query.start === "string" && req.query.start ? parseIsoDate(req.query.start) : autoAnchor;
       if (!anchor) return res.status(422).json({ message: "Invalid start date" });
-      const rows = extractScheduleRows(await storage.getConversationMessages(conversationId), await storage.getConversationFiles(conversationId));
-      if (!rows.length) return res.status(422).json({ message: "No schedulable items found. Ask the council for a dated plan first." });
+      // An empty schedule is a normal state, not an error: 200 keeps the sidebar's
+      // background preview from logging a 422 for every plan-less conversation.
+      if (!rows.length) return res.json({ events: [], empty: true, calendarName: conversation.title ?? "Roundtable", currentFileId: null, version: null, message: "No schedulable items found. Ask the council for a dated plan first." });
+      const planKey = createHash("sha256")
+        .update(JSON.stringify(rows.map(({ date, weekIndex, title, task, description }) => ({ date, weekIndex, title, task, description }))))
+        .digest("hex");
       const draft: CalendarDraft = {
-        events: rows.map((row, index) => ({ uid: `${conversationId}-${index}@farmfriend-roundtable`, summary: buildRowSummary(row), startDate: resolveRowStartDate(row, anchor), description: row.description })),
-        calendarName: conversation.title ?? "Roundtable", currentFileId: null, version: null,
+        events: finalizeCalendarEvents(rows.map((row, index) => ({ uid: `${conversationId}-${index}@farmfriend-roundtable`, summary: buildRowSummary(row), startDate: resolveRowStartDate(row, anchor), description: row.description })), [...planMessages.map(m => m.content), ...planFileTexts(planFiles)].map(t => findFrostAnchor(String(t ?? ""), todayIso)).find(Boolean)),
+        calendarName: calendarDisplayName(conversation.title, planMessages, planFiles), currentFileId: null, version: null,
       };
-      return res.json(draft);
+      const inputAutoAnchor = draft.events.map(event => event.startDate).sort()[0] ?? autoAnchor;
+      return res.json({ ...draft, anchor, autoAnchor: inputAutoAnchor, planKey });
     } catch {
       return res.status(422).json({ message: "This calendar could not be opened. Check that it is a valid ICS file with event start dates." });
     }
@@ -1884,33 +2014,33 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // Anchor date: ?start=YYYY-MM-DD (validated) or the next Monday, strictly
       // after today's UTC date (a Monday anchors to the following Monday).
       const startParam = typeof req.query.start === "string" ? req.query.start : "";
-      let anchor: string;
+      let anchor = "";
       if (startParam) {
         const parsed = parseIsoDate(startParam);
         if (!parsed) {
           return res.status(422).json({ error: "Invalid start date. Use YYYY-MM-DD." });
         }
         anchor = parsed;
-      } else {
-        anchor = nextMondayFrom(new Date());
       }
 
       const messages = await storage.getConversationMessages(conversationId);
       const files = await storage.getConversationFiles(conversationId);
+      const todayIso = new Date().toISOString().slice(0, 10);
+      if (!startParam) anchor = resolveScheduleAnchor(findConversationAnchor(messages, todayIso, planFileTexts(files)), todayIso);
 
-      const rows = extractScheduleRows(messages, files);
+      const rows = extractScheduleRows(messages, files, undefined, todayIso);
       if (rows.length === 0) {
         return res.status(422).json({
           error: "No schedulable items found in this conversation. Ask an expert for a week-by-week plan first.",
         });
       }
 
-      const events = rows.map((row, index) => ({
+      const events = finalizeCalendarEvents(rows.map((row, index) => ({
         uid: `${conversationId}-${index}@farmfriend-roundtable`,
         summary: buildRowSummary(row),
         startDate: resolveRowStartDate(row, anchor),
         description: row.description,
-      }));
+      })), [...messages.map(m => String(m.content ?? "")), ...planFileTexts(files)].map(t => findFrostAnchor(t, todayIso)).find(Boolean));
 
       if (req.query.preview === "1") {
         const scheduleVersions = files
@@ -2024,10 +2154,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       const body = req.body && typeof req.body === "object" ? req.body : {};
       const hasMaxTurns = Object.prototype.hasOwnProperty.call(body, "maxTurns");
-      const maxTurns = body.maxTurns;
+      let maxTurns = body.maxTurns;
       if (hasMaxTurns && maxTurns !== null && maxTurns !== 0 &&
           (typeof maxTurns !== "number" || !Number.isInteger(maxTurns) || maxTurns < 1 || maxTurns > 100)) {
         return res.status(400).json({ message: "maxTurns must be null, 0, or an integer from 1 to 100." });
+      }
+
+      if (((await storage.getUser(req.user!.id))?.tier || "free") === "free") {
+        maxTurns = Math.min(maxTurns || FREE_MAX_TURNS, FREE_MAX_TURNS);
+        await storage.updateConversation(conversationId, { turnBudget: maxTurns });
+        await persistAutonomySettings(conversationId, { maxAutonomousTurns: maxTurns });
       }
 
       if (hasMaxTurns) {

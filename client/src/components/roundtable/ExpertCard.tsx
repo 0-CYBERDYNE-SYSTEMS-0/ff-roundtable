@@ -10,9 +10,9 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { resolveExpertAvatar } from "@/lib/expert-avatar";
+import { requiresUpgradeBadge } from "@/lib/openrouter-model-options";
 
 // --- Define type for OpenRouter Model (Matching ExpertSelector) ---
 interface OpenRouterModel {
@@ -164,7 +164,10 @@ export default function ExpertCard({
             <span className="text-sm font-medium">AI Model:</span>
             
             {/* Model Selector - Using Popover instead of Select for better control */}
+            {/* modal: the picker sits inside the expert Dialog, whose scroll lock
+                otherwise swallows wheel/touch scrolling in this portaled list. */}
             <Popover 
+              modal
               open={isModelPickerOpen} 
               onOpenChange={(open) => {
                 setIsModelPickerOpen(open);
@@ -173,6 +176,7 @@ export default function ExpertCard({
             >
               <PopoverTrigger asChild>
                 <Button 
+                  type="button"
                   variant="outline" 
                   size="sm" 
                   className="h-8 px-3 w-[220px] justify-between"
@@ -186,7 +190,7 @@ export default function ExpertCard({
                   <ChevronDown className="h-4 w-4 opacity-50 ml-1" />
                 </Button>
               </PopoverTrigger>
-              <PopoverContent className="w-[300px] p-0" align="end">
+              <PopoverContent className="w-[340px] p-0" align="end" side="bottom" collisionPadding={12} data-testid="model-picker">
                 {/* Search & Filter Controls */}
                 <div className="p-3 border-b">
                   <div className="relative mb-2">
@@ -235,7 +239,7 @@ export default function ExpertCard({
                 </div>
                 
                 {/* Model List */}
-                <ScrollArea className="h-[280px]">
+                <div className="max-h-[320px] overflow-y-auto overscroll-contain" data-testid="model-picker-list">
                   {isLoadingModels ? (
                     <div className="p-3 text-center text-sm text-muted-foreground">
                       Loading models...
@@ -260,12 +264,16 @@ export default function ExpertCard({
                                   `}
                                   onClick={() => handleSelectModel(model.id)}
                                 >
-                                  <div className="flex items-center gap-2">
-                                    <ModelBadge modelId={model.id} modelName={model.name} size="sm" showId={false} />
-                                    {userTier === "free" && !model.id.endsWith(":free") && !model.id.startsWith("local/") && (
-                                      <Badge variant="secondary" className="text-[10px] px-1 py-0">PRO</Badge>
+                                  <div className="flex min-w-0 flex-col gap-0.5">
+                                    <div className="flex items-center gap-2">
+                                      <ModelBadge modelId={model.id} modelName={model.name} size="sm" showId={false} />
+                                      {userTier === "free" && requiresUpgradeBadge(model.id) && (
+                                        <Badge variant="secondary" className="text-[10px] px-1 py-0">PRO</Badge>
+                                      )}
+                                    </div>
+                                    {model.description && (
+                                      <p className="truncate text-xs text-gray-500">{model.description.substring(0, 80)}</p>
                                     )}
-                                    <p className="text-xs text-gray-500 mt-0.5">{model.description?.substring(0, 60)}{model.description?.length > 60 ? '...' : ''}</p>
                                   </div>
                                   {selectedModel === model.id && (
                                     <Check className="h-4 w-4 text-primary ml-2 flex-shrink-0" />
@@ -282,7 +290,7 @@ export default function ExpertCard({
                       No models found.
                     </div>
                   )}
-                </ScrollArea>
+                </div>
               </PopoverContent>
             </Popover>
           </div>

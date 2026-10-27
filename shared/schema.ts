@@ -29,6 +29,35 @@ export const usageMonthly = pgTable("usage_monthly", {
 
 export type UsageMonthly = typeof usageMonthly.$inferSelect;
 
+// Free capacity accounting: reservations survive restarts and unknown costs.
+export const freeSpendDays = pgTable("free_spend_days", {
+  day: text("day").primaryKey(),
+  chargedUsd: doublePrecision("charged_usd").notNull().default(0),
+});
+export const freeAiCalls = pgTable("free_ai_calls", {
+  id: text("id").primaryKey(),
+  day: text("day").notNull().references(() => freeSpendDays.day),
+  userId: integer("user_id").notNull().references(() => users.id),
+  model: text("model").notNull(),
+  actualModel: text("actual_model"),
+  generationId: text("generation_id"),
+  reservedUsd: doublePrecision("reserved_usd").notNull(),
+  costUsd: doublePrecision("cost_usd"),
+  promptTokens: integer("prompt_tokens"),
+  completionTokens: integer("completion_tokens"),
+  reasoningTokens: integer("reasoning_tokens"),
+  result: text("result").notNull().default("pending"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+// A new conversation's first farmer message counts once; /new counts again.
+// No FK to conversations: deleting a discussion must not refund its quota.
+export const freeRoundtableStarts = pgTable("free_roundtable_starts", {
+  key: text("key").primaryKey(),
+  userId: integer("user_id").notNull().references(() => users.id),
+  period: text("period").notNull(),
+});
+
 // G7: minimal orchestrator snapshot persisted per turn boundary so a server
 // restart can recover honest state — dead loops (processing_*/autonomous)
 // recover to idle; paused restores paused. Never written per token.
@@ -184,7 +213,7 @@ export const weatherCache = pgTable("weather_cache", {
 
 // Artifact type definition
 export const artifactSchema = z.object({
-  type: z.enum(["html", "json", "table", "chart", "code"]),
+  type: z.enum(["html", "json", "table", "chart", "code", "calendar"]),
   title: z.string(),
   content: z.string(),
   language: z.string().optional(),

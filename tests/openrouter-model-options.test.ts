@@ -14,6 +14,8 @@ describe("requested OpenRouter model options", () => {
       "deepseek/deepseek-v4.1-flash",
       "xiaomi/mimo-v2.6-flash",
       "openai/gpt-6-luna",
+      "anthropic/claude-haiku-5.5",
+      "minimax/minimax-m3.1-flash",
     ]);
   });
 
@@ -21,7 +23,7 @@ describe("requested OpenRouter model options", () => {
     const liveModel = { id: REQUESTED_OPENROUTER_MODELS[0].id, name: "Live catalog name", pricing: { prompt: "0" } };
     const models = withRequestedOpenRouterModels([liveModel]);
 
-    expect(models).toHaveLength(4);
+    expect(models).toHaveLength(6);
     expect(models[0]).toEqual(liveModel);
     expect(models.filter((model) => model.id === liveModel.id)).toHaveLength(1);
   });

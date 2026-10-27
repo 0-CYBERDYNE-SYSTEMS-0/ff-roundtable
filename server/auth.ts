@@ -180,7 +180,9 @@ export function setupAuth(app: Express) {
     }
     
     const user = req.user as SelectUser;
-    if (user.subscriptionStatus !== "active") {
+    // Signup/login/session behavior is unchanged. Free is a real access tier;
+    // paid accounts still follow the existing subscription-status gate.
+    if ((user.tier || "free") !== "free" && user.subscriptionStatus !== "active") {
       return res.status(403).json({ message: "Subscription required" });
     }
     

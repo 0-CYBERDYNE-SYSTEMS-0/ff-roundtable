@@ -1,9 +1,14 @@
+import { readableSourceTitle, ensureAuthoritativeFrostCitation } from "@shared/chart-artifact";
+import { buildInlineCalendarArtifact, wantsCalendar, findPersistedCalendarAnchor, replyIsWeekPlan } from "@shared/schedule-extract";
+import { calendarOfRecord } from "@shared/inline-calendar";
+import { CALENDAR_TABLE_RULE } from "./calendar-notes-prompt";
 import { storage } from "./storage";
 import { ARTIFACT_DESIGN_PROMPT } from "./artifact-design";
 import { artifactExamplesForRequest } from "./artifact-examples";
 // Import shared DB types
 import type { InsertMessage, Expert, InsertFile, Message, File, Artifact, FarmProfile, MessageStance, OpenQuestion } from "@shared/schema";
 import { extractArtifacts } from "./artifact-extractor";
+import { parseModelJson } from "./model-json";
 import { extractMentions } from "@shared/mentions";
 import OpenAI from "openai";
 import path from "path";
@@ -11,14 +16,16 @@ import fs from "fs";
 import axios from "axios";
 import { randomBytes } from "crypto";
 import { getProvider, type ChatOptions } from "./ai-providers";
-import { BUDGET_FALLBACK_MODEL, EXPERT_REPLY_MAX_TOKENS } from "./usage-caps";
+import { BUDGET_FALLBACK_MODEL, EXPERT_REPLY_MAX_TOKENS, UsageCapError, wantsDeliverable, expertReplyMaxTokens } from "./usage-caps";
+import { ensureFreeVerdictTable, hasFreeVerdictTable } from "./free-synthesis";
+import { FREE_EXPERT_MODELS } from "@shared/free-plan";
 import { findCatalogExpert } from "@shared/expert-catalog";
 import { DELIVERABLE_PLACEHOLDER, pendingDeliverableFor, pendingDeliverableByMessage } from "./pending-deliverables";
 export { commitPendingDeliverable, discardPendingDeliverable } from "./pending-deliverables";
 import { enforceCitationIntegrity, removeUnsupportedCitedSentences, stripMetaLines, undecorate, mergeDuplicateFarmerQuestions, removeRepeatedExpertSentences } from "./response-hygiene";
 import {
   buildToolUsePrompt, buildToolPlanningPrompt, parseToolPlan, runToolCalls, formatToolResultsForPrompt,
-  toolCallLimitForTier, extractDeliverable, saveExpertDeliverable, filterChartArtifacts, type ChartArtifactRejectionReason, type ChartEvidence, type ToolRun,
+  toolCallLimitForTier, rememberSharedResearch, getSharedResearch, formatSharedResearchForPrompt, rememberCanonicalFrost, restoreCanonicalFrost, getCanonicalFrost, extractDeliverable, saveExpertDeliverable, filterChartArtifacts, chartResearchUrls, type ChartArtifactRejectionReason, type ChartEvidence, type ToolRun,
 } from "./expert-tools";
 
 /** Expert tools are on by default; EXPERT_TOOLS=off disables them. Unit tests never hit the network. */
@@ -50,7 +57,7 @@ function toolPlanningModel(): string {
 /** Expert reply calls see the last N transcript messages (was 15). */
 const EXPERT_HISTORY_MESSAGES = 8;
 
-async function runExpertToolPhase(expert: Expert, question: string, userId?: number): Promise<ToolRun | null> {
+async function runExpertToolPhase(expert: Expert, question: string, userId?: number, relevanceText?: string): Promise<ToolRun | null> {
   if (!expertToolsEnabled() || expert.role === "Moderator" || expert.role === "File Creator") return null;
   let tier: string | undefined;
   try { tier = userId ? (await storage.getUser(userId))?.tier ?? undefined : undefined; } catch { tier = undefined; }
@@ -68,9 +75,27 @@ async function runExpertToolPhase(expert: Expert, question: string, userId?: num
   }
   const calls = parseToolPlan(plan, limit);
   if (!calls.length) return null;
-  const run = await runToolCalls(calls);
+  const run = await runToolCalls(calls, fetch, relevanceText ?? question);
   console.log(`[TOOLS] ${expert.role}: ${calls.length} call(s), ${run.sources.length} source(s)${run.notes.length ? `, notes: ${run.notes.join("; ")}` : ""}`);
   return run;
+}
+
+/** Farmer question + farm profile + farmer turns: what research must be relevant to (crop/region). */
+function researchRelevanceText(question: string, farmContext: string, history: Message[]): string {
+  return [question, farmContext, ...history.filter(m => m.role === "user").map(m => m.content)].join("\n");
+}
+
+/** Calendar requests get a compact dated event list inside the message itself (not only a Files-tab deliverable). */
+function attachInlineCalendar(artifacts: Artifact[], question: string, farmerText: string | undefined, reply: string, deliverable: { title: string; content: string } | null, history: Array<{ artifacts?: unknown }> = []): void {
+  if (!wantsCalendar(question + "\n" + (farmerText ?? "")) && !replyIsWeekPlan(reply)) return;
+  try {
+    // One Week-1 anchor per calendar: reuse the anchor persisted with the first calendar in this conversation.
+    const persistedAnchor = findPersistedCalendarAnchor(history as any);
+    const cal = buildInlineCalendarArtifact({ artifacts, deliverableMarkdown: deliverable?.content, deliverableTitle: deliverable?.title, contextText: [question, farmerText ?? "", reply].join("\n"), todayIso: new Date().toISOString().slice(0, 10), persistedAnchor });
+    if (cal) artifacts.push(cal);
+  } catch (error) {
+    console.warn(`[CALENDAR] inline calendar skipped: ${(error as Error).message}`);
+  }
 }
 
 function stripModelSourcesSection(content: string): string {
@@ -121,7 +146,7 @@ async function finalizeExpertTools(
   if (toolRun?.sources.length) {
     const cited = toolRun.sources.filter(s => text.includes(`[${s.id.toUpperCase()}]`) || text.includes(s.url));
     if (cited.length) {
-      const block = `\n\n**Verified sources:**\n${cited.map(s => `- [${s.id}] [${s.title || s.url}](${s.url})`).join("\n")}`;
+      const block = `\n\n**Verified sources:**\n${cited.map(s => `- [${s.id}] [${readableSourceTitle(s.title, s.url)}](${s.url})`).join("\n")}`;
       text += block; addition += block;
     }
   }
@@ -708,6 +733,7 @@ You are part of a team of experts: [${availableRoles?.join(', ') || 'various rol
   // Inject farm profile context if available
   if (farmContext) {
     basePrompt += `\n🌾 FARMER CONTEXT — You are advising a REAL farmer with this operation:\n${farmContext}\n\nCRITICAL: Tailor ALL your advice to this specific farm. Reference their crops, acreage, soil type, location, and water situation directly. Do NOT give generic advice that ignores these details.\n`;
+    basePrompt += `Use the stated farm location for growing zones, frost dates, weather, and regional recommendations. Never substitute an unrelated example location or generic USDA zone; if a local value is uncertain, research it or state the uncertainty.\n`;
   }
 
   // Inject weather context if available
@@ -721,8 +747,9 @@ Keep responses concise: lead with the answer, then include only useful evidence,
 Clearly distinguish facts supplied by the farmer, fictional or example prices and inputs, calculations, and assumptions. Keep units with values, and do not present fictional inputs as farm facts. Avoid unqualified farm-specific prescriptions when evidence or required farm inputs are missing; state the uncertainty and what is needed.
 If you need a fact only the farmer can know, ask one concise, plain-language question on its own line beginning exactly "Farmer question:". Do not use an @[User] mention for that question. If useful, put a separate next line beginning "Assuming <reasonable assumption>" and continue with that qualified assumption without waiting for the farmer to answer.
 
-DATA & VISUALS: never invent numbers. Tables and charts may only use numbers the farmer gave, the weather data provided, or sources retrieved this turn, and must say where each number came from. If you have no real data, explain in words instead of drawing a chart.
+DATA & VISUALS: never present assumed values as measured facts. Prefer real numbers: the farmer's facts, the weather data provided, and research results (yours or shared by other experts this roundtable), and say where each number came from. When the farmer asks for a chart, table, plan or other visual, deliver it: use real data when available; when it is not, build it from clearly stated typical assumptions and label it "Illustrative" in the title, with the assumptions in its description. Never refuse a requested deliverable only because farm-specific data is missing.
 
+${CALENDAR_TABLE_RULE}
 ${expert.role === "Moderator" ? "" : buildToolUsePrompt()}
 `;
 
@@ -790,6 +817,24 @@ Uploaded images are delivered to you directly as native vision input — describ
     : `\n\nAt the very end of every response, add exactly one machine-readable stance line in this format:\nSTANCE: <agree|disagree|conditional|abstain> | <confidence 1-5> | <one-line position>\nUse one of the four stance values exactly (case-insensitive), an integer confidence from 1 to 5, and a concise one-line position. Put no text after this line. This line will be removed from the farmer-facing response.`;
 
   return basePrompt + interactionPrompt + roleInstructions + (expert.role === "Moderator" ? "" : ARTIFACT_DESIGN_PROMPT) + stanceInstruction;
+}
+
+/** Extract a location explicitly stated by the farmer (profile location takes lower priority). */
+export function extractFarmerLocation(texts: string[]): string | undefined {
+  const locationPattern = /\b(?:in|near|around|from|located(?:\s+in)?|based(?:\s+in)?|location(?:\s+is|\s*:)?)\s+([A-Z][A-Za-z.'’\-]*(?:\s+[A-Z][A-Za-z.'’\-]*){0,2})(?:,\s*|\s+)([A-Z]{2}|[A-Z][A-Za-z.'’\-]*(?:\s+[A-Z][A-Za-z.'’\-]*)?)/;
+  for (const text of [...texts].reverse()) {
+    const match = String(text ?? "").match(locationPattern);
+    if (match) return `${match[1].trim().replace(/[.,;:!?]+$/, "")}, ${match[2].trim().replace(/[.,;:!?]+$/, "")}`;
+  }
+  return undefined;
+}
+
+/** Shared farm context for both expert response paths. */
+export function buildFarmContext(profile: FarmProfile | null | undefined, userTexts: string[]): string {
+  const location = extractFarmerLocation(userTexts) || profile?.location?.trim() || "";
+  if (!profile && !location) return "";
+  if (profile && !(location || profile.crops?.length || profile.farmName || profile.acres)) return "";
+  return `Farm: ${profile?.farmName || "N/A"}\nLocation: ${location || "N/A"}\nAcres: ${profile?.acres || "N/A"}\nCrops: ${(profile?.crops || []).join(", ") || "N/A"}\nSoil Type: ${profile?.soilType || "N/A"}\nWater Source: ${profile?.waterSource || "N/A"}\nClimate Zone: ${profile?.climateZone || "N/A"}\nHardiness Zone: ${profile?.hardinessZone || "N/A"}`;
 }
 
 // Function to call AI API (routes through provider abstraction)
@@ -868,6 +913,12 @@ function buildPerplexityMessages(query: string, contextMessages: AIMessage[] = [
   }, { role: "user", content: userContext }];
 }
 
+/** Research Analyst retrieval citations become shared roundtable research. */
+function rememberCitations(conversationId: number | undefined, citations?: string[]): void {
+  const urls = (citations ?? []).filter(url => /^https?:\/\//.test(url));
+  rememberSharedResearch(conversationId, urls.map(url => ({ title: url, url, snippet: "(cited by the Research Analyst)" })));
+}
+
 function appendRetrievedCitationUrls(content: string, citations?: string[]): { content: string; addition: string } {
   const urls = (citations ?? []).filter((url, index, allUrls) =>
     typeof url === "string" && url.length > 0 && allUrls.indexOf(url) === index && !content.includes(url),
@@ -886,7 +937,10 @@ function appendRetrievedCitationUrls(content: string, citations?: string[]): { c
 }
 
 // Function to call Perplexity API for web search
-export async function callPerplexityAPI(query: string, contextMessages: AIMessage[] = []): Promise<AIModelResponse> {
+export async function callPerplexityAPI(query: string, contextMessages: AIMessage[] = [], userId?: number): Promise<AIModelResponse> {
+  if (!Number.isInteger(userId) || !userId || userId < 1) {
+    throw new UsageCapError({ status: 401, code: "ai_user_required", message: "Sign in before using AI." });
+  }
   try {
     const perplexityKey = process.env.PERPLEXITY_API_KEY;
     if (!perplexityKey) {
@@ -1158,21 +1212,20 @@ export async function getExpertResponseStream(
   
   // Fetch farm profile and weather for context
   const conversation = await storage.getConversation(expert.conversationId);
-  let farmContext = "";
+  const userTexts = [...history.filter(message => message.role === "user").map(message => message.content), referenceMessageContent];
+  let farmContext = buildFarmContext(undefined, userTexts);
   let weatherContext = "";
   if (conversation) {
     try {
       const profile = await storage.getFarmProfile(conversation.userId);
-      if (profile && (profile.location || profile.crops?.length)) {
-        farmContext = `Farm: ${profile.farmName}\nLocation: ${profile.location}\nAcres: ${profile.acres || 'N/A'}\nCrops: ${(profile.crops || []).join(', ') || 'N/A'}\nSoil Type: ${profile.soilType || 'N/A'}\nWater Source: ${profile.waterSource || 'N/A'}\nClimate Zone: ${profile.climateZone || 'N/A'}\nHardiness Zone: ${profile.hardinessZone || 'N/A'}`;
-        
-        // Fetch weather if coords available
-        if (profile.lat && profile.lng) {
-          const { getWeatherForFarm, formatWeatherContext } = await import('./weather');
-          const weather = await getWeatherForFarm(profile.lat, profile.lng);
-          if (weather.ok) {
-            weatherContext = formatWeatherContext(weather.data);
-          }
+      farmContext = buildFarmContext(profile, userTexts);
+
+      // Fetch weather if coords available
+      if (profile?.lat && profile.lng) {
+        const { getWeatherForFarm, formatWeatherContext } = await import('./weather');
+        const weather = await getWeatherForFarm(profile.lat, profile.lng);
+        if (weather.ok) {
+          weatherContext = formatWeatherContext(weather.data);
         }
       }
     } catch (err) {
@@ -1215,8 +1268,13 @@ export async function getExpertResponseStream(
    // array. The 12k-char truncation applies to the TEXT part only — the
    // base64 image parts are appended verbatim, never truncated.
    // Core tools: optional research phase (search / fetch) before answering.
-   const toolRun = await runExpertToolPhase(expert, referenceMessageContent, conversation?.userId);
+   const toolRun = await runExpertToolPhase(expert, referenceMessageContent, conversation?.userId, researchRelevanceText(referenceMessageContent, farmContext, history));
    if (toolRun) messages.push({ role: "system", content: formatToolResultsForPrompt(toolRun) });
+   rememberSharedResearch(expert.conversationId, toolRun?.sources ?? []);
+   const sharedResearch = getSharedResearch(expert.conversationId);
+   restoreCanonicalFrost(expert.conversationId, history);
+   const sharedBlock = formatSharedResearchForPrompt(sharedResearch, toolRun?.sources.map(s => s.url) ?? [], getCanonicalFrost(expert.conversationId));
+   if (sharedBlock) messages.push({ role: "system", content: sharedBlock });
    if (retryInstruction?.trim()) messages.push({ role: "system", content: retryInstruction.trim() });
 
    const userText = truncateForModel(referenceMessageContent);
@@ -1236,7 +1294,7 @@ export async function getExpertResponseStream(
     if (expert.role === "Research Analyst") {
       // Use OpenRouter streaming for Research Analyst (Perplexity optional)
       if (process.env.PERPLEXITY_API_KEY && process.env.PERPLEXITY_API_KEY.length > 10) {
-        response = await callPerplexityAPI(referenceMessageContent, messages);
+        response = await callPerplexityAPI(referenceMessageContent, messages, conversation?.userId);
         stance = stripExpertStance(response, expert.role);
         onToken(response.message.content);
       } else {
@@ -1248,7 +1306,7 @@ export async function getExpertResponseStream(
           streamFilter ? token => streamFilter!.push(token) : onToken,
           conversation?.userId,
           paidWebPluginEnabled(),
-          { maxTokens: EXPERT_REPLY_MAX_TOKENS },
+          { maxTokens: expertReplyMaxTokens(referenceMessageContent), deliverable: wantsDeliverable(referenceMessageContent) },
         );
         streamFilter?.finish();
         stance = stripExpertStance(response, expert.role);
@@ -1273,7 +1331,7 @@ export async function getExpertResponseStream(
         streamFilter ? token => streamFilter!.push(token) : onToken,
         conversation?.userId,
         false,
-        { maxTokens: EXPERT_REPLY_MAX_TOKENS },
+        { maxTokens: expertReplyMaxTokens(referenceMessageContent), deliverable: wantsDeliverable(referenceMessageContent), capable: expert.role === "Moderator" },
       );
       streamFilter?.finish();
       stance = stripExpertStance(response, expert.role);
@@ -1287,13 +1345,16 @@ export async function getExpertResponseStream(
       ? { deliverable: null, cleanContent: response.message.content }
       : extractDeliverable(response.message.content);
     const extracted = extractArtifacts(deliverableSplit.cleanContent);
-    const allowedChartUrls = toolRun?.sources.map(src => src.url) ?? [];
+    rememberCitations(expert.conversationId, response.citations);
+    const allowedChartUrls = [...(toolRun?.sources.map(src => src.url) ?? []), ...getSharedResearch(expert.conversationId).map(src => src.url)];
     const chartEvidence: ChartEvidence = {
       farmerText: history.filter(message => message.role === "user").map(message => message.content).join("\n"),
       weatherText: weatherContext,
+      researchUrls: chartResearchUrls(response.message.content, [...(toolRun?.sources ?? []), ...getSharedResearch(expert.conversationId)]),
     };
     const { kept: artifacts, dropped: droppedCharts, droppedReasons } = filterChartArtifacts(extracted.artifacts, allowedChartUrls, chartEvidence);
     logRejectedCharts(expert.role, droppedReasons);
+    attachInlineCalendar(artifacts, referenceMessageContent, chartEvidence.farmerText, response.message.content, deliverableSplit.deliverable, history);
     const finalized = expert.role === "File Creator" || expert.role === "Moderator"
       ? { content: extracted.cleanContent, addition: "" }
       : await finalizeExpertTools(expert, extracted.cleanContent, toolRun, deliverableSplit.deliverable, history);
@@ -1307,6 +1368,9 @@ export async function getExpertResponseStream(
       ? appendRetrievedCitationUrls(cleanContent, response.citations)
       : { content: cleanContent, addition: "" };
     if (researchAnswer.addition) onToken(researchAnswer.addition);
+    const frostRef = expert.role === "Moderator" || expert.role === "File Creator" ? { content: researchAnswer.content, addition: "" } : ensureAuthoritativeFrostCitation(researchAnswer.content, referenceMessageContent, [...(toolRun?.sources ?? []), ...getSharedResearch(expert.conversationId)]);
+    if (frostRef.addition) { onToken(frostRef.addition); researchAnswer.content = frostRef.content; }
+    rememberCanonicalFrost(expert.conversationId, researchAnswer.content, [...(toolRun?.sources ?? []), ...getSharedResearch(expert.conversationId)]);
 
     const streamedMessage: InsertMessage = {
       conversationId: expert.conversationId,
@@ -1333,6 +1397,7 @@ export async function getExpertResponseStream(
   } catch (error) {
     console.error(`[STREAM] Response generation failed for expert ${expert.name}`);
     streamFilter?.finish();
+    if (error instanceof UsageCapError && error.denial.code === "free_capacity_used") throw error;
     const errorMsg = expertResponseErrorMessage(error, expert.name, imageParts);
     onToken(errorMsg); // Show error inline
     const failedResponse: InsertMessage = {
@@ -1363,10 +1428,18 @@ export async function getExpertResponse(
   deliverableRequest?: DeliverableGenerationRequest,
 ): Promise<InsertMessage> { 
   console.log(`Generating response for expert: ${expert.name} (${expert.role})`);
-  // G6: fetch the conversation for its council charter (farm/weather context
-  // is only wired into the streaming path).
+  // G6: fetch the conversation for its council charter and farm context.
   const conversation = await storage.getConversation(expert.conversationId);
-  const systemPrompt = generateSystemPrompt(expert, availableRoles, undefined, undefined, conversation?.charter ?? null);
+  const userTexts = [...history.filter(message => message.role === "user").map(message => message.content), referenceMessageContent];
+  let farmContext = buildFarmContext(undefined, userTexts);
+  if (conversation) {
+    try {
+      farmContext = buildFarmContext(await storage.getFarmProfile(conversation.userId), userTexts);
+    } catch (error) {
+      console.warn("Could not fetch farm context:", (error as Error).message);
+    }
+  }
+  const systemPrompt = generateSystemPrompt(expert, availableRoles, farmContext, undefined, conversation?.charter ?? null);
   
   const messages: AIMessage[] = [
     { role: "system", content: systemPrompt }
@@ -1409,6 +1482,12 @@ export async function getExpertResponse(
         : { role: "user", content: userText }
    );
 
+   const toolRunNs = await runExpertToolPhase(expert, referenceMessageContent, conversation?.userId, researchRelevanceText(referenceMessageContent, "", history));
+   if (toolRunNs) messages.push({ role: "system", content: formatToolResultsForPrompt(toolRunNs) });
+   rememberSharedResearch(expert.conversationId, toolRunNs?.sources ?? []);
+   restoreCanonicalFrost(expert.conversationId, history);
+   const sharedBlockNs = formatSharedResearchForPrompt(getSharedResearch(expert.conversationId), toolRunNs?.sources.map(s => s.url) ?? [], getCanonicalFrost(expert.conversationId));
+   if (sharedBlockNs) messages.push({ role: "system", content: sharedBlockNs });
    console.log(`[DEBUG] Sending ${messages.length} messages to LLM for ${expert.role}${imageParts.length > 0 ? ` (with ${imageParts.length} image part${imageParts.length > 1 ? "s" : ""})` : ""}.`);
 
   try {
@@ -1417,9 +1496,9 @@ export async function getExpertResponse(
     
     if (expert.role === "Research Analyst") {
       if (process.env.PERPLEXITY_API_KEY) {
-        response = await callPerplexityAPI(referenceMessageContent, messages);
+        response = await callPerplexityAPI(referenceMessageContent, messages, conversation?.userId);
       } else {
-        response = await callOpenRouterAPI(messages, expert.model, conversation?.userId, paidWebPluginEnabled(), { maxTokens: EXPERT_REPLY_MAX_TOKENS });
+        response = await callOpenRouterAPI(messages, expert.model, conversation?.userId, paidWebPluginEnabled(), { maxTokens: expertReplyMaxTokens(referenceMessageContent), deliverable: wantsDeliverable(referenceMessageContent) });
       }
     } 
     else if (expert.role === "File Creator") {
@@ -1431,7 +1510,7 @@ export async function getExpertResponse(
        response.message.content = deliverableSuccessMessage(saved, request);
     }
     else {
-      response = await callOpenRouterAPI(messages, expert.model, conversation?.userId, false, { maxTokens: EXPERT_REPLY_MAX_TOKENS });
+      response = await callOpenRouterAPI(messages, expert.model, conversation?.userId, false, { maxTokens: expertReplyMaxTokens(referenceMessageContent), deliverable: wantsDeliverable(referenceMessageContent), capable: expert.role === "Moderator" });
     }
 
     if (expert.role !== "File Creator") {
@@ -1439,16 +1518,21 @@ export async function getExpertResponse(
     }
     
     requireNonEmptyAssistantContent(response);
+    rememberCitations(expert.conversationId, response.citations);
     const extractedNonStream = extractArtifacts(response.message.content);
     const chartEvidence: ChartEvidence = {
       farmerText: history.filter(message => message.role === "user").map(message => message.content).join("\n"),
+      researchUrls: chartResearchUrls(response.message.content, [...(toolRunNs?.sources ?? []), ...getSharedResearch(expert.conversationId)]),
     };
-    const { kept: artifacts, dropped: droppedCharts, droppedReasons } = filterChartArtifacts(extractedNonStream.artifacts, [], chartEvidence);
+    const { kept: artifacts, dropped: droppedCharts, droppedReasons } = filterChartArtifacts(extractedNonStream.artifacts, [...(toolRunNs?.sources.map(src => src.url) ?? []), ...getSharedResearch(expert.conversationId).map(src => src.url)], chartEvidence);
     logRejectedCharts(expert.role, droppedReasons);
+    attachInlineCalendar(artifacts, referenceMessageContent, chartEvidence.farmerText, response.message.content, null, history);
     const cleanContent = extractedNonStream.cleanContent + (droppedCharts ? CHART_REJECTION_NOTICE : "");
     const researchAnswer = expert.role === "Research Analyst"
       ? appendRetrievedCitationUrls(cleanContent, response.citations)
       : { content: cleanContent, addition: "" };
+    if (expert.role !== "Moderator" && expert.role !== "File Creator") researchAnswer.content = ensureAuthoritativeFrostCitation(researchAnswer.content, referenceMessageContent, [...(toolRunNs?.sources ?? []), ...getSharedResearch(expert.conversationId)]).content;
+    rememberCanonicalFrost(expert.conversationId, researchAnswer.content, [...(toolRunNs?.sources ?? []), ...getSharedResearch(expert.conversationId)]);
 
     return {
       conversationId: expert.conversationId,
@@ -1468,6 +1552,7 @@ export async function getExpertResponse(
 
   } catch (error) {
     console.error(`Response generation failed for expert ${expert.name}`);
+    if (error instanceof UsageCapError && error.denial.code === "free_capacity_used") throw error;
     const errorMsg = expertResponseErrorMessage(error, expert.name, imageParts);
     const failedResponse: InsertMessage = {
       conversationId: expert.conversationId,
@@ -1512,6 +1597,7 @@ export function buildClosingSynthesisPrompt(
   stanceLedger: Record<string, MessageStance | null> = {},
   openQuestions: OpenQuestion[] = [],
   charter?: string | null,
+  calendarRecord = "",
 ): string {
   const stanceEntries = Object.entries(stanceLedger).map(([expertRole, stance]) => ({
     expertRole,
@@ -1553,6 +1639,11 @@ ${hasNonAbstainingStance
 ${charter?.trim()
     ? `Measure the outcome against the council charter, including its goal and stop criteria:\n${charter.trim()}`
     : ""}
+${calendarRecord
+    ? `The farmer's calendar already shows these dated events. Any date you give for these actions must match this list exactly. If an expert's text gave a different date, use the calendar's date and say the expert's date differs; never state a conflicting date:\n${calendarRecord}`
+    : ""}
+
+Directly under “## Verdict”, include a markdown table summarizing the ledger with exactly these columns: | Expert | Stance | Confidence | Position |, one row per expert role (write "none recorded" for a null stance). Give the table a short bold caption line above it, not a heading.
 
 Under “Open questions for you,” list the open questions for the farmer. Under “Assumptions awaiting confirmation,” list their paired assumptions. If a list is empty, say that none remain.`;
 }
@@ -1595,14 +1686,34 @@ export async function generateInsights(conversationId: number, broadcastFn?: (co
     }
 
     const conversation = await storage.getConversation(conversationId);
-    const response = await callOpenRouterAPI([
-      { role: "system", content: "You extract key insights from agricultural conversations. Respond only with the requested JSON format." },
+    const insightMessages: AIMessage[] = [
+      { role: "system", content: "You extract key insights from agricultural conversations. Respond only with the requested JSON format: a single JSON object, no code fences, no prose." },
       { role: "user", content: insightPrompt }
-    ], auxModel, conversation?.userId);
-    
+    ];
+    let response = await callOpenRouterAPI(insightMessages, auxModel, conversation?.userId, false, { purpose: "auxiliary" });
+    const isFree = ((await storage.getUser(conversation!.userId))?.tier || "free") === "free";
+    type InsightJson = { title?: unknown; points?: unknown };
+    const valid = (d: InsightJson | null): d is { title: string; points: string[] } =>
+      Boolean(d && typeof d.title === "string" && d.title.trim() && Array.isArray(d.points) &&
+        d.points.length > 0 && d.points.every(p => typeof p === "string" && p.trim()));
+    let parsedInsights = parseModelJson<InsightJson>(response.message.content);
+    if (!valid(parsedInsights)) {
+      // One retry with the bad output echoed back and a stricter instruction.
+      response = await callOpenRouterAPI([
+        ...insightMessages,
+        { role: "assistant", content: String(response.message.content ?? "").slice(0, 4000) },
+        { role: "user", content: 'That was not valid JSON. Reply again with ONLY {"title": string, "points": [string, ...]} and nothing else.' },
+      ], auxModel, conversation?.userId, false, {
+        purpose: "auxiliary",
+        ...(isFree ? { freeModelOverride: FREE_EXPERT_MODELS[0] } : {}),
+      });
+      parsedInsights = parseModelJson<InsightJson>(response.message.content);
+    }
+
     try {
-      const insightData = JSON.parse(response.message.content);
-      
+      const insightData = parsedInsights as any;
+      if (!valid(parsedInsights)) throw new Error("no valid structured insights after retry");
+
       if (insightData.title && Array.isArray(insightData.points) && insightData.points.length > 0) {
         console.log(`Storing insights for conversation ${conversationId}:`, insightData);
         await storage.createInsight({ 
@@ -1702,7 +1813,7 @@ export async function getModeratorNextSpeakerSuggestion(
             return null;
         }
 
-        const response = await callOpenRouterAPI(messages, auxModel, conversation?.userId);
+        const response = await callOpenRouterAPI(messages, auxModel, conversation?.userId, false, { purpose: "auxiliary" });
         const responseContent = response?.message?.content;
         if (typeof responseContent !== "string" || !responseContent.trim()) {
             console.warn("Moderator returned no next-speaker text. Falling back to round-robin.");
@@ -1737,6 +1848,7 @@ export async function getModeratorNextSpeakerSuggestion(
         console.warn(`Moderator suggested an invalid role: '${rawSuggestion}'. Falling back.`);
         return null;
     } catch (error) {
+        if (error instanceof UsageCapError && error.denial.code === "free_capacity_used") throw error;
         console.error("Error preparing or querying Moderator for next speaker:", error);
         return null;
     }
@@ -1773,7 +1885,7 @@ export async function generateClosingSynthesis(
     const firstExpertModel = experts.find(expert => expert.role !== "Moderator")?.model ?? null;
     const closingModel = resolveAuxModel(moderatorExpert.model, firstExpertModel);
 
-    const closingPrompt = buildClosingSynthesisPrompt(stanceLedger, openQuestions, charter);
+    const closingPrompt = buildClosingSynthesisPrompt(stanceLedger, openQuestions, charter, calendarOfRecord(history));
 
     const messages: AIMessage[] = [
       { role: "system", content: systemPrompt },
@@ -1797,14 +1909,36 @@ export async function generateClosingSynthesis(
     if (!closingModel) {
       throw new Error("No auxiliary model could be resolved for the Moderator closing synthesis.");
     }
-    const response = await callOpenRouterAPIStream(messages, closingModel, (token) => {
+    const isFree = ((await storage.getUser(conversation!.userId))?.tier || "free") === "free";
+    // Buffer Free synthesis until its structure is validated so a retry does
+    // not append a second, contradictory answer to an already visible stream.
+    const emitToken = (token: string) => {
       broadcastFn(conversationId, {
         type: "expert_stream_token",
         expertId: moderatorExpert.id,
         token,
       });
-    }, conversation?.userId);
-    const content = response.message.content;
+    };
+    let response = await callOpenRouterAPIStream(messages, closingModel,
+      isFree ? () => {} : emitToken,
+      conversation?.userId, false, { purpose: "auxiliary" });
+    let content = response.message.content;
+    if (isFree) {
+      if (!hasFreeVerdictTable(content, stanceLedger)) {
+        console.warn(`[SYNTHESIS] Invalid structured closing output for ${conversationId}; retrying once on Haiku fallback.`);
+        response = await callOpenRouterAPIStream([
+          ...messages,
+          { role: "assistant", content: String(content ?? "").slice(0, 4000) },
+          { role: "user", content: "Correct the structure: return the requested Markdown sections, including ## Verdict and the Expert | Stance | Confidence | Position table using only the recorded stance ledger." },
+        ], closingModel, () => {}, conversation?.userId, false, {
+          purpose: "auxiliary", freeModelOverride: FREE_EXPERT_MODELS[0],
+        });
+        content = response.message.content;
+      }
+      if (!content?.trim()) throw new Error("The Moderator returned no synthesis after retry.");
+      content = ensureFreeVerdictTable(content, stanceLedger);
+      emitToken(content);
+    }
 
     const storedMessage = await storage.createMessage({
       conversationId,
@@ -1825,6 +1959,7 @@ export async function generateClosingSynthesis(
     console.log(`[SYNTHESIS] Closing synthesis stored and broadcast for conversation ${conversationId}`);
   } catch (error) {
     console.error(`[SYNTHESIS] Error generating closing synthesis for conversation ${conversationId}:`, error);
+    if (error instanceof UsageCapError && error.denial.code === "free_capacity_used") throw error;
     // Honest-error convention: persist the failure (survives refetches), keep
     // the synthesis flag, and still close the stream so the client is never
     // left with a spinner. Re-throw nothing — the orchestrator chain continues

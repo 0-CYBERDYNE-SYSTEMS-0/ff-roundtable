@@ -19,6 +19,7 @@ import { File as FileSchema, Conversation } from "@shared/schema";
 import { addDays, format } from "date-fns";
 import CalendarPreviewDialog from "./CalendarPreviewDialog";
 import type { CalendarDraft } from "@shared/calendar-draft";
+import { readCalendarStartOverride } from "@shared/calendar-anchor";
 
 type CalendarPreview = {
   eventCount: number;
@@ -28,16 +29,11 @@ type CalendarPreview = {
   scheduleVersion: string;
 };
 
-function nextMondayDate(): string {
-  const today = new Date();
-  return format(addDays(today, ((8 - today.getDay()) % 7) || 7), "yyyy-MM-dd");
-}
 
-function readCalendarStart(conversationId: number | null): string | null {
-  if (!conversationId) return null;
+function readCalendarStart(conversationId: number | null, planKey: string): string | null {
+  if (!conversationId || !planKey) return null;
   try {
-    const value = localStorage.getItem(`farmFriendCalendarStart:${conversationId}`);
-    return value && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : null;
+    return readCalendarStartOverride(localStorage.getItem(`farmFriendCalendarStart:${conversationId}`), planKey);
   } catch {
     return null;
   }
@@ -53,6 +49,8 @@ interface SidebarPanelProps {
   onExportMarkdown: () => void;
   onCollapse?: () => void;
   canExportIcs?: boolean;
+  /** Changes whenever a turn adds plan artifacts; refreshes Week 1 + preview without a reload. */
+  planRevision?: number;
   onFileUpload: (file: File) => void;
   onSelectConversation: (id: number) => void;
   onRenameConversation: (id: number, title: string) => void;
@@ -84,21 +82,30 @@ export default function SidebarPanel({
   filesError = false,
   isStartingNewSession = false,
   isUploading = false,
+  planRevision = 0,
 }: SidebarPanelProps) {
   const [conversationSearch, setConversationSearch] = useState("");
   const [editingConversationId, setEditingConversationId] = useState<number | null>(null);
   const [editingTitle, setEditingTitle] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<ConversationSummary | null>(null);
-  const [calendarStart, setCalendarStart] = useState(() => readCalendarStart(activeConversationId) ?? nextMondayDate());
+  const [calendarStart, setCalendarStart] = useState('');
+  const [calendarStartPlanKey, setCalendarStartPlanKey] = useState('');
+  const [calendarPlanKey, setCalendarPlanKey] = useState('');
+  // Plan-derived Week 1 (frost date / requested season / today) shown when the farmer has not picked one.
+  const [autoAnchor, setAutoAnchor] = useState('');
   const [calendarPreview, setCalendarPreview] = useState<CalendarPreview | null>(null);
   const [isLoadingCalendarPreview, setIsLoadingCalendarPreview] = useState(false);
   const [calendarPreviewError, setCalendarPreviewError] = useState<"empty" | "unavailable" | null>(null);
   const [isCalendarSectionOpen, setIsCalendarSectionOpen] = useState(false);
   const [openCalendar, setOpenCalendar] = useState<{ fileId?: number } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const selectedCalendarStart = calendarStart && calendarStartPlanKey === calendarPlanKey ? calendarStart : '';
 
   useEffect(() => {
-    setCalendarStart(readCalendarStart(activeConversationId) ?? nextMondayDate());
+    setCalendarStart('');
+    setCalendarStartPlanKey('');
+    setCalendarPlanKey('');
+    setAutoAnchor('');
     setCalendarPreview(null);
     setIsLoadingCalendarPreview(false);
     setCalendarPreviewError(null);
@@ -115,7 +122,8 @@ export default function SidebarPanel({
   }, [canExportIcs]);
 
   useEffect(() => {
-    if (!activeConversationId || !calendarStart) {
+    // Empty start = auto: the plan's first dated event or its stated anchor, resolved server-side.
+    if (!activeConversationId) {
       setCalendarPreview(null);
       setIsLoadingCalendarPreview(false);
       setCalendarPreviewError(null);
@@ -128,12 +136,12 @@ export default function SidebarPanel({
       setCalendarPreviewError(null);
       try {
         const response = await fetch(
-          `/api/protected/conversations/${activeConversationId}/calendar?start=${encodeURIComponent(calendarStart)}`,
+          `/api/protected/conversations/${activeConversationId}/calendar?start=${encodeURIComponent(selectedCalendarStart)}`,
           { credentials: "include" },
         );
         if (!response.ok) {
-          const result = await response.json().catch(() => ({})) as { message?: string };
-          if (response.status === 422 && result.message?.includes("No schedulable items")) {
+          const result = await response.json().catch(() => ({})) as { message?: string; error?: string };
+          if (response.status === 422 && (result.message ?? result.error)?.includes("No schedulable items")) {
             if (!cancelled) {
               setCalendarPreview(null);
               setCalendarPreviewError("empty");
@@ -142,8 +150,42 @@ export default function SidebarPanel({
           }
           throw new Error("Schedule preview unavailable");
         }
-        const draft = await response.json() as CalendarDraft;
+        const draft = await response.json() as CalendarDraft & { empty?: boolean; autoAnchor?: string; planKey?: string };
+        if (!cancelled && draft.autoAnchor) setAutoAnchor(draft.autoAnchor);
+        if (!cancelled && draft.planKey) {
+          setCalendarPlanKey(draft.planKey);
+          const hasCurrentPlanSelection = !!selectedCalendarStart && calendarStartPlanKey === draft.planKey;
+          if (!hasCurrentPlanSelection) {
+            const savedStart = readCalendarStart(activeConversationId, draft.planKey);
+            if (savedStart) {
+              setCalendarStart(savedStart);
+              setCalendarStartPlanKey(draft.planKey);
+              return;
+            }
+            if (selectedCalendarStart) {
+              setCalendarStart('');
+              setCalendarStartPlanKey('');
+              return;
+            }
+          }
+        }
+        if (draft.empty || draft.events.length === 0) {
+          if (!cancelled) {
+            setCalendarPreview(null);
+            setCalendarPreviewError("empty");
+          }
+          return;
+        }
         const startDate = draft.events.map(event => event.startDate).sort()[0];
+        if (selectedCalendarStart && selectedCalendarStart !== startDate && draft.planKey) {
+          setCalendarStart(startDate);
+          setCalendarStartPlanKey(draft.planKey);
+          try {
+            localStorage.setItem(`farmFriendCalendarStart:${activeConversationId}`, JSON.stringify({ startDate, planKey: draft.planKey }));
+          } catch {
+            // Keep the rendered plan's first date in the input for this session.
+          }
+        }
         const preview: CalendarPreview = {
           eventCount: draft.events.length, startDate, year: Number(startDate.slice(0, 4)),
           timeZone: "All-day dates (timezone-neutral)", scheduleVersion: draft.version ? `Calendar v${draft.version}` : "Current conversation schedule",
@@ -166,7 +208,7 @@ export default function SidebarPanel({
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [activeConversationId, canExportIcs, calendarStart, files]);
+  }, [activeConversationId, canExportIcs, calendarPlanKey, calendarStartPlanKey, files, planRevision, selectedCalendarStart]);
 
   const handleFileUploadClick = () => {
     fileInputRef.current?.click();
@@ -242,15 +284,18 @@ export default function SidebarPanel({
               Week 1 starts
               <input
                 type="date"
-                value={calendarStart}
+                value={selectedCalendarStart || autoAnchor}
                 onChange={(event) => {
                   const value = event.target.value;
                   setCalendarStart(value);
+                  setCalendarStartPlanKey(calendarPlanKey);
                   setCalendarPreview(null);
                   setCalendarPreviewError(null);
                   if (activeConversationId) {
                     try {
-                      localStorage.setItem(`farmFriendCalendarStart:${activeConversationId}`, value);
+                      const key = `farmFriendCalendarStart:${activeConversationId}`;
+                      if (value && calendarPlanKey) localStorage.setItem(key, JSON.stringify({ startDate: value, planKey: calendarPlanKey }));
+                      else localStorage.removeItem(key);
                     } catch {
                       // The selected anchor remains active for this session.
                     }
@@ -274,7 +319,7 @@ export default function SidebarPanel({
               variant="outline"
               className="w-full mt-2 border-2 border-farm-dark-green text-farm-dark-green hover:bg-farm-dark-green hover:text-white rounded-lg px-4 py-2.5 flex items-center justify-center transition-all duration-200 font-medium"
               onClick={() => setOpenCalendar({})}
-              disabled={!activeConversationId || !calendarStart}
+              disabled={!activeConversationId || !calendarPreview?.eventCount}
               title="Review and edit your calendar before exporting (.ics)"
             >
               <CalendarDays className="mr-2 h-4 w-4" />
@@ -509,7 +554,7 @@ export default function SidebarPanel({
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-      {openCalendar && activeConversationId && <CalendarPreviewDialog key={`${activeConversationId}:${openCalendar.fileId ?? "plan"}`} conversationId={activeConversationId} start={calendarStart} fileId={openCalendar.fileId} onClose={() => setOpenCalendar(null)} />}
+      {openCalendar && activeConversationId && <CalendarPreviewDialog key={`${activeConversationId}:${openCalendar.fileId ?? "plan"}`} conversationId={activeConversationId} start={selectedCalendarStart || autoAnchor} fileId={openCalendar.fileId} onClose={() => setOpenCalendar(null)} />}
     </aside>
   );
 }
