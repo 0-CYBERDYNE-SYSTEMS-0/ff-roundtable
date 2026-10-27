@@ -27,6 +27,20 @@ const features = [
   },
 ];
 
+const demoShots = [
+  { file: "01-conversation-climate-planting", lg: [1440, 900], sm: [720, 450], text: "Ask a planting question; the roundtable answers with a sourced NOAA climate chart for Eugene, OR." },
+  { file: "02-chart-eugene-tavg-daily-normals-heatmap", lg: [1224, 1244], sm: [720, 732], text: "NOAA 1991–2020 daily average-temperature normals for Eugene, OR (station USW00024221), shown as a calendar heatmap." },
+  { file: "03-chart-eugene-daily-temperature-range", lg: [1224, 1244], sm: [720, 732], text: "Eugene's typical daily low, high, and average temperature across the year (NOAA 1991–2020 normals)." },
+  { file: "04-chart-osu-region-2-planting-windows", lg: [1224, 1180], sm: [720, 694], text: "Planting windows for 11 vegetables from OSU Extension EM 9027, Region 2 guidance." },
+  { file: "05-chart-eugene-monthly-climate-normals", lg: [1224, 1166], sm: [720, 686], text: "Eugene monthly temperature and precipitation normals, NOAA NCEI 1991–2020." },
+  { file: "06-chart-daily-tmax-normals-ridgeline", lg: [1224, 1648], sm: [720, 969], text: "How daily high-temperature normals are distributed in each month in Eugene (NOAA 1991–2020)." },
+  { file: "07-conversation-planting-calendar-ics", lg: [1440, 900], sm: [720, 450], text: "Turn OSU planting guidance into a downloadable calendar with review reminders." },
+  { file: "08-artifacts-tab", lg: [1440, 966], sm: [720, 483], text: "Every chart and calendar from the session is saved in one Artifacts tab, with its sources attached." },
+  { file: "09-insights-panel", lg: [1440, 900], sm: [720, 450], text: "Insights lists the public sources behind each answer, and what they can't tell you." },
+] as const;
+
+const demoSizes = "(max-width: 760px) calc(100vw - 40px), (max-width: 1024px) calc(50vw - 40px), 364px";
+
 export default function LandingPage() {
   const { user, isLoading } = useAuth();
   const registerHref = isLoading ? "/auth" : user ? "/" : "/sign-up";
@@ -72,6 +86,28 @@ export default function LandingPage() {
                 <h3>{feature.title}</h3>
                 <p>{feature.body}</p>
               </article>
+            ))}
+          </div>
+        </div>
+      </section>
+      <section className="ff-section ff-demo" id="demo" aria-labelledby="demo-title">
+        <div className="ff-section-inner">
+          <h2 id="demo-title">Screenshots</h2>
+          <div className="ff-demo-grid">
+            {demoShots.map((shot) => (
+              <figure className="ff-demo-item" key={shot.file}>
+                <img
+                  src={`/images/demo/${shot.file}-720.webp`}
+                  srcSet={`/images/demo/${shot.file}-720.webp ${shot.sm[0]}w, /images/demo/${shot.file}-1440.webp ${shot.lg[0]}w`}
+                  sizes={demoSizes}
+                  width={shot.sm[0]}
+                  height={shot.sm[1]}
+                  loading="lazy"
+                  decoding="async"
+                  alt={shot.text}
+                />
+                <figcaption>{shot.text}</figcaption>
+              </figure>
             ))}
           </div>
         </div>
