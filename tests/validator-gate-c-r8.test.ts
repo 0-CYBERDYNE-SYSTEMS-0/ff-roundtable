@@ -96,4 +96,16 @@ describe("/api/version", () => {
     if (prev[0] !== undefined) process.env.BUILD_SHA = prev[0];
     if (prev[1] !== undefined) process.env.REPLIT_GIT_COMMIT = prev[1];
   });
+  it("buildSha prefers env, then the build-baked sha, then git", () => {
+    const keys = ["GIT_SHA", "REPLIT_GIT_COMMIT", "SOURCE_VERSION", "BUILD_SHA"] as const;
+    const prev = keys.map(k => process.env[k]);
+    keys.forEach(k => delete process.env[k]);
+    resetBuildShaCache();
+    expect(buildSha(() => "1111111aaa", () => "7e3cebdabc")).toBe("7e3cebd");
+    resetBuildShaCache();
+    process.env.SOURCE_VERSION = "abc1234def";
+    expect(buildSha(() => "1111111aaa", () => "7e3cebdabc")).toBe("abc1234");
+    resetBuildShaCache();
+    keys.forEach((k, i) => { if (prev[i] === undefined) delete process.env[k]; else process.env[k] = prev[i]; });
+  });
 });
